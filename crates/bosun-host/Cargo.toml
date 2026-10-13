@@ -1,0 +1,21 @@
+[package]
+name = "bosun-host"
+version = "0.0.0"
+description = "bosun host: OS/arch/distro detection, privilege, Machine impls, backend probe registry."
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bosun-core.workspace = true
+bosun-ports.workspace = true
+bosun-backends.workspace = true
+annals-diagnostic.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

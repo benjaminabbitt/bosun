@@ -1,0 +1,26 @@
+# bacon — background checker. `bacon --init` default, tuned for bosun.
+
+default_job = "clippy"
+
+[jobs.clippy]
+command = ["cargo", "clippy", "--all-targets", "--color", "always"]
+need_stdout = false
+
+[jobs.clippy-all]
+command = ["cargo", "clippy", "--all-targets", "--", "-D", "warnings"]
+need_stdout = false
+
+[jobs.check]
+command = ["cargo", "check", "--all-targets", "--color", "always"]
+need_stdout = false
+
+[jobs.test]
+command = ["cargo", "test", "--workspace", "--color", "always"]
+need_stdout = true
+
+[jobs.fmt]
+command = ["cargo", "fmt", "--all", "--", "--check"]
+need_stdout = true
+
+[keybindings]
+c = "job:clippy-all"

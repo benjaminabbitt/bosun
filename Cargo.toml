@@ -1,0 +1,57 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.99"
+license = "EUPL-1.2"
+# Not published to crates.io (git dependency on annals); shipped as release binaries.
+publish = false
+
+# Every crate opts in with `[lints] workspace = true`.
+[workspace.lints.clippy]
+invisible_characters = "deny"
+unicode_not_nfc = "deny"
+non_ascii_literal = "deny"
+
+[workspace.dependencies]
+# Internal crates.
+bosun-core = { path = "crates/bosun-core" }
+bosun-ports = { path = "crates/bosun-ports" }
+bosun-backends = { path = "crates/bosun-backends" }
+bosun-resolve = { path = "crates/bosun-resolve" }
+bosun-io = { path = "crates/bosun-io" }
+bosun-apply = { path = "crates/bosun-apply" }
+bosun-host = { path = "crates/bosun-host" }
+
+# annals — shared by git only, pinned to an exact rev (EUPL-1.2).
+annals-diagnostic = { git = "https://github.com/benjaminabbitt/annals.git", rev = "3c5fbac3d7b29cef40b7aca0b363208a83a085a5" }
+annals-yaml = { git = "https://github.com/benjaminabbitt/annals.git", rev = "3c5fbac3d7b29cef40b7aca0b363208a83a085a5" }
+
+# Version grammars (§6): reference impls where they exist.
+deb-version = "0.1.1"
+semver = "1.0.28"
+
+# Serialization: JSON for lock/state, YAML for --format yaml output.
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+serde_norway = "0.9.42"
+
+# CLI, logging, errors.
+clap = { version = "4.6.7", features = ["derive", "env"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+thiserror = "2.0.21"
+
+# github-release backend: sync HTTP (no async runtime), checksum, archive extraction.
+ureq = { version = "3.4.2", features = ["json"] }
+sha2 = "0.11.1"
+flate2 = "1.1.10"
+tar = "0.4.46"
+
+# Config/state directory resolution (XDG on Linux).
+etcetera = "0.11.0"
+
+# Test support.
+tempfile = "3"

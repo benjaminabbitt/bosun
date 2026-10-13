@@ -1,0 +1,23 @@
+[package]
+name = "bosun-io"
+version = "0.0.0"
+description = "bosun I/O: manifest/config (annals-yaml), lockfile and machine state (JSON), paths."
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bosun-core.workspace = true
+annals-yaml.workspace = true
+annals-diagnostic.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+etcetera.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

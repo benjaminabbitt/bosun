@@ -1,1 +1,6 @@
 .work/
+/target
+/.mutants-worktree
+mutants.out/
+mutants.out.old/
+# Cargo.lock IS committed: bosun is an application shipped as binaries.

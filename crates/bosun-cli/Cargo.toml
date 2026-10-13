@@ -1,0 +1,34 @@
+[package]
+name = "bosun-cli"
+version = "0.0.0"
+description = "bosun CLI: commands, output formatting, orchestration."
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "bosun"
+path = "src/main.rs"
+
+[dependencies]
+bosun-core.workspace = true
+bosun-ports.workspace = true
+bosun-backends.workspace = true
+bosun-resolve.workspace = true
+bosun-io.workspace = true
+bosun-apply.workspace = true
+bosun-host.workspace = true
+annals-diagnostic.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_norway.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

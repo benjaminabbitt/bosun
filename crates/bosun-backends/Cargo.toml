@@ -1,0 +1,26 @@
+[package]
+name = "bosun-backends"
+version = "0.0.0"
+description = "bosun backend adapters: apt, cargo, github-release (M1)."
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bosun-core.workspace = true
+bosun-ports.workspace = true
+annals-diagnostic.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ureq.workspace = true
+sha2.workspace = true
+flate2.workspace = true
+tar.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

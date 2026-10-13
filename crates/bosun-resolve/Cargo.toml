@@ -1,0 +1,17 @@
+[package]
+name = "bosun-resolve"
+version = "0.0.0"
+description = "bosun resolver: manifest + Index queries -> lock (ordering + policy + claims)."
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bosun-core.workspace = true
+bosun-ports.workspace = true
+annals-diagnostic.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true
