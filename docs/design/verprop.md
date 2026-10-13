@@ -1,0 +1,1061 @@
+# bosun — design (working name; formerly "verprop")
+
+> Status: pre-implementation design. Captures the build-vs-adopt decision, architecture,
+> and the capability/scope audit. Date: 2026-10-13.
+
+## 1. What bosun is
+
+A cross-platform CLI that maintains a **manifest of pinned versions** of applications/binaries
+and **propagates/installs** them by delegating to **whatever package managers are available** on
+the host — native OS managers (apt, dnf, pacman, zypper, apk, brew, scoop, winget) and
+language-ecosystem installers (`go install`, `cargo install`, npm, uv/pipx, gem).
+
+**Licence: EUPL-1.2**, the same as annals, whose `annals-yaml` reads and edits bosun's
+manifest (§4.4).
+
+## 2. Build vs adopt — decided to BUILD
+
+No existing tool combines all three of:
+
+1. a pinned-version manifest,
+2. version-level propagation/reconcile (drive the host *to* the pinned versions), and
+3. delegation to native OS package managers.
+
+The field splits into two families that don't overlap:
+
+- **Pinning tools** (mise, aqua, proto, asdf) — real lockfiles, but install only over language
+  ecosystems / release binaries, never apt/dnf/brew/pacman.
+- **Native-PM meta-managers** (metapac, nyw) — delegate to native managers, but track package
+  *presence*, not *version* (no pinning).
+
+**metapac — evaluated, DECIDED: don't extend; reference only.** metapac (Rust) is the closest
+existing tool: it delegates to native PMs and reconciles. It is the wrong base for bosun because:
+
+- **Its backend contract has no version.** The `Backend` trait installs, lists and uninstalls by
+  package *name*; a version exists only as an optional per-backend option (cargo, mise).
+  Pinning, ordering, policy, holds and downgrades would replace that contract, not add to it.
+- **Its prune semantics are the inverse of bosun's.** `metapac clean` uninstalls everything
+  installed but not listed; it keeps no record of what it installed. bosun prunes only what it
+  installed (§9), from a machine state file metapac has no equivalent of (§4.6).
+- **Upstream doesn't want it.** On metapac issue #217 ("Support for a lock file") the
+  maintainer judged versioning at the backend-trait level not worth the complexity, since
+  backends such as pacman can't support it.
+- **License:** GPL-3.0-or-later. Its code can't be copied into bosun unless bosun is GPL too,
+  so it serves as a reference for ideas and a record of known problems (Appendix B), not as a
+  code source.
+
+Its extra backends are tracked in [FUTURE.md](FUTURE.md).
+
+**Remaining escape hatch (not yet researched):** a custom apt/brew backend for `mise`. mise
+pins well, but only for language ecosystems.
+
+## 3. Language: Rust
+
+Chosen over Go on 2026-10-13. The core problem is *modeling heterogeneity correctly*: a
+per-backend interface with ~8–10 implementations, per-backend version grammars that don't
+normalize, and a taxonomy of failure states. That maps directly onto Rust enums + `trait`
+backends + `Result`, compiler-enforced exhaustively. It mutates system package state
+(correctness-sensitive), the CLI/serde/version-compare crate ecosystem is excellent, and
+the closest prior art (`metapac`, §2) is Rust. The cost vs Go — more cross-compilation friction —
+becomes a *feature* here (see container-inject), so budget musl static builds early.
+
+### 3.1 Dependencies and distribution
+
+- **`annals-yaml` and `annals-diagnostic`** (from annals, EUPL-1.2, the author's own project)
+  read and edit the manifest and carry bosun's error codes. annals is shared by git only.
+- **Not on crates.io:** crates.io refuses packages with git dependencies, so bosun ships as
+  release binaries: GitHub release archives (static musl on Linux) and a Homebrew tap. These
+  are the same channels bosun's `github-release` and brew backends install the ctxloom family
+  from (§12), so bosun can install itself.
+
+## 4. Core architecture
+
+```
+manifest  ──►  resolver  ──►  lock  ──►  drivers
+(spec +        (ordering +    (resolved   (host-apply | container-inject | …)
+ policy per    policy +       versions +
+ entry)        availability)  deviations)
+```
+
+- **manifest** — declarative; per-entry spec + resolution policy, per backend.
+- **resolver** — queries available versions, applies ordering + policy, selects.
+- **lock** — the resolved versions (and any deviations), the single source of truth both drivers
+  consume. Deterministic/sorted output (good for diffing and Docker layer caching).
+- **drivers** — apply the lock to a target. "Apply to host" and "inject into a container build"
+  are *peers* over the same lock, not special cases.
+
+### 4.1 Workspace layout (ports and adapters)
+
+A Cargo workspace, so the boundaries are compiler-enforced (and give the arch-lint something
+real to check later):
+
+| crate | role |
+|---|---|
+| `bosun-core` | domain: `Version`, `Segment` + `Ord`, `Spec`, `Policy`, `Entry`, `Resolution`, `Deviation`. Pure, no I/O. |
+| `bosun-ports` | traits: `Index`, `Installer`, `Driver`, `StateStore` |
+| `bosun-backends` | adapters: apt, dnf, pacman, zypper, apk, snap, flatpak, brew, scoop, winget, cargo, go, npm, uv, pipx, gem, github-release (§12) |
+| `bosun-resolve` | manifest + `Index` queries → lock (ordering + policy) |
+| `bosun-io` | manifest and user config (YAML via `annals-yaml`, comment-preserving edits) and lock/state (JSON) |
+| `bosun-apply` | drivers: host applier, container renderer |
+| `bosun-host` | probe OS/arch/distro family; run backend probes; build the registry of present backends (§5.3) |
+| `bosun-cli` | clap, output formatting, orchestration |
+
+### 4.2 Commands
+
+| command | does |
+|---|---|
+| `add` / `remove` | edit the manifest (`remove` also drops this manifest's claim, and uninstalls only if bosun installed it and no other manifest claims it) |
+| `refresh` | explicit index refresh, per backend |
+| `install [path] [--plan] [--scope system\|user] [--yes]` | plan → privilege check → confirm → apply: resolve each entry with the local package manager, install, record in the machine state (§4.8, §5.5). **Never uninstalls** (except the old name in a `formerly` migration, §5.4) |
+| `uninstall [path] [--plan] [--scope system\|user] [--yes]` | the inverse of `install` for one manifest: drop all of its claims, then uninstall each package bosun installed that no other manifest still claims; same plan → confirm → apply flow (§9) |
+| `prune [--plan] [--scope system\|user] [--yes]` | machine-wide cleanup: uninstall what bosun installed that no manifest claims any more, and drop claims whose manifest no longer exists (§9) |
+| `upgrade [pkg]` | re-resolve range/tolerant entries for this platform, rewrite its lockfile entries, show before/after |
+| `export` | seed a manifest from the current machine |
+| `status` | what bosun manages on this machine and which manifests claim it (drift is `install --plan`'s job) |
+| `adopt <name>` | explicitly take ownership of an existing install: `accepted` → `installed` (§4.6) |
+| `lock [--check]` | resolve this machine's platform (plus platform-independent `any` entries) and merge the result into `bosun.lock`, keeping other platforms' entries; `--check` fails if any declared platform is missing or stale (§4.5, §4.7) |
+| `install --frozen` | install exactly what `bosun.lock` records for this platform; never re-resolves, never writes the lockfile; errors if this platform is missing or stale (§7) |
+| `render args\|env\|json` | versions for a target platform as build args, env lines, or a JSON versions file (§8.3) |
+| `backends` | registered backends, their versions, and why others were skipped (§5.3) |
+
+### 4.3 Output format
+
+Same convention as ctxloom: a global `--format` flag (`text | json | yaml`). The default is
+human-readable `text` when stdout is a terminal and `json` when it is piped or redirected, so
+scripts and CI get machine-readable output without asking for it. Every command's output is a
+typed value serialized by one formatter, never hand-built strings, so `json` and `yaml` carry
+the same fields.
+
+### 4.4 Files
+
+| file | format | written by | committed | purpose |
+|---|---|---|---|---|
+| `bosun.yaml` | YAML (annals-yaml subset) | people (and `add`/`remove`/`export`) | yes | the manifest: intent |
+| `bosun.lock` | JSON | bosun only (`lock`, `upgrade`) | yes | resolved versions, per target, built up one platform at a time |
+| machine state | JSON | bosun only | **no** (one per user, in `$HOME`) | what bosun installed for this user, and which manifests claim it |
+| user config | YAML (annals-yaml subset) | people | no (`<config dir>/bosun/config.yaml`) | preferences, e.g. installer order |
+| user manifest | YAML (annals-yaml subset) | people | no (`<config dir>/bosun/bosun.yaml`) | personal tools; one more claimant |
+
+- **Config dir — DECIDED: XDG Base Directory, with the Windows convention on Windows.**
+  Linux and macOS: `$XDG_CONFIG_HOME`, default `~/.config` (what git, gh and most developer
+  CLIs use on macOS too, rather than `~/Library/Application Support`). Windows: `%APPDATA%`.
+  User state follows the same rule (§4.6).
+- **Manifest (YAML, read and written by `annals-yaml`):** a strict YAML subset. Anchors,
+  aliases, tags, multi-line strings and multiple documents are refused with an error, never
+  misread. `#` comments are allowed (for "why is this pinned").
+  - **No type coercion:** every scalar is kept as its text, so `1.10` stays `1.10` and `no`
+    stays `no`. Versions never need quoting and can't be read as numbers or booleans.
+  - **Edits keep comments:** `add`, `remove` and `export` go through annals-yaml's
+    comment-preserving editor, which splices only the entry it changes and leaves every
+    other byte, comments included, as the person wrote it.
+  - **Format versions:** the manifest and user config carry a root `version` and load
+    through `annals_yaml::versioned`, whose registered migrations upgrade older files.
+  - **Editor validation:** a published JSON Schema, referenced by a
+    `# yaml-language-server: $schema=…` comment.
+  - **Errors** are `annals-diagnostic` values: a stable code and named args, matching bosun's
+    structured errors (§5.5).
+- **Lockfile (JSON):** generated, never hand-edited, readable by `jq` inside a container build
+  without bosun installed. Pretty-printed, keys in fixed order, packages sorted by
+  (name, backend), target keys sorted: clean diffs and stable Docker layer caching.
+- **No bosun version is recorded anywhere** — `bosun --version` answers that, and storing it
+  would churn the lockfile whenever teammates run different bosun builds. Only the lockfile
+  *format* version is stored.
+
+### 4.5 Lockfile format
+
+> **In v1 — DECIDED.** Reproducible versions are a key feature, so the lockfile ships in v1.
+> It was briefly deferred because resolving every platform from one machine needs a remote
+> index per backend (§4.7); v1 avoids that by building the lockfile up one platform at a
+> time. Only `lock` and `upgrade` write it; `install` reads it (§4.6 explains how), and
+> `install --frozen` enforces it.
+
+One lockfile covers every platform and architecture the manifest declares. The manifest
+declares its targets (e.g. `"targets": ["linux/amd64", "linux/arm64", "darwin/arm64",
+"windows/amd64"]`); each package records its intent once and a resolution per target. Because
+the backend and package ID can differ per platform (§5.4), they live inside each target entry.
+Target keys use Docker's platform syntax, so a build can look them up with BuildKit's
+`TARGETPLATFORM`. Platform-independent backends (cargo, go, npm, …) can resolve once, under `any`.
+
+```json
+{
+  "lockfileVersion": 1,
+  "targets": {
+    "darwin/arm64": { "manifestHash": "sha256:9f2c…" },
+    "linux/amd64":  { "manifestHash": "sha256:9f2c…" },
+    "any":          { "manifestHash": "sha256:9f2c…" }
+  },
+  "packages": [
+    {
+      "name": "bosun",
+      "spec": "0.3.0",
+      "policy": "exact",
+      "targets": {
+        "darwin/arm64": { "backend": "brew",  "package": "bosun",     "resolved": "0.3.0" },
+        "linux/amd64":  { "backend": "github-release", "package": "<owner>/bosun",
+                          "resolved": "0.3.0", "checksum": "sha256:…" }
+      }
+    },
+    {
+      "name": "jq",
+      "spec": "1.7.1-1",
+      "policy": "tolerant",
+      "targets": {
+        "linux/amd64": {
+          "backend": "apt",
+          "package": "jq",
+          "source": "ubuntu-noble/universe",
+          "resolved": "1.7.1-3ubuntu0.1",
+          "deviation": "next-higher",
+          "indexSnapshot": "2026-10-13T19:00:00Z"
+        }
+      }
+    }
+  ]
+}
+```
+
+| field | meaning |
+|---|---|
+| `lockfileVersion` | format version; bosun refuses a newer major it cannot read and upgrades older ones |
+| `targets.<t>.manifestHash` | per target: hash of the *parsed* manifest (comments stripped) that target was resolved against, so editing a comment doesn't invalidate the lock; `install --frozen` errors when the current target's hash doesn't match (§4.7) |
+| `name` | bosun's logical name for the tool (§5.4); never has to match any backend's naming |
+| `spec` / `policy` | the intent, copied from the manifest so the lockfile reads on its own; a target may carry its own `spec` where that platform's version string differs |
+| `backend` / `package` / `source` | which package manager, under which package ID, from which source, for that target |
+| `resolved` | the exact version selected for that target |
+| `deviation` | present only when `resolved` differs from an exact `spec` (e.g. `next-higher`); surfaced on apply |
+| `indexSnapshot` | for repo-bound backends: when the index it resolved against was fetched; pairs with base-image digest pinning for reproducible builds |
+| `checksum` | recorded when the backend reports one; informational only (integrity checking is the backend's job) |
+
+Reading it in a Dockerfile without bosun:
+
+```dockerfile
+ARG TARGETPLATFORM
+RUN v=$(jq -r --arg p "$TARGETPLATFORM" \
+      '.packages[] | select(.name=="jq") | (.targets[$p] // .targets.any).resolved' bosun.lock) \
+ && apt-get install -y "jq=$v"
+```
+
+### 4.6 Machine state (what bosun installed, and who wants it)
+
+**Versions travel per project; installs land per user or system-wide.** Manifests are
+committed in each project, but `apt`, `brew`, `cargo install` and friends install into a scope
+shared by every project on the machine. So two projects can claim the same installed package,
+and the state must record that, or prune in one project would uninstall a tool another project
+still needs.
+
+State is kept **per install scope, not per project**. Each backend reports which scope an
+install landed in (install scope itself stays delegated to the package manager), and bosun
+records the claim in the matching file:
+
+| scope | backends (typical) | state file |
+|---|---|---|
+| **system** | apt, dnf, pacman, zypper, apk, snap, flatpak `--system` (its default), winget `--scope machine`, scoop `--global` | Linux `/var/lib/bosun/state.json` (beside `/var/lib/dpkg`, `/var/lib/rpm`); macOS `/Library/Application Support/bosun/state.json`; Windows `%ProgramData%\bosun\state.json`. Owned by root/admin, readable by all users. |
+| **user** | cargo, go install, pipx / uv tool, npm with a user prefix, flatpak `--user`, scoop and winget defaults, **Homebrew** | Linux and macOS `$XDG_STATE_HOME/bosun/state.json` (default `~/.local/state`); Windows `%LOCALAPPDATA%\bosun\state.json` |
+
+- Not `/root` or another superuser home: those are private home directories (other users
+  couldn't read system claims) and aren't portable (macOS root is `/var/root`; Windows has
+  none). The system locations above are where each OS's own package managers keep state.
+- Homebrew is user scope: it refuses to run as root and its prefix is owned by one user, even
+  though its binaries are visible to everyone.
+
+**Same shape as the lockfile**, deliberately: the same package entries keyed per target, so
+one Rust type serves both and a state entry can be compared with a lock entry field by field.
+Only the header and the per-target leaf fields differ:
+
+| | lockfile | machine state |
+|---|---|---|
+| header | `lockfileVersion`, per-target `manifestHash` | `stateVersion` |
+| package-level `spec` / `policy` | present (one manifest) | absent: each claim carries its own |
+| per-target leaf | `resolved`, `deviation`, `indexSnapshot`, `checksum` | `installed`, `origin`, `claimedBy` |
+| targets present | every declared target | only this machine's target |
+
+```json
+{
+  "stateVersion": 1,
+  "packages": [
+    {
+      "name": "jq",
+      "targets": {
+        "linux/amd64": {
+          "backend": "apt", "package": "jq",
+          "installed": "1.7.1-3ubuntu0.1", "origin": "installed",
+          "claimedBy": [
+            { "manifest": "/home/babbitt/workspace/verprop/bosun.yaml", "spec": "^1.7", "policy": "range" },
+            { "manifest": "/home/babbitt/.config/bosun/bosun.yaml",     "spec": "1.7.1-*", "policy": "tolerant" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "git",
+      "targets": {
+        "linux/amd64": {
+          "backend": "apt", "package": "git",
+          "installed": "2.43.0", "origin": "accepted",
+          "claimedBy": [
+            { "manifest": "/home/babbitt/workspace/verprop/bosun.yaml", "spec": ">=2.40", "policy": "range" }
+          ]
+        }
+      }
+    }
+  ]
+}
+```
+
+- `origin: installed`: bosun put it there. Prune may uninstall it, **but only once no manifest
+  claims it**.
+- `origin: accepted` (the **default** for anything already present): it was installed by
+  the user or the OS and satisfies the claim. bosun records that the claim is met and does
+  nothing else — no hold, no version change, no removal. If it later stops satisfying a claim
+  (an upstream upgrade, or the manifest raises its spec), the install plan reports a diagnostic and
+  changes nothing: "git 2.43.0 is installed outside bosun and does not satisfy >=2.45 —
+  upgrade it yourself, or `bosun adopt git`".
+- **Adoption is the explicit move from `accepted` to `installed`** (`bosun adopt <name>`, or
+  `"adopt": true` on the entry). Once adopted, the package *is* `installed`: bosun owns its
+  full lifecycle — hold, version changes, and prune once no manifest claims it — exactly as
+  after `terraform import`. Ownership is never taken implicitly. Removal stays safe through
+  the usual gates, which apply to every removal alike: claims (no prune while any manifest
+  wants it), the backend's dry-run in the plan showing any cascade (e.g. dependents
+  `apt-get -s remove` would also take), and confirmation. No separate "pre-existing" marker
+  is kept.
+- `claimedBy`: every manifest that wants this package, with the spec it asked for. `install`
+  in a project adds or updates that project's claims, and drops its claims for entries no longer
+  in its manifest — a state-only change; the package stays installed until `prune`. `status`
+  reports claims whose manifest no longer exists (repo moved or deleted); `prune` drops them.
+- `package` records the backend package ID **as actually installed**, so prune removes the
+  right thing even if the manifest's name mapping changes later (§5.4).
+- **User-level manifest:** `<config dir>/bosun/bosun.yaml` holds personal tools. It is just
+  another claimant.
+
+**Conflicts across claimants.** One install scope holds one version, so `install` resolves against
+*all* claims for a package, not just the current project's:
+
+- Ranges and tolerant specs that overlap: pick a version satisfying every claim. This is the
+  main reason to prefer ranges for widely shared tools.
+- Claims that can't all be satisfied (e.g. two different exact pins): **refuse (DECIDED)**,
+  naming the manifests and specs that disagree. Never last-writer-wins, which would flip the
+  installed version every time you switch projects.
+- **Lockfiles advise; specs decide (DECIDED).** Two projects' lockfiles can pin different exact
+  versions that both satisfy both projects' specs (e.g. `^1.7` locked to `1.7.1-3` in one,
+  `1.7.1-4` in the other). Plain `install` picks a version satisfying every claim's *spec*,
+  preferring one some lockfile already chose (the current project's first), and reports any
+  lockfile it doesn't match. Only `install --frozen` holds a claim to its lockfile's exact
+  version, and refuses on a clash with another claim. Ordinary multi-project machines stay
+  usable; CI and container builds, which use `--frozen`, stay exact.
+
+**Multiple OS users.** Claims in the *system* state file also record the claiming user
+(`"user": "babbitt"` alongside `manifest`), so prune and conflict checks in one user's project
+see every other user's claims on the same system package. User-scope state stays private to
+its user.
+
+**Privilege — DECIDED: the user elevates bosun; bosun never elevates itself.** System scope
+runs under `sudo bosun …` (Linux/macOS) or from an Administrator terminal (Windows). bosun
+checks privilege against the computed plan and fails fast before changing anything (§5.5).
+
+### 4.7 Cross-target resolution
+
+**v1 — DECIDED: build the lockfile up per platform.** `bosun lock` resolves:
+
+- **the current machine's platform**, using its local package managers, and
+- **platform-independent backends** (cargo, go, npm, uv, pipx, gem) under `any`, from their
+  public registries over HTTP, so one machine resolves these for every platform. This covers
+  most developer tools.
+
+It merges the result into the shared `bosun.lock`, leaving other platforms' entries untouched.
+OS package managers for other platforms (brew on macOS, winget on Windows, apt on a different
+distro) are filled in by running `bosun lock` on each platform, by hand or as a CI matrix job;
+the merge is per target key, so two platforms never write the same entry.
+
+**Freshness is per target.** Each target in the lockfile records the `manifestHash` it was
+resolved against. Editing the manifest makes every target stale; `install --frozen` refuses
+a stale or missing target, and `lock --check` (a CI gate) fails until every declared target
+has been re-locked.
+
+**Later: remote indexes**, added backend by backend, so one machine can resolve every platform.
+Resolution is already split from installation for this:
+
+- **`Index`** (query side): answers "which versions exist for this target" from each source's
+  index over HTTP: Homebrew's formula API, the winget-pkgs repo, scoop bucket repos, apt
+  `Packages` / dnf repodata files, crates.io, the npm registry, PyPI. Runs anywhere.
+- **`Installer`** (mutation side): runs the local package manager. Runs only on a matching host.
+
+Backends without a practical remote index keep the per-platform `bosun lock` path.
+
+### 4.8 Plan and apply
+
+Modelled on terraform's plan/apply split. The plan is the read-only step of every run
+(probe → load state → **plan** → privilege check → apply, §5.5). There is no top-level `plan`
+command: each command that changes the machine (`install`, `uninstall`, `prune`) takes
+`--plan`, which stops after planning and prints the plan; without it, the command executes
+the same value. `--plan` changes nothing and needs no root.
+
+```text
+$ bosun install --plan
+  + jq          apt    install    1.7.1-3ubuntu0.1   (system)  claimed by verprop
+  ~ ripgrep     cargo  upgrade    14.0.3 → 14.1.1    (user)    ^14.0, verprop
+  > exa → eza   cargo  migrate    0.10.1 → 0.20.0    (user)    formerly: exa
+  = git         apt    accept     2.43.0             (system)  already satisfies >=2.40
+
+Plan: 1 to install, 1 to upgrade, 1 to migrate, 1 accepted as-is.
+Needs root for: jq (system). Run: sudo bosun install --scope system
+```
+
+```text
+$ bosun prune --plan
+  - bat         cargo  remove     0.24.0             (user)    no remaining claims
+  x claim       ~/old-checkout/bosun.yaml                     manifest no longer exists
+
+Plan: 1 to remove, 1 stale claim to drop.
+```
+
+**Actions:** `ensure-source`, `install`, `upgrade`, `downgrade`, `migrate` (`formerly`),
+`accept` (record only, no change), `adopt` (explicit only: `accepted` → `installed`),
+`hold` / `unhold` — the `install` plan. `remove` (`installed` origin only, no remaining
+claims) and `drop-claim` — the `uninstall` and `prune` plans, and `remove <name>`. Each carries scope,
+backend, package ID, from → to version, the claim(s) that drove it, and the privilege it needs.
+
+- **Ordering is fixed:** sources first, then migrations, then installs, upgrades and
+  downgrades, then holds, so a renamed package's old version is gone before the new one is
+  installed.
+- **Diagnostics live in the plan:** conflicting exact pins, entries not applicable on this
+  machine, missing backends. Errors block apply.
+- **Index age** is shown for repo-bound backends, since planning uses whatever index is current
+  (refresh is explicit, §9).
+- **Exit codes** (like `terraform plan -detailed-exitcode`): `0` no changes, `2` changes
+  pending, `1` error — so `bosun install --plan` doubles as a CI drift check.
+- **`--format json`** emits the plan as typed actions: the same value `install` executes.
+
+**Confirmation (proposed):** on a terminal `install` shows the plan and asks before applying;
+`--yes` skips the prompt; with no terminal and no `--yes` it refuses rather than guessing,
+so container builds use `RUN bosun install --yes`.
+
+**Persisted plans: supported by design, not implemented in v1.** The plan is a serializable
+value that already carries what a saved plan needs to be checked before apply:
+
+- manifest hash (parsed, comments stripped)
+- state fingerprint (the state files it planned against)
+- machine fingerprint (OS, arch, distro, privilege)
+- each action's expected *before* version
+
+Later, `bosun install --plan -o plan.json` writes it and `bosun install --from plan.json`
+executes it only if every precondition still holds, refusing a stale plan (terraform's
+behaviour); likewise for `uninstall` and `prune`. v1 only prints plans.
+
+## 5. Backends
+
+### 5.1 The backend trait (the whole design)
+
+Every backend implements the same two traits; adding a backend is one more impl, never a core
+change. Lookups are split from installation so the lockfile can be resolved for targets other
+than the current machine (§4.7):
+
+```rust
+trait Index {                       // query side: may run remotely, for any target
+    fn refresh(&self) -> Result<()>;                                   // explicit
+    fn query_available(&self, pkg: &Ref, target: &Target) -> Result<Vec<Version>>;
+}
+
+trait Installer {                   // mutation side: local machine only
+    fn capabilities(&self) -> Capabilities;                            // exact? hold? downgrade?
+    fn ensure_source(&self, src: &Source) -> Result<()>;               // registry management
+    fn install_exact(&self, pkg: &Ref, v: &Version) -> Result<Installed>;
+    fn verify_installed(&self, pkg: &Ref) -> Result<Option<Version>>;
+    fn hold(&self, pkg: &Ref, v: &Version) -> Result<()>;
+    fn downgrade(&self, pkg: &Ref, v: &Version) -> Result<Installed>;  // explicit flag on apt
+    fn uninstall(&self, pkg: &Ref) -> Result<()>;                      // prune; managed set only
+}
+```
+
+Backends declare **capabilities** (`supports_exact_version`, `supports_hold`,
+`supports_downgrade`), because they are wildly unequal (see spectrum below). bosun
+degrades-with-a-warning when a backend can't honor a pin.
+
+### 5.2 Three families and the capability spectrum
+
+| Family | install-exact | hold/pin | version availability |
+|---|---|---|---|
+| **Language** (go/cargo/npm/pipx/gem/uv-tool) | strong (any version) | **weak** (re-run overwrites; no durable hold) | registry — ~everything |
+| **OS, versioned** (apt/dnf/winget) | good, repo-bound | strong (`apt-mark hold` / `dnf versionlock` / `winget pin`) | repo — latest 1–2 |
+| **OS, rolling** (brew/scoop) | weak | freeze-current only | weak — old versions scarce |
+| **Universal app** (snap/flatpak) | weak: snap selects a channel (track/risk), not a version; flatpak can check out a past commit | strong (`snap refresh --hold`, `flatpak mask`) | snap: current release per channel; flatpak: the remote's commit history |
+
+Behavior differs per tier: language → just re-assert exact every run; versioned-OS → install +
+set a hold; rolling-OS → warn pin is best-effort + fall back to a downloaded artifact;
+universal-app → install the channel or commit, then hold.
+
+snap and flatpak are in v1 because they're heavily used on desktop Linux: snap ships by default
+on Ubuntu, and flatpak (with Flathub) on Fedora Workstation, Linux Mint and SteamOS. The
+mechanics in the row above are unverified (§11).
+
+Properties worth designing around:
+
+- **Language backends are platform-orthogonal** — `go install` / `cargo install` behave the same
+  on all OSes, collapsing the per-platform columns. So the manifest axis is really
+  **per-package × per-backend**, and each backend carries its own platform scope (apt = Linux
+  only; cargo = universal). A host resolves to "backends present ∧ platform matches".
+- **Build-from-source backends** (go/cargo) need a toolchain present (another host-detection
+  probe) and verify differently (`go version -m $(which tool)`; cargo's `.crates.toml`).
+
+### 5.3 Backend registration and installer preference
+
+**Registration: backends register only if present.** Every backend is compiled in. At startup
+each one runs a cheap probe (binary on PATH, its version, for build-from-source backends the
+toolchain); only backends whose probe succeeds are registered for the run. Probes run in
+parallel, once per invocation, in `bosun-host`, which also detects OS, architecture and distro
+family (for `linux:<family>` selectors, §5.4).
+
+```rust
+trait BackendFactory {
+    fn id(&self) -> BackendId;                                   // "apt", "brew", ...
+    fn probe(&self, host: &HostInfo) -> Result<Option<Probe>>;   // None = not present
+    fn build(&self, probe: Probe) -> Box<dyn Installer>;         // only called when present
+}
+// registry = factories.filter_map(probe).map(build)
+```
+
+- An entry whose only allowed backend isn't registered is **not applicable here**: `install` and
+  `status` report it ("apt not present"); it is not a crash.
+- `bosun backends` lists registered backends, their versions, and why the others were skipped
+  (respects `--format`).
+
+**Selection: the project decides what's allowed, the user's preference picks among it.**
+
+- A manifest `install` selector names **one** backend or an **ordered list** of acceptable ones
+  (e.g. `"linux": [{ "backend": "apt", "package": "fd-find" }, { "backend": "cargo",
+  "package": "fd-find" }]`).
+- If it names exactly one, that backend is used: a preference never overrides a single
+  explicit backend, because version grammar and pin durability differ per backend
+  (`ripgrep` via apt = distro's old Debian version; via cargo = crates.io semver, any version).
+- If it lists several, bosun takes the first that is both **registered** and highest in the
+  **preferred-installer order**, resolved with this precedence:
+
+| source | example |
+|---|---|
+| command-line flag | `--installer brew,cargo` |
+| environment | `BOSUN_INSTALLER=brew,cargo` |
+| user config | `<config dir>/bosun/config.yaml`: `installer: [brew, cargo]` |
+| manifest | the order the selector lists them in |
+
+  Each level is an ordered list; backends it doesn't mention fall back to the next level.
+
+### 5.4 Package identity and name mapping
+
+The same tool has different names in different places, and names change over time:
+
+- **Per backend:** `fd` is `fd-find` on apt, dnf and crates.io, `fd` on brew and scoop,
+  `sharkdp.fd` on winget. Windows IDs are often vendor-qualified (`BurntSushi.ripgrep.MSVC`).
+- **Per distro:** the same backend can differ between distro families.
+- **Over time:** packages are renamed or succeeded (`exa` → `eza`; Debian's `python-*` →
+  `python3-*`).
+- **Version strings too:** apt may carry `9.0.0-1` where brew carries `10.2.0`.
+
+So every manifest entry has a **logical `name`**: bosun's own identity for the tool, used as
+the key in the lockfile and machine state, never required to match any backend. A
+per-platform **`install`** block says which backend to use and, where it differs, the package
+ID and version string. The author still names the backend explicitly; it is just per platform.
+
+```yaml
+# yaml-language-server: $schema=https://…/bosun.schema.json
+version: 1
+targets: [linux/amd64, linux/arm64, darwin/arm64, windows/amd64]
+
+# reuse: most entries only need to state where they differ from these
+defaults:
+  policy: exact
+  install:
+    darwin: {backend: brew}
+    windows: {backend: winget}
+
+packages:
+  # brew on macOS (from defaults); release archives elsewhere
+  - name: bosun
+    spec: 0.3.0
+    install:
+      linux: {backend: github-release, package: <owner>/bosun}
+      windows: {backend: github-release, package: <owner>/bosun}
+
+  # Debian-family and Fedora call it fd-find (Debian's binary is `fdfind`)
+  - name: fd
+    spec: 10.2.0
+    policy: tolerant
+    install:
+      linux:debian: {backend: apt, package: fd-find, spec: 9.0.0-1}
+      linux:fedora: {backend: dnf, package: fd-find}
+      windows: {backend: winget, package: sharkdp.fd}
+
+  - name: eza
+    spec: 0.20.0
+    formerly: [exa]
+    install:
+      linux: {backend: cargo}
+```
+
+(Versions above are illustrative.)
+
+Rules (draft syntax):
+
+- **Selectors:** `install` keys are `<os>` or `<os>:<distro>`; the most specific match for the
+  current machine wins (exact distro `ID` > `ID_LIKE` match > plain `<os>`), then
+  `defaults.install`. No match = the entry doesn't apply on this platform (reported by
+  `status`, not an error). Distro detection is below.
+- **Defaults keep it sparse:** `package` defaults to `name`; a per-platform `spec` overrides the
+  entry's `spec`; `defaults` supplies policy and backend choices, so entries only state
+  exceptions.
+- **`formerly`:** previous names (logical or backend package IDs). On `install`, if a package
+  under a former name is present: bosun-installed → migrate (uninstall old, install new,
+  update state); accepted or unmanaged → report it, don't touch it (migration uninstalls the
+  old package, which bosun only does for what it owns).
+- **What's recorded:** the lockfile and machine state store the backend package ID actually
+  resolved/installed, so prune and migration act on the real package even after the mapping
+  changes.
+- **Verification is by package ID through the package manager, never by binary name**, so
+  binary-name differences (`fdfind` vs `fd`) don't affect bosun (PATH is delegated anyway).
+- **Lookup aid (later):** `bosun add` could suggest per-backend IDs from Repology, which tracks
+  package names across hundreds of repositories. A suggestion source only, never a runtime
+  dependency (its API is rate-limited).
+
+#### Distro detection (proposed)
+
+Source: `/etc/os-release` (systemd/freedesktop standard; fallback `/usr/lib/os-release`),
+present on essentially every current distro and container base image. It is plain
+`KEY=value` lines, so a small hand-written parser suffices. Fields used:
+
+| distro | `ID` | `ID_LIKE` | `VERSION_ID` |
+|---|---|---|---|
+| Ubuntu 24.04 | `ubuntu` | `debian` | `24.04` |
+| Debian 12 | `debian` | — | `12` |
+| Linux Mint | `linuxmint` | `ubuntu debian` | `22` |
+| Fedora 41 | `fedora` | — | `41` |
+| RHEL / Rocky | `rhel` / `rocky` | `fedora` / `rhel centos fedora` | `9.4` |
+| Amazon Linux 2023 | `amzn` | `fedora` | `2023` |
+| openSUSE Tumbleweed | `opensuse-tumbleweed` | `opensuse suse` | — |
+| Arch / Manjaro | `arch` / `manjaro` | — / `arch` | — |
+| Alpine | `alpine` | — | `3.20.3` |
+
+(Typical values; confirm against real images during implementation.)
+
+- `linux:<distro>` matches when `ID` equals it **or** `ID_LIKE` contains it, so Ubuntu, Mint
+  and Pop!_OS all match `linux:debian` without being listed.
+- Release qualifiers (`linux:ubuntu@24.04`, matching `VERSION_ID`) are reserved syntax for
+  later, for packages renamed between releases of one distro.
+- No os-release file (e.g. a `scratch` image): no distro, so only plain `linux` selectors
+  apply. Legacy files (`/etc/redhat-release`, `lsb_release`) are not supported.
+- **`render` needs the distro supplied:** a Docker platform string (`linux/amd64`) doesn't say
+  which distro the base image is, so `render` takes `--distro ubuntu@24.04` (or reads it from
+  a manifest target declaration) to pick selectors.
+
+### 5.5 Machine interface and privilege
+
+All OS-specific behaviour sits behind one polymorphic interface (trait in `bosun-ports`,
+implementations in `bosun-host`): `LinuxMachine`, `MacMachine`, `WindowsMachine`, plus a
+`FakeMachine` for tests, so the core never branches on OS.
+
+```rust
+trait Machine {
+    fn os(&self) -> Os;
+    fn arch(&self) -> Arch;
+    fn distro(&self) -> Option<&Distro>;            // Linux: from os-release (§5.4)
+    fn privilege(&self) -> Privilege;                // Elevated | Unelevated
+    fn invoking_user(&self) -> User;                 // the human, even under sudo
+    fn state_path(&self, scope: Scope) -> PathBuf;   // §4.6 locations
+    fn elevation(&self) -> Elevation;                // how to elevate; drives error text
+}
+```
+
+| | Linux | macOS | Windows |
+|---|---|---|---|
+| elevated when | effective UID is 0 | effective UID is 0 | process token is elevated |
+| invoking user under elevation | `SUDO_USER` / `SUDO_UID` | `SUDO_USER` / `SUDO_UID` | the token's user |
+| how to elevate (error text) | re-run with `sudo` | re-run with `sudo` | open a terminal with "Run as administrator" and re-run (Windows 11's opt-in `sudo` may work, but is not relied on) |
+
+**`Machine` is orthogonal to backends.** It knows nothing about package managers. Which
+backends exist on a machine is decided only by each backend's own probe (§5.3) against the
+machine's facts, and each backend reports the install scope of what it installs. Homebrew
+registers on macOS *and* on Linux wherever it is installed, at user scope on both; cargo, npm,
+uv and go register on every OS. The only coupling is through privilege: whenever an action's
+scope is `system`, the `Machine` decides whether the current process may perform it and how
+to word the remedy.
+
+**Run order: probe → load state → plan → privilege check → apply.** Planning is read-only and
+needs no root (`dpkg-query`, `rpm -q` and friends work unprivileged), so the check is against
+what the plan will *change*, not against what the manifest *mentions*: a manifest full of
+already-satisfied apt entries needs no sudo. Exception: `refresh` for apt/dnf always needs
+root, because updating their index does.
+
+**Fail fast, both directions, before anything changes:**
+
+- **Unelevated, plan changes system scope** → `ElevationRequired`.
+- **Elevated, plan changes user scope** → `MustNotBeElevated`. Under sudo, user-scope installs
+  would land in root's home (and `$HOME` under sudo varies by distro), and Homebrew refuses to
+  run as root. `--scope system|user` splits a mixed run:
+  `sudo bosun install --scope system`, then `bosun install --scope user`.
+- **Mixed plan, no `--scope` — DECIDED: fail**, printing the two commands to run. Never apply
+  whichever half the current privilege allows, which would leave a half-applied manifest.
+- Under elevation, claims in system state are recorded for the **invoking user**, not root.
+
+**Errors are structured values with a remedy**, rendered by the platform's `Elevation`:
+
+```text
+error: 2 system-scope packages need root (apt: jq, fd-find). Nothing was changed.
+  re-run: sudo bosun install --scope system
+```
+
+```text
+error: 1 machine-scope package needs Administrator (winget: sharkdp.fd). Nothing was changed.
+  open a terminal with "Run as administrator" and re-run: bosun install --scope system
+```
+
+```json
+{ "error": "elevation_required", "scope": "system",
+  "packages": [ { "name": "jq", "backend": "apt", "package": "jq" } ],
+  "changed": false,
+  "remedy": "sudo bosun install --scope system" }
+```
+
+## 6. Version model
+
+- Version strings are **not normalizable** across ecosystems (Debian `epoch:upstream-rev`, RPM
+  NEVRA, PEP 440, SemVer — different grammars *and* ordering rules). Stored per-backend.
+- **Ordering = regex-decompose into typed chunks, then compare the chunk sequence** — exactly how
+  `dpkg --compare-versions`, `rpmvercmp`, and SemVer work internally.
+  - A per-platform regex (named capture groups, with per-package override) extracts chunks; a
+    chunk is typed `Numeric(u64) | Alpha(String) | Tilde`, parsed into `Vec<Segment>` with an
+    `impl Ord`.
+  - Three non-obvious rules the `Ord` must encode: (1) numeric chunks compare numerically
+    (`1.10 > 1.9`), (2) a pre-release chunk *lowers* precedence (`1.0rc1 < 1.0`; Debian `~` sorts
+    before empty), (3) arity/missing chunks need a defined rule (pad-zero vs rank-lowest, absent
+    epoch = 0).
+  - Reference impls to depend on where possible: `deb-version`, an `rpm`/`rpmvercmp` crate,
+    `semver`, a PEP 440 crate. Reserve the custom regex-chunk path for the long tail.
+  - Go pseudo-versions (`v0.0.0-TIMESTAMP-hash`) validate the model — they order by the embedded
+    timestamp chunk, no special-casing.
+
+## 7. Resolution policy (orthogonal to backend)
+
+Per-entry, with a global default + override:
+
+- **strict / exact** — must be exactly X or fail. Reproducible builds; frozen lock.
+- **range / auto-upgrade** — a constraint (`^1.2`, `>=1.2,<2`, `1.2.*`); resolve to the **highest
+  available satisfying it**; re-resolve each run to track upstream within bounds.
+- **tolerant / closest-to-spec** — prefer the pin; if unavailable, resolve to the
+  **next-higher-closest** available version (round *up* toward spec, **never below** — never
+  silently downgrade a system tool), and/or accept any point release in a range. Record the
+  deviation.
+
+Consequences:
+
+- `closest` and `highest-in-range` are impossible without correct ordering (§6) — this is the
+  payoff for getting ordering right.
+- **tolerant mode is the answer to the "version unsatisfiable from configured sources" problem** —
+  it is what makes a pin-ish intent usable on rolling/repo-bound backends.
+- Auto-upgrade and tolerant **break reproducibility by design**, so bosun inherits uv/npm's
+  frozen-vs-update split:
+  - `bosun lock` — resolve and record versions for this platform (§4.7).
+  - `bosun install --frozen` — apply the lock verbatim for this platform, no re-resolve, no
+    lockfile write. **Container builds and CI must use this.**
+  - `bosun upgrade` — re-resolve ranges, rewrite the lock, show a before/after diff.
+  - plain `bosun install` — reads the lock as a preference across claims (§4.6), never writes
+    it.
+- Tolerant/auto can install something other than what the author wrote, so bosun **records
+  "requested X → resolved/installed Y" in the lock and surfaces it** (the "show what changes
+  before applying" discipline).
+
+## 8. Propagation drivers
+
+### 8.1 host-apply
+
+Imperative reconcile of the current machine to the lock. Needs a **dry-run/preview** on OS
+managers (they can cascade package erasures) before applying.
+
+### 8.2 container-inject
+
+Feed pinned versions into an image build. **The primary near-term consumer is dev container
+builds** — a `.devcontainer` / reproducible dev-environment image that gets exactly the
+manifest's pinned toolchain so every developer (and CI) shares one versioned toolset. Production
+image builds are the same mechanism. Three shapes:
+
+- **build-args / env** — the Dockerfile takes versions as `ARG`s (or `ENV`) and bosun supplies
+  them with `bosun render` (§8.3). Simplest; stable build args give clean layer-cache
+  behaviour. The author writes the `RUN` lines.
+- **in-build execution** — `COPY bosun + bosun.yaml + bosun.lock` then
+  `RUN bosun install --frozen --yes`. Single source of truth; needs the
+  bosun binary in the build stage — this is where the **static musl binary pays off**
+  (`COPY --from` into scratch/distroless, no runtime deps).
+- **generated fragment** — render a `.dockerfile.inc` / build stage from the lock.
+
+**Hazard — repo drift makes the container case *harder*, not easier.** `RUN apt-get install -y
+pkg=1.24.0-2ubuntu7.3` rots: base-image repos rotate and drop old versions, so a pin that built
+last month fails later. So the container mode needs a first-class story for "unsatisfiable":
+pin the base-image digest, point at a snapshot repo (snapshot.debian.org / archived AppStream),
+or bake a downloaded artifact into the build context. Language backends (cargo/go/npm) sidestep
+this (registry-bound).
+
+### 8.3 `bosun render`: versions as build args and environment variables
+
+Dockerfiles take versions as `ARG` (build time) or `ENV` (persisted into the image); bosun's
+job is to supply the values cleanly for one target platform. `render` uses subcommands for its
+output styles so they don't collide with the global `--format` flag:
+
+| command | output | use with |
+|---|---|---|
+| `bosun render args --target linux/amd64` | `--build-arg FD_PACKAGE=fd-find --build-arg FD_VERSION=9.0.0-1 …` | `docker build $(bosun render args --target linux/amd64) .` |
+| `bosun render env --target linux/amd64` | `FD_PACKAGE=fd-find` / `FD_VERSION=9.0.0-1` lines | compose `.env`, `devcontainer.json` `build.args` via `${localEnv:FD_VERSION}`, `set -a; . ./versions.env` |
+| `bosun render json --targets linux/amd64,linux/arm64` | plain-JSON versions file, lockfile-shaped, per target | multi-arch builds: the Dockerfile reads it with `jq` and `TARGETPLATFORM` |
+
+```dockerfile
+ARG FD_PACKAGE
+ARG FD_VERSION
+RUN apt-get install -y "${FD_PACKAGE}=${FD_VERSION}"
+```
+
+- **Variable names** derive from the logical name: uppercase, non-alphanumerics → `_`, suffixes
+  `_VERSION` and `_PACKAGE`. The package ID is emitted because it differs per platform
+  (`fd-find` vs `fd`), so the Dockerfile never hardcodes it. Two entries mapping to the same
+  variable is an error; an entry can set `"var": "FD"` to override.
+- **Target selection** applies the same `install` selectors and installer preference as the
+  `install` command (§5.3, §5.4), for the requested target rather than the current machine.
+- **`render json` covers multi-arch:** build args are the same for every platform in a
+  multi-platform build, so where versions or package IDs differ per platform the Dockerfile
+  looks them up by `TARGETPLATFORM` instead. (The lockfile itself is also plain JSON that a
+  Dockerfile can read with `jq`, §4.5.)
+- **Versions come from the lockfile:** a range/tolerant entry renders its locked version for
+  the requested target; an exact entry renders from the manifest. If the target isn't locked
+  (or is stale), render errors and names the platform to run `bosun lock` on.
+
+Future driver: CI.
+
+## 9. Capability / scope audit
+
+### In scope — decided
+
+- **Removal / prune / reconcile-to-absence — DECIDED: prune only what bosun installed.** A
+  declarative manifest implies the inverse: install what's listed, and decide about what's *not*.
+  bosun maintains a **managed set** (what it installed) and prunes/reconciles **only within that
+  set** — it never removes "unlisted" packages it didn't install (that would uninstall the OS on
+  apt/dnf).
+- **Installing and pruning are separate commands — DECIDED.** `install` only moves the
+  machine *toward* the manifest (install, upgrade, downgrade, hold); it never uninstalls.
+  Removal happens only through `uninstall` (one manifest), `prune` (machine-wide orphans), or
+  `remove <name>` (one entry). Two reasons:
+  - The name: "sync" implies removing whatever doesn't conform, which bosun deliberately
+    doesn't do; "install" says what the command does.
+  - There is no single source of truth to sync to. Many manifests (every project, plus the
+    user manifest) claim packages in the same install scope (§4.6), and one project's run sees
+    only its own manifest. Whether a package is still wanted is a question about *all* claims,
+    so it belongs to `prune`, which reads every claim in the machine state, drops claims whose
+    manifest no longer exists, and uninstalls only `installed`-origin packages left with none.
+- **`uninstall` — DECIDED: explicit removal of one manifest's contents.** `bosun uninstall`
+  takes a directory (its `bosun.yaml` and `bosun.lock`) or a path to either file,
+  defaulting to the current directory, the same way `install` does.
+  - It works from the machine state, not the file: it drops every claim recorded under that
+    manifest's path, so it still works after the manifest has been edited, or deleted with its
+    repo.
+  - A package is uninstalled only if bosun installed it (`origin: installed`) and **no other
+    manifest still claims it**. Packages other manifests still want keep running at their
+    current version. `accepted` packages lose the claim and are never touched.
+  - `uninstall` is the targeted counterpart to `prune`: run it before deleting a project; `prune`
+    catches projects that disappeared without it.
+- **Source / repo / tap / bucket / registry management — DECIDED: in scope.** Most managers need a
+  source added before a pinned package exists (apt PPAs, dnf copr, brew tap, scoop bucket, winget
+  sources, cargo alt-registries, npm scoped registries, go GOPROXY, Python extra-index-url).
+  bosun gets its own **per-backend sources section** in the manifest, resolved *before* install.
+- **Integrity / signature / trust — DECIDED: delegate to the underlying tooling.** bosun adds
+  **no integrity/signature layer of its own**; it relies on each backend's native verification
+  (apt signed repos/keyrings, dnf `gpgcheck`, brew/scoop manifest hashes, npm integrity, `go.sum`,
+  Cargo.lock checksums). bosun drives the managers; the managers verify what they fetch.
+
+### Settled (lower-priority, now decided)
+
+- **Index refresh — DECIDED: in scope, EXPLICIT.** bosun exposes index refresh as an explicit
+  operation (e.g. `bosun refresh`), **not** an implicit pre-resolve step run silently every
+  time. `query_available` reads whatever index is current (`apt-get update`, `dnf makecache`,
+  `brew update`, `winget source update`); the user refreshes deliberately. Keeps runs fast and
+  predictable and makes "stale index" a visible, user-controlled state rather than hidden cost.
+- **Install scope + PATH — DECIDED: delegate, no validation (for now).** bosun does **not**
+  validate PATH reachability or manage install scope/location itself — it delegates to the
+  installer / package manager's own default placement (`npm -g` prefix, `~/.cargo/bin`, pipx,
+  system prefix, etc.). "installed but not on PATH" is the user's / the manager's concern, not
+  bosun's, at this stage.
+- **State export — DECIDED: in scope.** bosun can seed a manifest from an existing host.
+  High-value onboarding. Following the principle below, it reads each package manager's *own*
+  record of what the user explicitly installed (e.g. `apt-mark showmanual`,
+  `dnf repoquery --userinstalled`, `pacman -Qe`, `brew leaves --installed-on-request`,
+  `flatpak list --app`), never the full installed set, and never infers which packages are
+  dependencies itself. A backend with no such record gets no export.
+- **Architecture / multi-arch — DECIDED: in scope.** Arch is a first-class resolution axis
+  alongside version: multiarch (apt `:arm64`), rpm `.arch`, brew bottles per-arch, os/arch for
+  binary fetchers — needed for cross-platform + arm64 container builds.
+
+### Out of scope / shelved (named deliberately)
+
+- **Transitive dependency closure — DECIDED: bosun deals only in what it was asked for.**
+  bosun manages **top-level tools/binaries only**; dependencies are the package manager's job.
+  (uv/npm/cargo/go lock full trees; apt/dnf/brew don't.) Concretely, bosun never enumerates a
+  backend's full installed set: it queries the package IDs named in manifests and machine
+  state, and nothing else. Dependencies, flatpak runtimes, and base snaps (`core*`, `snapd`)
+  never appear in bosun's plan, state or prune. This avoids a whole class of metapac bugs
+  (Appendix B) where a listing of "installed" packages included dependencies.
+- **Reinstall / file-integrity verify** (`rpm -V`, `dpkg --verify`, `--reinstall`) — self-healing;
+  skip unless wanted.
+- **Offline / cache / mirror & transaction locks** — partly overlaps the fallback-artifact path;
+  the dpkg/dnf transaction lock just means bosun serializes OS-PM ops.
+
+## 10. Architecture linting (dev process — deferred)
+
+"When we get there", once real named layers exist:
+
+- **CI gate:** a Rust architecture/dependency-boundary linter (TBD — pin down the exact tool;
+  there is a Rust equivalent of go-arch-lint). Baseline before that: Rust module visibility +
+  `cargo-deny`/clippy dependency lints.
+- **Optional ctxloom complement:** a structural-review agent (LLM design-judgment — connascence,
+  boundary fit, over-engineering) that complements, not overlaps, the static gate.
+
+## 11. Open questions / next steps
+
+- ~~metapac as a base~~ — decided against (§2). Still open: a quick look at a mise custom
+  backend before committing to greenfield.
+- Verify exact pin/hold/install-exact mechanics for the un-researched backends (scoop, winget,
+  brew, pacman, zypper, apk, snap, flatpak; go install, cargo install, gem) — same
+  command-level rigor as the apt/dnf/uv/npm reference in §A. For snap: can a non-publisher
+  install a specific `--revision`, or only a channel? For flatpak: how are past commits
+  discovered and installed (`remote-info --log`, `update --commit`)?
+- Nail the manifest schema (`bosun.yaml`): top-level `targets`, `sources`, `defaults`
+  (policy); entry = {name, backend, spec, policy?, source?, per-target overrides?}.
+- Confirm the name. `bosun` is the working name. The `bosun` crate on crates.io is taken,
+  which doesn't matter while bosun ships only as release binaries (§3.1).
+- annals-yaml's comment-preserving editor: confirm it covers every manifest edit `add`,
+  `remove` and `export` make, including entries inside compact `- name: …` items.
+- Distro detection (§5.4): confirm `ID_LIKE` matching, deferring release qualifiers, and
+  `render --distro`.
+- `install` confirmation (§4.8): prompt on a terminal, `--yes` to skip, refuse without a
+  terminal unless `--yes` (proposed), or proceed automatically when non-interactive?
+- Remote `Index` per backend (§4.7, later): confirm which are feasible (Homebrew API,
+  winget-pkgs, apt `Packages`, dnf repodata), and which stay on per-platform `bosun lock`.
+- Lockfile merge conflicts in git: two branches re-locking different platforms touch different
+  target keys, but both rewrite the same file. Confirm the sorted, per-target layout keeps
+  these as clean textual merges, or provide a `bosun lock --merge` helper.
+- Decide the "closest" tie-breaks precisely (same major.minor preference within next-higher).
+- Dogfood (§12): confirm the `github-release` backend and its two exceptions to §9 (bosun
+  verifies checksums; bosun picks a bin directory); decide how a family of entries shares one
+  release version; find out how reprise ships.
+
+## 12. Dogfood
+
+The first real manifest manages bosun's own toolbelt: **just, jq, and the ctxloom family**
+(ctxloom, ltk, taskloom, harp, reprise), on Debian 13 first, then macOS and Windows.
+
+| tool | Linux (Debian) | macOS | Windows |
+|---|---|---|---|
+| `just` | apt `just` | brew `just` | winget / scoop (ID to verify) |
+| `jq` | apt `jq` | brew `jq` | winget `jqlang.jq` (to verify) |
+| ctxloom, ltk, taskloom, harp | GitHub release archive | brew tap `ctxloom/tap` | GitHub release archive |
+| reprise | not in the ctxloom release config; distribution to find out | | |
+
+ctxloom, ltk, taskloom and harp ship from **one** goreleaser release of `ctxloom/ctxloom`:
+per-binary archives per OS/arch, a `checksums.txt`, and a formula per binary in
+`ctxloom/homebrew-tap`. The project's own Linux/Windows install path is a `curl | bash` script
+over those archives. (`go install` from the module is possible but needs a Go toolchain and
+builds rather than installs a release.)
+
+What dogfooding forces into v1 (proposed):
+
+1. **A `github-release` backend.** Previously only the rolling-backend fallback (§5.2, FUTURE.md);
+   it is the main Linux/Windows path for the ctxloom family. Lists versions from the GitHub
+   releases API (token for rate limits), picks the archive for the target OS/arch, verifies it
+   against the release's `checksums.txt`, extracts the binary, and records what it installed in
+   machine state (user scope).
+   - **Integrity exception to §9:** here bosun *is* the installer, so it cannot delegate
+     verification. It verifies the upstream-published checksum and records it in the lock,
+     where `checksum` becomes enforced for this backend rather than informational.
+   - **Install location exception to §9:** with no package manager to choose a prefix, bosun
+     needs a default bin directory (e.g. `~/.local/bin`, `%LOCALAPPDATA%\bosun\bin`) and must
+     say so when it isn't on PATH.
+2. **Sources:** `ctxloom/tap` is a brew tap the §9 sources section must add before install.
+3. **Pre-release versions:** the family is at `0.7.0-pre1`; ordering (§6) must place it below
+   `0.7.0`, and range policy needs a rule for whether ranges admit pre-releases (SemVer: only
+   when the range names one).
+4. **Families sharing one release:** four entries that must move together. Either the manifest
+   gets a way to share one `spec` across entries, or `lock` warns when they diverge.
+5. **Shadowing installs:** this machine already has the family as local dev builds in
+   `~/go/bin` (version strings like `v0.7.0-…-dirty`, matching no release) and just/jq from apt.
+   apt's are `accepted` (§4.6). A bosun-installed release binary that a dev build shadows on
+   PATH is outside bosun's checks today (PATH is delegated); dogfood will show whether `status`
+   needs to report it.
+
+**Next dogfood candidate (proposed): ctxloom's `.devcontainer/tool-versions.env`.** It is a
+hand-built bosun: one file pinning ~20 build tools (Go, just, buf, golangci-lint, goreleaser,
+gitleaks, node, …) with per-arch sha256 pins, consumed as devcontainer `--build-arg`s, loaded
+into `$GITHUB_ENV` by workflows, used by a Windows CI job and a host install, and guarded by
+drift tests. Replacing it with `bosun.yaml` + `bosun.lock` + `bosun render` exercises the
+container driver (§8), multi-arch checksums, and CI consumers on a real project.
+
+## Appendix A — PM version-pinning mechanics (verified 2026-10-13)
+
+Command-level reference for the four researched backends. (apt, dnf, uv, npm.)
+
+### apt / dpkg
+- Discover: `apt-cache madison <pkg>`, `apt list -a <pkg>`, `apt-cache policy <pkg>` (authoritative
+  Installed/Candidate/priority view — parse to verify pins).
+- Install exact: `apt-get install <pkg>=<version>`; downgrade needs `--allow-downgrades`
+  (+`--allow-change-held-packages` if held). Deps are NOT auto-pinned.
+- Pin: apt preferences (`/etc/apt/preferences.d/`, Pin/Pin-Priority; `>=1000` forces downgrade,
+  `<0` prevents); `apt-mark hold/unhold/showhold` (freezes currently-installed; prefer for
+  "hold"); dpkg `--set-selections`.
+- Hard limit: the version must still be in a configured repo (archives keep ~latest only →
+  snapshot.debian.org / PPA / local `.deb`).
+
+### dnf / rpm
+- NEVRA: `name-[epoch:]version-release.arch`. Discover: `dnf list --showduplicates <pkg>`,
+  `dnf repoquery --available <pkg>`.
+- Install exact: `dnf install <pkg>-<version>` (auto up/downgrades); `dnf install-nevra` for exact;
+  `--allowerasing`, `--best`.
+- Downgrade: `dnf downgrade <pkg>[-<version>]`.
+- Version lock: `dnf versionlock add|exclude|list|delete|clear` (plugin); list file via `locklist`
+  in `/etc/dnf/plugins/versionlock.conf`. Locked pkgs skip security updates until unlocked.
+
+### uv (Python)
+- Project: `pyproject.toml` `==` specifiers + `uv.lock` (true lockfile). `uv add 'pkg==X'`,
+  `uv lock [--check|--upgrade|--upgrade-package pkg==X]`, `uv sync [--frozen|--locked|--inexact]`
+  (exact-by-default: removes unlisted).
+- Tools (binaries): `uv tool install pkg==X` (own venv, symlinked bins); `uv tool upgrade` stays
+  within the install-time constraint; `uvx pkg@version` ephemeral.
+- pip surface: `uv pip install 'pkg==X'` (no lockfile on this path).
+
+### npm (Node)
+- Manifest: bare `"1.2.3"` = exact; `^`/`~`/x-ranges otherwise (default save = `^`). Force exact:
+  `npm i pkg -E` or `.npmrc save-exact=true`. `overrides` pins transitive.
+- Lockfile: `package-lock.json` (true lockfile). `npm ci` = frozen reproducible install (requires
+  lock; errors on mismatch; never writes package.json/lock; wipes node_modules).
+- Install exact: `npm i <name>@<version>`; downgrade is just an install of a lower version.
+- Global tools: `npm i -g pkg@version` — **no lockfile, no durable pin** (weakest tier).
+
+### Cross-cutting
+- True lockfiles: only uv (`uv.lock`) and npm (`package-lock.json`). apt/dnf = policy/list only;
+  all binary/tool installs = manifest/imperative only.
+- Impedance mismatches: repo-bound (apt/dnf) vs registry-bound (uv/npm) availability;
+  non-interchangeable version grammars; OS/system vs per-user tool scope (OS can cascade erasures →
+  need dry-run); pin durability varies (hold/versionlock persist; `npm -g` has none → re-assert
+  every run); lock vs no-lock reproducibility.
+
+## Appendix B — Known problems from metapac's issue tracker
+
+metapac drives many of the same package managers, so its issue tracker records real failures
+bosun will meet too. Each row is a design consequence and a cheap test case. Issue numbers are
+in `ripytide/metapac`.
+
+| problem (issues) | consequence for bosun |
+|---|---|
+| State/config recorded as changed even though the package manager failed (#229 clean marks packages removed; #130 package added to config after a failed install) | Write machine state only after `verify_installed` confirms the change, per package, never from the command's intent. |
+| One failing backend aborts every other backend (#189, #226) | Apply per backend and report each backend's result separately. Order within the plan (§4.8) still holds; a failed backend's dependents are skipped, not the whole run. |
+| Package manager flags change between releases (#224: brew 5.1.3 dropped `--no-quarantine`) | Record each backend's version in its probe (§5.3); gate flags on it through `capabilities()`; contract tests run against pinned PM versions. |
+| "Installed" listings include dependencies (#183 dnf, #222/#175 pacman, #178 xbps, #73 snap base snaps, #129 flatpak runtimes) | Avoided by design: bosun only queries the package IDs it manages (§9). Export reads each PM's own explicit-install record. |
+| Packages reinstalled every run, or not detected as installed (#51, #93, #152) | Usually a mismatch between the name requested and the name the PM reports (provides/virtual packages, repo-qualified names). Verify by the package ID recorded in state (§5.4), and add a test per backend for "install, then verify reports it". |
+| Groups and metapackages aren't packages (#31, #120, #131, #150 pacman `gnome`) | A group is not a valid package ID; reject it at `add` (or in plan diagnostics) rather than expanding it. |
+| One backend, several package kinds (#154 brew formulae vs casks; #103 scoop `bucket/app` form) | The package ID must carry the kind (e.g. a `cask` flag, or a bucket-qualified ID), so verify and prune target the same thing install did. |
+| Installation scope set by a flag (#63 flatpak system vs user triggered sudo; #199 flatpak `--installation`) | Scope comes from the backend's reported scope per install (§4.6), feeding the privilege check (§5.5). |
+| Install options beyond name + version (#81 snap `--classic`; #110/#227/#228 uv Python version, extras, `--with`) | Backend-specific install options on a manifest entry, recorded in state so re-installs and holds repeat them. |
+| Sources needed before install (#218 apt PPAs, #176 dnf copr, #173 brew taps, #201 flatpak remotes) | Confirms the per-backend `sources` section (§9). |
+| Non-interactive runs (#202 flatpak `-y`; #193 many confirmation prompts) | bosun confirms once for the whole plan (§4.8) and passes each PM's non-interactive flag; batch installs per backend. |
+| Windows command shims (#184: `npm` is `npm.cmd`, so "program not found") | Probe and run commands by resolving `PATHEXT` shims (`.cmd`, `.ps1`), not bare names. |
+| Index refresh (#230) | Already explicit `bosun refresh` (§9). |
+| Self-elevation requests (#80) | Already decided: never self-elevate (§4.6). |
