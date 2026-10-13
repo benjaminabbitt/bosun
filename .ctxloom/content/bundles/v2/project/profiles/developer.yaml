@@ -1,0 +1,6 @@
+description: 'Rust implementer: ctxloom-default developer root + Rust development practices + escalation discipline'
+parents:
+  - ctxloom+git://github.com/ctxloom/ctxloom-default//bundles/ai-developer#profiles/developer
+bundles:
+  - ctxloom+git://github.com/ctxloom/ctxloom-default//bundles/rust-development
+  - ctxloom+git://github.com/ctxloom/ctxloom-default//bundles/agent-roles#fragments/developer-escalation

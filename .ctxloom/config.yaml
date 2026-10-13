@@ -1,0 +1,46 @@
+agents:
+  default:
+    engine_home: session
+    llm: claude-code
+    permissions:
+      claude-code:
+        mode: acceptEdits
+    profiles:
+      - default
+    runtime: host
+  developer:
+    llm: claude-code
+    profiles:
+      - developer
+    runtime: container-rootless
+  implementor:
+    engine_home: session
+    llm: claude-code
+    permissions:
+      claude-code:
+        mode: bypass
+    profiles:
+      - developer
+    runtime: container-rootless
+  orchestrator:
+    llm: claude-code
+    profiles:
+      - orchestrator
+    runtime: host
+auth: token
+config:
+  use_distilled: true
+default_agent: orchestrator
+dirty_tree_handler: commit
+llm:
+  configs:
+    claude-code:
+      model: claude-opus-4-8
+      type: claude-code
+    claude-fast:
+      model: claude-haiku-4-5-20251001
+      type: claude-code
+  defaults:
+    fast: claude-fast
+    primary: claude-code
+schema_version: 7

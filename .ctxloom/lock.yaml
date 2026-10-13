@@ -1,0 +1,27 @@
+schema_version: 3
+bundles:
+  ctxloom+git://github.com/ctxloom/ctxloom-default//bundles/agent-roles:
+    sha: 187d98e380313c9ffc24ce5a4ff512ccae03a832
+    url: https://github.com/ctxloom/ctxloom-default
+    kind: branch
+  ctxloom+git://github.com/ctxloom/ctxloom-default//bundles/ai-coding-general:
+    sha: 187d98e380313c9ffc24ce5a4ff512ccae03a832
+    url: https://github.com/ctxloom/ctxloom-default
+    kind: branch
+  ctxloom+git://github.com/ctxloom/ctxloom-default//bundles/ai-developer:
+    sha: 187d98e380313c9ffc24ce5a4ff512ccae03a832
+    url: https://github.com/ctxloom/ctxloom-default
+    requested_version: branch:main
+    kind: branch
+  ctxloom+git://github.com/ctxloom/ctxloom-default//bundles/git:
+    sha: 187d98e380313c9ffc24ce5a4ff512ccae03a832
+    url: https://github.com/ctxloom/ctxloom-default
+    kind: branch
+  ctxloom+git://github.com/ctxloom/ctxloom-default//bundles/rust-development:
+    sha: 187d98e380313c9ffc24ce5a4ff512ccae03a832
+    url: https://github.com/ctxloom/ctxloom-default
+    kind: branch
+  ctxloom+git://github.com/ctxloom/ctxloom-default//bundles/testing:
+    sha: 187d98e380313c9ffc24ce5a4ff512ccae03a832
+    url: https://github.com/ctxloom/ctxloom-default
+    kind: branch
