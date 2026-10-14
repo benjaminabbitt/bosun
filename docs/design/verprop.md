@@ -1104,6 +1104,7 @@ remote indexes. Traits stay ready; nothing is stubbed.
 | 2 | bosun-core Spec/Policy, exact/range/tolerant (§7) | landed; 46 tests, mutation 17/17 viable caught |
 | 3 | bosun-core platform/backend/record value types (§4.5, §4.6, §5.4) | landed; 64 tests, mutation 18/18 viable caught |
 | 4 | bosun-ports traits (§5.1, §5.3, §5.5) + bosun-core Distro | landed; 71 tests, mutation 28/28 viable caught |
+| 2b | tolerant-with-range on the pre-vers wildcard grammar (child commit `3b2a989`) | **not landed**: built before the vers decision reached the child; superseded by 4b |
 | 4b | adopt purl + vers (§5.6): rework slice 2 range grammar and slice 3 PackageId; tolerant-with-range falls out of it | in progress |
 | 5–13 | io, host, backends, resolve, apply, cli, acceptance, dogfood, quality | not started |
 
