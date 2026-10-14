@@ -135,6 +135,20 @@ mod tests {
     }
 
     #[test]
+    fn with_env_attaches_the_environment_and_preserves_the_command() {
+        let cmd = Command::new("apt-get", ["install".to_string()]).with_env(vec![(
+            "DEBIAN_FRONTEND".to_string(),
+            "noninteractive".to_string(),
+        )]);
+        assert_eq!(cmd.program, "apt-get");
+        assert_eq!(cmd.args, vec!["install".to_string()]);
+        assert_eq!(
+            cmd.env,
+            vec![("DEBIAN_FRONTEND".to_string(), "noninteractive".to_string())]
+        );
+    }
+
+    #[test]
     fn output_stdout_utf8_decodes_lossily() {
         let o = Output {
             code: Some(0),

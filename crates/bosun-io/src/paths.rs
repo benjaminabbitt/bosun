@@ -32,3 +32,28 @@ pub fn state_path(scope: Scope) -> Result<PathBuf, IoError> {
 pub fn config_path() -> Result<PathBuf, IoError> {
     Ok(xdg()?.config_dir().join("bosun").join("config.yaml"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn system_state_path_sits_beside_the_os_package_managers() {
+        assert_eq!(
+            state_path(Scope::System).unwrap(),
+            PathBuf::from("/var/lib/bosun/state.json")
+        );
+    }
+
+    #[test]
+    fn user_state_path_is_bosun_state_json_under_an_xdg_dir() {
+        let p = state_path(Scope::User).unwrap();
+        assert!(p.ends_with("bosun/state.json"), "got {p:?}");
+    }
+
+    #[test]
+    fn config_path_is_bosun_config_yaml_under_the_config_dir() {
+        let p = config_path().unwrap();
+        assert!(p.ends_with("bosun/config.yaml"), "got {p:?}");
+    }
+}

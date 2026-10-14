@@ -445,4 +445,46 @@ packages:
     fn hash_is_sha256_prefixed() {
         assert!(manifest_hash(&load(SAMPLE)).starts_with("sha256:"));
     }
+
+    #[test]
+    fn diagnostic_codes_are_stable_per_variant() {
+        // The codes are the diagnostic's identity for annals; pin them so a
+        // rename is a deliberate, reviewed change, not a silent one.
+        assert_eq!(
+            ManifestError::NotAMapping {
+                context: "x".into()
+            }
+            .code(),
+            "bosun.manifest.not_a_mapping"
+        );
+        assert_eq!(
+            ManifestError::UnknownKey {
+                context: "x".into(),
+                key: "k".into()
+            }
+            .code(),
+            "bosun.manifest.unknown_key"
+        );
+        assert_eq!(
+            ManifestError::BadSelector { value: "s".into() }.code(),
+            "bosun.manifest.bad_selector"
+        );
+        assert_eq!(
+            ManifestError::MissingName.code(),
+            "bosun.manifest.missing_name"
+        );
+    }
+
+    #[test]
+    fn diagnostic_args_carry_the_offending_values() {
+        // `args` feeds the rendered message; an empty list would drop the key
+        // and context the diagnostic names.
+        let args = ManifestError::UnknownKey {
+            context: "the manifest root".into(),
+            key: "policy".into(),
+        }
+        .args();
+        let keys: Vec<&str> = args.iter().map(|(k, _)| *k).collect();
+        assert_eq!(keys, vec!["context", "key"]);
+    }
 }
