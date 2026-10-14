@@ -7,12 +7,16 @@
 pub mod errmsg;
 pub mod error;
 pub mod executor;
+pub mod http;
 pub mod logmsg;
 pub mod machine;
 pub mod os_release;
+pub mod process;
 pub mod registry;
 
 pub use error::HostError;
 pub use executor::StepExecutor;
+pub use http::UreqHttpFetcher;
 pub use machine::{detect_arch, FakeMachine, LinuxMachine};
+pub use process::ProcessCommandRunner;
 pub use registry::{build_registry, RegisteredBackend, Registry, SkipReason, SkippedBackend};

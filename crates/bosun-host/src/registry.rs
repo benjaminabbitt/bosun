@@ -64,6 +64,12 @@ impl Registry {
     pub fn get(&self, id: &str) -> Option<&RegisteredBackend> {
         self.backends.iter().find(|b| b.id.as_str() == id)
     }
+
+    /// Consume the registry into its registered and skipped backends, so a
+    /// caller can move each backend's `Index`/`Installer` out of it.
+    pub fn into_parts(self) -> (Vec<RegisteredBackend>, Vec<SkippedBackend>) {
+        (self.backends, self.skipped)
+    }
 }
 
 enum Outcome {
