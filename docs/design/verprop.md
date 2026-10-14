@@ -1181,6 +1181,9 @@ remote indexes. Traits stay ready; nothing is stubbed.
 - The CLI's integration tests drive the real binary through a test seam (`BOSUN_FIXTURE` +
   `BOSUN_STATE_DIR`). The seam needs both variables, never touches real state paths, and
   warns on stderr on every run while it's active.
+- Hold support is three-valued (§5.2): apt `Supported` (hold action), cargo and github-release
+  `NotNeeded` (silent: cargo re-asserts each run; bosun owns github-release binaries),
+  `Unsupported` warns.
 - `Arch` is amd64/arm64 only; `Os` uses Docker's spelling (`darwin`).
 
 **Slice status:**
@@ -1209,7 +1212,8 @@ remote indexes. Traits stay ready; nothing is stubbed.
 | 10-1 | per-action state checkpoints + ApplyReport JSON; real adapters (std::process, ureq/rustls); wiring; `backends` / `status` / `lock [--check]`; `--format` | landed; 245 tests |
 | 10-2 | `install` / `uninstall` / `prune` + confirmation; backend metadata on the factory; fixture-seam guard | landed; 258 tests |
 | 10-3 | blockers from the first real-host smoke run (below) + cross-claim selection in `install` | landed; 265 tests; host re-run: jq → `accept`, invalid spec → parse error + exit 1, ctxloom 0.6.4 planned |
-| 11 | acceptance: cucumber-rs over the real binary; seam tier + real-backend tier in a disposable container | in progress |
+| 11-1 | acceptance seam tier: cucumber-rs over the real binary, 4 features / 20 scenarios, under `cargo test --workspace`; hold support `Supported / Unsupported / NotNeeded` | landed; 266 tests + 20 scenarios |
+| 11-2 | acceptance real-backend tier in a disposable container (`just acceptance-real`, `BOSUN_ACCEPTANCE_REAL=1`) | in progress |
 | 12–13 | cli, acceptance, dogfood, quality | not started |
 
 **First real-host smoke run (2026-10-14, release build, Debian 13, read-only `--plan` and
