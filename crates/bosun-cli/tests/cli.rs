@@ -1058,3 +1058,75 @@ fn frozen_refuses_an_accepted_package_at_a_different_version_than_the_lock() {
         "no change to an unowned package: {json}"
     );
 }
+
+// --- 12-2: version scheme from the backend's vers type (idempotency) --------
+
+/// Install, lock, then re-plan: a fully-applied manifest must plan to nothing,
+/// both re-resolved and --frozen. Catches a version read back under the wrong
+/// scheme (github state 0.6.4 as generic vs the semver spec would churn).
+fn assert_second_run_is_idempotent(dir: &Path) {
+    bosun(dir)
+        .args(["install"])
+        .arg(dir)
+        .arg("--yes")
+        .assert()
+        .success();
+    bosun(dir).args(["lock"]).arg(dir).assert().success();
+    let replan = bosun(dir)
+        .args(["--format", "json", "install"])
+        .arg(dir)
+        .arg("--plan")
+        .assert()
+        .code(0);
+    assert!(
+        stdout_json(&replan.get_output().stdout)["actions"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "re-resolved plan is a no-op"
+    );
+    let frozen = bosun(dir)
+        .args(["--format", "json", "install"])
+        .arg(dir)
+        .args(["--plan", "--frozen"])
+        .assert()
+        .code(0);
+    assert!(
+        stdout_json(&frozen.get_output().stdout)["actions"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "frozen plan is a no-op"
+    );
+}
+
+#[test]
+fn apt_install_is_idempotent_on_the_second_run() {
+    let fixture = r#"{"os":"linux","arch":"amd64","distro":{"id":"debian","codename":"trixie"},
+      "privilege":"elevated","user":"root",
+      "backends":[{"id":"apt","version":"2.6.1","purl_type":"deb","vers_type":"deb","platform_independent":false,
+        "scope":"system","supports_hold":true,"available":{"jq":["1.7.1-6+deb13u1"]}}]}"#;
+    let manifest = "version: 1\ntargets: [linux/amd64]\npackages:\n  - name: jq\n    spec: \">=1.6\"\n    install:\n      linux:debian: {backend: apt}\n";
+    assert_second_run_is_idempotent(write_project(fixture, manifest).path());
+}
+
+#[test]
+fn cargo_install_is_idempotent_on_the_second_run() {
+    let fixture = r#"{"os":"linux","arch":"amd64","privilege":"unelevated","user":"t",
+      "backends":[{"id":"cargo","version":"1.76.0","purl_type":"cargo","vers_type":"cargo","platform_independent":true,
+        "scope":"user","available":{"ripgrep":["14.1.1"]}}]}"#;
+    let manifest = "version: 1\ntargets: [linux/amd64]\npackages:\n  - name: ripgrep\n    spec: \">=14.0.0|<15.0.0\"\n    install:\n      linux: {backend: cargo}\n";
+    assert_second_run_is_idempotent(write_project(fixture, manifest).path());
+}
+
+#[test]
+fn github_release_install_is_idempotent_on_the_second_run() {
+    // The regression: github's purl type is `github` (generic) but versions
+    // compare as semver. State's 0.6.4 must read back as semver, or the second
+    // run plans a spurious change.
+    let fixture = r#"{"os":"linux","arch":"amd64","privilege":"unelevated","user":"t",
+      "backends":[{"id":"github-release","version":"1.0.0","purl_type":"github","vers_type":"semver","platform_independent":false,
+        "scope":"user","available":{"ctxloom/ctxloom":["0.6.4"]}}]}"#;
+    let manifest = "version: 1\ntargets: [linux/amd64]\npackages:\n  - name: ctxloom\n    spec: \">=0.6.4|<0.7.0\"\n    install:\n      linux: {backend: github-release, package: ctxloom/ctxloom}\n";
+    assert_second_run_is_idempotent(write_project(fixture, manifest).path());
+}

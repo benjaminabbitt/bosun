@@ -320,7 +320,7 @@ pub fn lock(
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join("bosun.lock");
-    let existing = read_lock(&lock_path)?;
+    let existing = read_lock(&lock_path, &env.schemes())?;
 
     if check {
         let doc = existing.unwrap_or_else(empty_lock);
@@ -477,7 +477,10 @@ fn freshness_text(f: Freshness) -> &'static str {
     }
 }
 
-fn read_lock(path: &Path) -> Result<Option<LockDocument>, CliError> {
+fn read_lock(
+    path: &Path,
+    schemes: &bosun_io::BackendSchemes,
+) -> Result<Option<LockDocument>, CliError> {
     if !path.exists() {
         return Ok(None);
     }
@@ -485,7 +488,7 @@ fn read_lock(path: &Path) -> Result<Option<LockDocument>, CliError> {
         path: path.to_path_buf(),
         detail: e.to_string(),
     })?;
-    let doc = lock::from_json(&text, path).map_err(|e| CliError::Parse {
+    let doc = lock::from_json(&text, path, schemes).map_err(|e| CliError::Parse {
         what: "lockfile".to_string(),
         detail: e.to_string(),
     })?;
@@ -533,7 +536,7 @@ pub fn install_plan(env: &Env, opts: InstallOpts, pref: &[BackendId]) -> Result<
 
     let (managed, carried) = if opts.frozen {
         let lock_path = lock_path(&file);
-        let lock = read_lock(&lock_path)?.ok_or_else(|| {
+        let lock = read_lock(&lock_path, &env.schemes())?.ok_or_else(|| {
             CliError::Resolve(format!(
                 "--frozen needs a lockfile at {}",
                 lock_path.display()

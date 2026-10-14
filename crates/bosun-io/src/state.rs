@@ -10,12 +10,12 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use bosun_core::record::{Package, Placement, StateDocument, StateLeaf, StatePackage};
-use bosun_core::vers::scheme_for_type;
-use bosun_core::{BackendId, Claim, Origin, Purl, Scope, Version};
+use bosun_core::{BackendId, Claim, Origin, Purl, Scheme, Scope, Version};
 use bosun_ports::{PortError, StateStore, StateTransaction};
 use serde::{Deserialize, Serialize};
 
 use crate::error::IoError;
+use crate::BackendSchemes;
 
 /// The newest machine-state format version this build reads and writes.
 pub const STATE_VERSION: u32 = 1;
@@ -108,7 +108,7 @@ impl StateDoc {
         }
     }
 
-    fn into_core(self) -> Result<StateDocument, IoError> {
+    fn into_core(self, schemes: &BackendSchemes) -> Result<StateDocument, IoError> {
         let packages = self
             .packages
             .into_iter()
@@ -116,7 +116,12 @@ impl StateDoc {
                 let targets = p
                     .targets
                     .into_iter()
-                    .map(|(t, e)| Ok((parse_target(&t)?, leaf(e)?)))
+                    .map(|(t, e)| {
+                        // §6: the version's scheme comes from the leaf's backend's
+                        // declared vers type, not the purl type.
+                        let scheme = crate::scheme_of(schemes, &e.backend);
+                        Ok((parse_target(&t)?, leaf(e, scheme)?))
+                    })
                     .collect::<Result<_, IoError>>()?;
                 Ok(Package {
                     name: p.name,
@@ -132,14 +137,12 @@ impl StateDoc {
     }
 }
 
-fn leaf(e: LeafEntry) -> Result<StateLeaf, IoError> {
+fn leaf(e: LeafEntry, scheme: Scheme) -> Result<StateLeaf, IoError> {
     let purl: Purl = e.purl.parse().map_err(|err| IoError::Convert {
         detail: format!("purl {:?}: {err}", e.purl),
     })?;
-    let installed = Version::parse(&e.installed, scheme_for_type(purl.ty())).map_err(|err| {
-        IoError::Convert {
-            detail: format!("version {:?}: {err}", e.installed),
-        }
+    let installed = Version::parse(&e.installed, scheme).map_err(|err| IoError::Convert {
+        detail: format!("version {:?}: {err}", e.installed),
     })?;
     Ok(StateLeaf {
         placement: Placement {
@@ -172,32 +175,46 @@ pub fn to_json(doc: &StateDocument) -> String {
         .expect("state serialization is infallible")
 }
 
-/// Parse machine state from JSON text.
-pub fn from_json(text: &str, source: &Path) -> Result<StateDocument, IoError> {
+/// Parse machine state from JSON text. `schemes` maps each backend to its
+/// version scheme (§6), so a leaf's `installed` version parses under the
+/// backend's vers type rather than its purl type.
+pub fn from_json(
+    text: &str,
+    source: &Path,
+    schemes: &BackendSchemes,
+) -> Result<StateDocument, IoError> {
     let doc: StateDoc = serde_json::from_str(text).map_err(|e| IoError::Parse {
         path: source.to_path_buf(),
         detail: e.to_string(),
     })?;
-    doc.into_core()
+    doc.into_core(schemes)
 }
 
-/// A [`StateStore`] backed by one JSON file per scope (§4.6).
+/// A [`StateStore`] backed by one JSON file per scope (§4.6). Carries the
+/// backend→scheme map (§6) used to read versions under each backend's vers type.
 pub struct FileStateStore {
     system: PathBuf,
     user: PathBuf,
+    schemes: BackendSchemes,
 }
 
 impl FileStateStore {
-    /// Construct with explicit per-scope paths (injected by the machine).
-    pub fn new(system: PathBuf, user: PathBuf) -> FileStateStore {
-        FileStateStore { system, user }
+    /// Construct with explicit per-scope paths (injected by the machine) and the
+    /// backend→scheme map for reading versions (§6).
+    pub fn new(system: PathBuf, user: PathBuf, schemes: BackendSchemes) -> FileStateStore {
+        FileStateStore {
+            system,
+            user,
+            schemes,
+        }
     }
 
     /// Construct with the default §4.6 locations for this host.
-    pub fn with_default_paths() -> Result<FileStateStore, IoError> {
+    pub fn with_default_paths(schemes: BackendSchemes) -> Result<FileStateStore, IoError> {
         Ok(FileStateStore {
             system: crate::paths::state_path(Scope::System)?,
             user: crate::paths::state_path(Scope::User)?,
+            schemes,
         })
     }
 
@@ -236,7 +253,7 @@ impl StateStore for FileStateStore {
             path: path.with_extension("lock"),
             source,
         })?;
-        let state = read_or_empty(&path)?;
+        let state = read_or_empty(&path, &self.schemes)?;
         Ok(FileStateTxn { path, lock, state })
     }
 
@@ -244,7 +261,7 @@ impl StateStore for FileStateStore {
         let (path, lock) = self.open_lock(scope)?;
         match lock.try_lock() {
             Ok(()) => {
-                let state = read_or_empty(&path)?;
+                let state = read_or_empty(&path, &self.schemes)?;
                 Ok(Some(FileStateTxn { path, lock, state }))
             }
             Err(TryLockError::WouldBlock) => Ok(None),
@@ -270,7 +287,7 @@ impl StateStore for FileStateStore {
             path: lock_path,
             source,
         })?;
-        Ok(read_or_empty(path)?)
+        Ok(read_or_empty(path, &self.schemes)?)
     }
 }
 
@@ -314,9 +331,9 @@ fn empty_state() -> StateDocument {
     }
 }
 
-fn read_or_empty(path: &Path) -> Result<StateDocument, IoError> {
+fn read_or_empty(path: &Path, schemes: &BackendSchemes) -> Result<StateDocument, IoError> {
     match fs::read_to_string(path) {
-        Ok(text) => from_json(&text, path),
+        Ok(text) => from_json(&text, path, schemes),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(empty_state()),
         Err(source) => Err(IoError::Read {
             path: path.to_path_buf(),
@@ -345,6 +362,11 @@ fn save_atomic(path: &Path, bytes: &[u8]) -> Result<(), IoError> {
 mod tests {
     use super::*;
     use bosun_core::Scheme;
+
+    /// The sample records an apt (deb) package, so its version reads as Debian.
+    fn schemes() -> BackendSchemes {
+        BackendSchemes::from([("apt".to_string(), Scheme::Debian)])
+    }
 
     fn sample() -> StateDocument {
         let t: bosun_core::Target = "linux/amd64".parse().unwrap();
@@ -403,7 +425,7 @@ mod tests {
 
     #[test]
     fn roundtrips_through_json() {
-        let back = from_json(&to_json(&sample()), Path::new("state.json")).unwrap();
+        let back = from_json(&to_json(&sample()), Path::new("state.json"), &schemes()).unwrap();
         assert_eq!(back, sample());
     }
 
@@ -411,7 +433,7 @@ mod tests {
     fn roundtrips_the_accepted_origin() {
         let mut doc = sample();
         doc.packages[0].targets.values_mut().next().unwrap().origin = Origin::Accepted;
-        let back = from_json(&to_json(&doc), Path::new("state.json")).unwrap();
+        let back = from_json(&to_json(&doc), Path::new("state.json"), &schemes()).unwrap();
         assert_eq!(
             back.packages[0].targets.values().next().unwrap().origin,
             Origin::Accepted
@@ -425,13 +447,14 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         // Reading a directory errors with a kind other than NotFound, so it
         // must surface rather than be treated as "empty state".
-        assert!(read_or_empty(&dir).is_err());
+        assert!(read_or_empty(&dir, &schemes()).is_err());
     }
 
     fn store(tmp: &tempfile::TempDir) -> FileStateStore {
         FileStateStore::new(
             tmp.path().join("sys/state.json"),
             tmp.path().join("user/state.json"),
+            schemes(),
         )
     }
 
@@ -452,7 +475,10 @@ mod tests {
         let mut txn = store.begin(Scope::User).unwrap();
         txn.checkpoint(&sample()).unwrap();
         // Persisted and readable mid-transaction (a crash now keeps this).
-        assert_eq!(read_or_empty(store.path(Scope::User)).unwrap(), sample());
+        assert_eq!(
+            read_or_empty(store.path(Scope::User), &schemes()).unwrap(),
+            sample()
+        );
         // The lock is still held, so another run still backs off.
         assert!(
             store.try_begin(Scope::User).unwrap().is_none(),

@@ -138,6 +138,12 @@ impl Env {
             .map(|e| e.index.as_ref())
     }
 
+    /// The backend→scheme map (§6) for reading lockfile versions: a version's
+    /// scheme comes from its backend's declared vers type, not the purl type.
+    pub fn schemes(&self) -> bosun_io::BackendSchemes {
+        backend_schemes(&self.backends)
+    }
+
     /// The vers type of a backend, for parsing claim specs (§5.6).
     pub fn vers_type(&self, backend: &BackendId) -> Option<&str> {
         self.backends
@@ -192,14 +198,21 @@ pub fn assemble() -> Result<Env, CliError> {
     }
 }
 
-fn state_store_at(dir: &str) -> (FileStateStore, PathBuf, PathBuf) {
+fn state_paths_at(dir: &str) -> (PathBuf, PathBuf) {
     let d = PathBuf::from(dir);
-    let system = d.join("system").join("state.json");
-    let user = d.join("user").join("state.json");
     (
-        FileStateStore::new(system.clone(), user.clone()),
-        system,
-        user,
+        d.join("system").join("state.json"),
+        d.join("user").join("state.json"),
+    )
+}
+
+/// The backend→scheme map (§6) that lock/state reads use: a version's scheme
+/// comes from its backend's declared vers type, never the purl type.
+fn backend_schemes(backends: &[BackendEntry]) -> bosun_io::BackendSchemes {
+    bosun_io::schemes_from(
+        backends
+            .iter()
+            .map(|e| (e.id.as_str(), e.vers_type.as_str())),
     )
 }
 
@@ -243,7 +256,7 @@ fn from_host() -> Result<Env, CliError> {
     };
     let (registered, skipped) = build_registry(factories, &info).into_parts();
 
-    let backends = registered
+    let backends: Vec<BackendEntry> = registered
         .into_iter()
         .map(|rb| {
             // Metadata comes from the backend's factory (§5.1).
@@ -268,8 +281,9 @@ fn from_host() -> Result<Env, CliError> {
         .collect();
 
     let machine = LinuxMachine::new(arch, distro, system.clone(), user.clone());
+    let schemes = backend_schemes(&backends);
     Ok(Env {
-        state: FileStateStore::new(system, user),
+        state: FileStateStore::new(system, user, schemes),
         backends,
         skipped,
         machine: Box::new(machine),
@@ -319,7 +333,7 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
     };
     let user_name = fx.user.unwrap_or_else(|| "tester".to_string());
 
-    let (store, system, user) = state_store_at(state_dir);
+    let (system, user) = state_paths_at(state_dir);
     // One in-memory machine shared by every installer and the step runner,
     // seeded with the packages each backend reports already present.
     let machine_state: crate::fixture::Machine = Rc::new(RefCell::new(BTreeMap::new()));
@@ -361,6 +375,7 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
         })
         .collect::<Result<Vec<_>, CliError>>()?;
 
+    let store = FileStateStore::new(system.clone(), user.clone(), backend_schemes(&backends));
     let machine = FakeMachine {
         os,
         arch,

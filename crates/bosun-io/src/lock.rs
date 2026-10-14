@@ -7,11 +7,11 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use bosun_core::record::{LockDocument, LockLeaf, LockPackage, Package, Placement, TargetLock};
-use bosun_core::vers::scheme_for_type;
 use bosun_core::{BackendId, Checksum, Purl, Scheme, Spec, Target, Version};
 use serde::{Deserialize, Serialize};
 
 use crate::error::IoError;
+use crate::BackendSchemes;
 
 /// The newest lockfile format version this build reads and writes.
 pub const LOCKFILE_VERSION: u32 = 1;
@@ -99,7 +99,7 @@ impl LockDoc {
         }
     }
 
-    fn into_core(self) -> Result<LockDocument, IoError> {
+    fn into_core(self, schemes: &BackendSchemes) -> Result<LockDocument, IoError> {
         let targets = self
             .targets
             .into_iter()
@@ -117,13 +117,15 @@ impl LockDoc {
             .into_iter()
             .map(|p| {
                 let meta = spec(&p.spec)?;
-                // Versions compare under the spec's vers type (§6), which for
-                // github (purl type `github`) is semver — not the purl type.
-                let scheme = scheme_for_type(meta.range().ty());
                 let leaves = p
                     .targets
                     .into_iter()
-                    .map(|(t, e)| Ok((parse_target(&t)?, leaf(e, scheme)?)))
+                    .map(|(t, e)| {
+                        // §6: the version's scheme comes from the leaf's backend's
+                        // declared vers type, not the purl type.
+                        let scheme = crate::scheme_of(schemes, &e.backend);
+                        Ok((parse_target(&t)?, leaf(e, scheme)?))
+                    })
                     .collect::<Result<_, IoError>>()?;
                 Ok(Package {
                     name: p.name,
@@ -179,8 +181,14 @@ pub fn to_json(doc: &LockDocument) -> String {
         .expect("lock serialization is infallible")
 }
 
-/// Parse a lockfile from JSON text, refusing a newer major version.
-pub fn from_json(text: &str, source: &Path) -> Result<LockDocument, IoError> {
+/// Parse a lockfile from JSON text, refusing a newer major version. `schemes`
+/// maps each backend to its version scheme (§6), so a leaf's `resolved` parses
+/// under the backend's vers type rather than its purl type.
+pub fn from_json(
+    text: &str,
+    source: &Path,
+    schemes: &BackendSchemes,
+) -> Result<LockDocument, IoError> {
     let doc: LockDoc = serde_json::from_str(text).map_err(|e| IoError::Parse {
         path: source.to_path_buf(),
         detail: e.to_string(),
@@ -191,7 +199,7 @@ pub fn from_json(text: &str, source: &Path) -> Result<LockDocument, IoError> {
             max: LOCKFILE_VERSION,
         });
     }
-    doc.into_core()
+    doc.into_core(schemes)
 }
 
 #[cfg(test)]
@@ -200,6 +208,15 @@ mod tests {
     use bosun_core::record::TargetLock;
     use bosun_core::Scheme;
     use std::collections::BTreeMap;
+
+    /// The backend→scheme map a reader uses (§6): apt compares as Debian,
+    /// github-release as semver though its purl type is `github`.
+    fn schemes() -> BackendSchemes {
+        BackendSchemes::from([
+            ("apt".to_string(), Scheme::Debian),
+            ("github-release".to_string(), Scheme::Semver),
+        ])
+    }
 
     fn sample() -> LockDocument {
         let t = |s: &str| -> Target { s.parse().unwrap() };
@@ -262,7 +279,7 @@ mod tests {
     #[test]
     fn roundtrips_through_json() {
         let doc = sample();
-        let back = from_json(&to_json(&doc), Path::new("bosun.lock")).unwrap();
+        let back = from_json(&to_json(&doc), Path::new("bosun.lock"), &schemes()).unwrap();
         assert_eq!(back, doc);
     }
 
@@ -270,18 +287,19 @@ mod tests {
     fn refuses_newer_major_version() {
         let text = r#"{"lockfileVersion":2,"targets":{},"packages":[]}"#;
         assert!(matches!(
-            from_json(text, Path::new("bosun.lock")),
+            from_json(text, Path::new("bosun.lock"), &schemes()),
             Err(IoError::LockfileVersion { found: 2, max: 1 })
         ));
     }
 
     #[test]
-    fn resolved_version_reads_under_the_spec_vers_scheme_not_the_purl_type() {
-        // Regression (slice 12-1 dogfood): a github lock's purl type is `github`
-        // (Generic scheme) but its versions compare as semver. The resolved
-        // version must parse under the spec's vers type, or `--frozen` reports
-        // the locked version excluded by its own spec (cross-scheme `Version`
-        // comparison orders by scheme rank, never equal).
+    fn resolved_version_reads_under_the_backend_vers_scheme_not_the_purl_type() {
+        // Regression (slice 12-1/12-2 dogfood): a github lock's purl type is
+        // `github` (Generic scheme) but its versions compare as semver. The
+        // resolved version must parse under the backend's declared vers type
+        // (from the schemes map), or `--frozen` reports the locked version
+        // excluded by its own spec (cross-scheme `Version` comparison orders by
+        // scheme rank, never equal).
         let text = r#"{
   "lockfileVersion": 1,
   "targets": { "linux/amd64": { "manifestHash": "sha256:abcd" } },
@@ -299,7 +317,7 @@ mod tests {
     }
   ]
 }"#;
-        let doc = from_json(text, Path::new("bosun.lock")).unwrap();
+        let doc = from_json(text, Path::new("bosun.lock"), &schemes()).unwrap();
         let pkg = &doc.packages[0];
         let leaf = pkg.targets.values().next().unwrap();
         assert_eq!(leaf.resolved.scheme(), Scheme::Semver);
