@@ -712,6 +712,72 @@ error: 1 machine-scope package needs Administrator (winget: sharkdp.fd). Nothing
   "remedy": "sudo bosun install --scope system" }
 ```
 
+### 5.6 Standards: purl for identity, vers for ranges (DECIDED)
+
+bosun does not invent a package-ID or version-range syntax. It uses the package-url family:
+
+- **purl** (ECMA-427, Package-URL): `pkg:type/namespace/name@version?qualifiers#subpath`.
+  Registered types cover most bosun backends: `deb`, `rpm`, `alpm`, `apk`, `brew`, `cargo`,
+  `golang`, `npm`, `pypi`, `gem`, `github`, `generic`. Spec and conformance tests:
+  github.com/package-url/purl-spec (`types/`, `tests/spec/`, `tests/types/`).
+- **vers** (Package-URL version range specifier, being standardized by Ecma TC54-TG2):
+  `vers:<type>/<constraint>|<constraint>…`. Used by CycloneDX and CSAF. Spec and tests:
+  github.com/package-url/vers-spec (`docs/specification/standard/`, `tests/`).
+
+**purl: the recorded identity of a package on a target.**
+
+- The manifest stays sparse. `install.<selector>.package` is the backend's native ID
+  (defaulting to `name`), or a full purl where that's clearer. bosun builds the canonical
+  purl from the backend's purl type plus host facts. For deb/rpm the namespace is the distro
+  `ID`, with `arch` and `distro` qualifiers; a source becomes the standard `repository_url`
+  qualifier.
+- The lockfile and machine state record that purl (unversioned) per target, alongside
+  `backend` and `resolved`/`installed`. It replaces the separate `package` and `source`
+  fields. The backend's native ID is derived from the purl (e.g. `owner/repo` for `github`).
+- The logical `name` (§5.4) stays: purl identifies a package *within* one ecosystem; bosun's
+  `name` ties one tool's purls across ecosystems together.
+- Backends with no registered purl type (winget, scoop, snap, flatpak) use their backend id
+  as an unregistered type (`pkg:winget/sharkdp.fd`). The spec permits this, with a warning.
+- `backend` is still recorded: a purl type doesn't always pick the installer (`pypi` → uv
+  or pipx; `rpm` → dnf or zypper).
+
+**vers: the meaning of every `spec`.**
+
+- A `spec` is either a bare version (equality) or vers constraints, written either in full
+  (`vers:deb/>=1.7.1|<1.7.2~`) or without the `vers:<type>/` prefix (`>=2.40|<3`). The type
+  comes from the selected backend's purl type, so one entry-level `spec` is read in each
+  target's own version scheme (§6).
+- Containment follows the vers algorithm exactly: sorted unique constraints, alternating
+  bounds, `!=` exclusions, `*` for all versions; a version is in the range if it lies in any
+  interval. Each type's comparison rules come from bosun's version model (§6). Types with no
+  vers definition yet (github-release tags, brew) use `semver` where the versions are SemVer,
+  otherwise bosun's generic chunk ordering.
+- **No other range grammar in M1:** no `^`, `~` or `1.7.*`. They can come back later as
+  documented sugar that expands to vers.
+- The lockfile stores each spec in canonical vers form (`vers:<type>/…`), so a reader needs
+  only the vers spec to know what a lock entry allowed.
+
+**Policy becomes a selection rule over the vers set** (§7):
+
+| policy | spec | selects |
+|---|---|---|
+| exact | a bare version | that version, or fail |
+| range | vers constraints | the highest available version in the set |
+| tolerant | a bare version, or vers constraints | the *lowest available version at or above the anchor* that is in the set; the anchor is the bare version, or the range's lower bound. Never below the anchor. A deviation is recorded when the result isn't the anchor. |
+
+- Tolerant with a bare version is the open set `>=X`; tolerant with a range adds an upper
+  bound. So `vers:deb/>=1.7.1|<1.7.2~` means "1.7.1, else the next Debian revision of 1.7.1".
+  This is the "accept any point release in a range" case, and it needs no separate grammar.
+  "Closest above" also settles §11's tie-break question.
+- **Pre-releases:** they are *in* a vers set by plain ordering, but `range` and `tolerant`
+  never *select* one unless a constraint version is itself a pre-release (the SemVer
+  convention, §12 item 3). Exact pins can name one directly.
+
+**Conformance:** bosun's purl and vers code must pass the official JSON suites from both repos,
+vendored as test fixtures (MIT). Existing crates (`purl`, `vers-rs`, `unive_rs` on crates.io)
+are used only if they pass those suites and are maintained; otherwise bosun-core implements
+both (the grammars are small).
+
 ## 6. Version model
 
 - Version strings are **not normalizable** across ecosystems (Debian `epoch:upstream-rev`, RPM
