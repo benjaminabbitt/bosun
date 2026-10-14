@@ -61,7 +61,7 @@ fn clean(_w: &mut RealWorld) {
     let _ = run("apt-get", &["remove", "-y", "hello"]);
 }
 
-#[given("a manifest:")]
+#[given("the manifest:")]
 fn a_manifest(w: &mut RealWorld, step: &Step) {
     let p = w.home();
     fs::write(
@@ -71,8 +71,7 @@ fn a_manifest(w: &mut RealWorld, step: &Step) {
     .unwrap();
 }
 
-#[given(expr = "the manifest is deleted")]
-#[when(expr = "the manifest is deleted")]
+#[when("the manifest is deleted")]
 fn delete_manifest(w: &mut RealWorld) {
     let p = w.home();
     fs::remove_file(p.join("bosun.yaml")).unwrap();
@@ -88,7 +87,7 @@ fn make_user(w: &mut RealWorld) {
 
 /// Run bosun as a non-root user (user-scope backends refuse to run elevated,
 /// §5.5), with `HOME` pointed at the chowned temp dir.
-#[when(expr = "I run {string} as a non-root user")]
+#[when(regex = r"^the non-root user runs `bosun (.+)`$")]
 fn i_run_as_user(w: &mut RealWorld, cmdline: String) {
     let home = w.home();
     let bosun = std::path::PathBuf::from(env!("CARGO_BIN_EXE_bosun"));
@@ -127,7 +126,7 @@ fn i_run_as_user(w: &mut RealWorld, cmdline: String) {
     w.stderr = String::from_utf8_lossy(&out.stderr).to_string();
 }
 
-#[when(expr = "I run {string}")]
+#[when(regex = r"^I run `bosun (.+)`$")]
 fn i_run(w: &mut RealWorld, cmdline: String) {
     let home = w.home();
     let args: Vec<String> = cmdline
@@ -158,24 +157,33 @@ fn i_run(w: &mut RealWorld, cmdline: String) {
     w.stderr = String::from_utf8_lossy(&out.stderr).to_string();
 }
 
-#[then(expr = "the exit code is {int}")]
-fn exit_code(w: &mut RealWorld, code: i32) {
+fn assert_exit(w: &RealWorld, code: i32) {
     assert_eq!(w.code, code, "stdout:\n{}\nstderr:\n{}", w.stdout, w.stderr);
 }
 
-#[then(expr = "stdout contains {string}")]
+#[then("it succeeds")]
+fn succeeds(w: &mut RealWorld) {
+    assert_exit(w, 0);
+}
+
+#[then("it reports changes pending")]
+fn changes_pending(w: &mut RealWorld) {
+    assert_exit(w, 2);
+}
+
+#[then(expr = "it says {string}")]
 fn stdout_contains(w: &mut RealWorld, needle: String) {
     assert!(w.stdout.contains(&needle), "stdout:\n{}", w.stdout);
 }
 
-#[then(expr = "dpkg reports {string} installed")]
+#[then(expr = "dpkg reports {word} installed")]
 fn dpkg_installed(_w: &mut RealWorld, pkg: String) {
     let (code, out) = run("dpkg-query", &["-W", "-f=${db:Status-Status}", &pkg]);
     assert_eq!(code, 0, "dpkg-query failed: {out}");
     assert_eq!(out.trim(), "installed", "dpkg status: {out}");
 }
 
-#[then(expr = "dpkg reports {string} not installed")]
+#[then(expr = "dpkg reports {word} not installed")]
 fn dpkg_absent(_w: &mut RealWorld, pkg: String) {
     let (_code, out) = run("dpkg-query", &["-W", "-f=${db:Status-Status}", &pkg]);
     assert_ne!(
@@ -185,19 +193,19 @@ fn dpkg_absent(_w: &mut RealWorld, pkg: String) {
     );
 }
 
-#[then(expr = "apt-mark reports {string} held")]
+#[then(expr = "apt-mark reports {word} held")]
 fn held(_w: &mut RealWorld, pkg: String) {
     let (_code, out) = run("apt-mark", &["showhold"]);
     assert!(out.lines().any(|l| l.trim() == pkg), "showhold:\n{out}");
 }
 
-#[then(expr = "apt-mark reports {string} not held")]
+#[then(expr = "apt-mark reports {word} not held")]
 fn not_held(_w: &mut RealWorld, pkg: String) {
     let (_code, out) = run("apt-mark", &["showhold"]);
     assert!(!out.lines().any(|l| l.trim() == pkg), "showhold:\n{out}");
 }
 
-#[then(expr = "the binary {string} exists and is executable")]
+#[then(expr = "the binary {word} exists and is executable")]
 fn binary_executable(w: &mut RealWorld, name: String) {
     let path = w.bin_dir().join(&name);
     let meta = fs::metadata(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));

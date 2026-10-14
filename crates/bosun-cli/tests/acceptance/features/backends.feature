@@ -1,26 +1,21 @@
 Feature: bosun backends lists the backends available on this host
 
   Background:
-    Given a fixture:
-      """
-      {"os":"linux","arch":"amd64","privilege":"unelevated","user":"t",
-       "backends":[{"id":"cargo","version":"1.76.0","purl_type":"cargo","vers_type":"cargo",
-         "platform_independent":true,"scope":"user"},
-        {"id":"github-release","version":"1.0.0","purl_type":"github","vers_type":"semver",
-         "platform_independent":false,"scope":"user"}]}
-      """
+    Given a Linux amd64 machine, not elevated
+    And cargo 1.76.0 is available
+    And github-release 1.0.0 is available
 
   Scenario: each registered backend is listed with its version
-    When I run "--format text backends"
-    Then the exit code is 0
-    And stdout contains "cargo"
-    And stdout contains "1.76.0"
-    And stdout contains "github-release"
+    When I run `bosun --format text backends`
+    Then it succeeds
+    And it says "cargo"
+    And it says "1.76.0"
+    And it says "github-release"
 
   Scenario: --format json reports the registered backends as a JSON document
-    When I run "--format json backends"
-    Then the exit code is 0
-    And stdout is a JSON document
-    And stdout contains "registered"
-    And stdout contains "skipped"
-    And stdout contains "1.76.0"
+    When I run `bosun --format json backends`
+    Then it succeeds
+    And it prints a JSON document
+    And it says "registered"
+    And it says "skipped"
+    And it says "1.76.0"

@@ -1,15 +1,11 @@
 Feature: github-release packages are locked with their release checksum
 
   Background:
-    Given a fixture:
-      """
-      {"os":"linux","arch":"amd64","privilege":"unelevated","user":"t",
-       "backends":[{"id":"github-release","version":"1.0.0","purl_type":"github","vers_type":"semver",
-         "platform_independent":false,"scope":"user",
-         "available":{"ctxloom/ctxloom":["0.6.4","0.6.5"]},
-         "checksums":{"ctxloom/ctxloom":"sha256:4f1c0a9e2b7d"}}]}
-      """
-    And a manifest:
+    Given a Linux amd64 machine, not elevated
+    And github-release 1.0.0 is available
+    And github-release publishes ctxloom/ctxloom 0.6.4 and 0.6.5
+    And the ctxloom/ctxloom release publishes checksum sha256:4f1c0a9e2b7d
+    And the manifest:
       """
       version: 1
       targets: [linux/amd64]
@@ -21,22 +17,22 @@ Feature: github-release packages are locked with their release checksum
       """
 
   Scenario: lock records the checksum the release publishes
-    When I run "lock ."
-    Then the exit code is 0
-    And a lockfile is written
-    And the lockfile contains "0.6.5"
-    And the lockfile contains "sha256:4f1c0a9e2b7d"
+    When I run `bosun lock .`
+    Then it succeeds
+    And a lock is written
+    And the lock pins ctxloom 0.6.5
+    And the lock records the checksum sha256:4f1c0a9e2b7d
 
   Scenario: a github-release install needs no hold and warns about none
-    When I run "--format json install . --plan"
-    Then the exit code is 2
-    And stdout contains "install"
-    And stdout does not contain "hold"
-    And stdout does not contain "not pinned"
+    When I run `bosun --format json install . --plan`
+    Then it reports changes pending
+    And it says "install"
+    And it does not say "hold"
+    And it does not say "not pinned"
 
   Scenario: --frozen accepts a locked version inside a semver range
-    When I run "lock ."
-    And I run "--format json install . --yes --frozen"
-    Then the exit code is 0
-    And stdout contains "applied"
-    And the recorded state contains "0.6.5"
+    When I run `bosun lock .`
+    And I run `bosun --format json install . --frozen --yes`
+    Then it succeeds
+    And it says "applied"
+    And bosun has recorded ctxloom 0.6.5
