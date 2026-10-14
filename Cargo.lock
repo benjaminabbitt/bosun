@@ -126,30 +126,23 @@ dependencies = [
 name = "bosun-apply"
 version = "0.0.0"
 dependencies = [
- "annals-diagnostic",
  "bosun-core",
  "bosun-ports",
  "serde",
  "serde_json",
- "thiserror",
- "tracing",
 ]
 
 [[package]]
 name = "bosun-backends"
 version = "0.0.0"
 dependencies = [
- "annals-diagnostic",
  "bosun-core",
  "bosun-ports",
- "flate2",
  "serde",
  "serde_json",
- "sha2",
  "tar",
  "tempfile",
  "tracing",
- "ureq",
 ]
 
 [[package]]
@@ -179,7 +172,6 @@ dependencies = [
 name = "bosun-core"
 version = "0.0.0"
 dependencies = [
- "annals-diagnostic",
  "deb-version",
  "semver",
  "serde",
@@ -191,8 +183,6 @@ dependencies = [
 name = "bosun-host"
 version = "0.0.0"
 dependencies = [
- "annals-diagnostic",
- "bosun-backends",
  "bosun-core",
  "bosun-ports",
  "flate2",
@@ -225,7 +215,6 @@ dependencies = [
 name = "bosun-ports"
 version = "0.0.0"
 dependencies = [
- "annals-diagnostic",
  "bosun-core",
  "thiserror",
 ]
@@ -234,11 +223,9 @@ dependencies = [
 name = "bosun-resolve"
 version = "0.0.0"
 dependencies = [
- "annals-diagnostic",
  "bosun-core",
  "bosun-ports",
  "thiserror",
- "tracing",
 ]
 
 [[package]]

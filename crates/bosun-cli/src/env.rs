@@ -84,41 +84,35 @@ impl Env {
     }
 }
 
-/// Assemble the environment: from a fixture when `BOSUN_FIXTURE` is set, else by
-/// probing the real host.
+/// Assemble the environment. The test seam (`BOSUN_FIXTURE` + `BOSUN_STATE_DIR`)
+/// requires **both** variables — one alone is an error, never a silent fall
+/// back to real host state — and prints a one-line stderr warning while active.
+/// With neither set, it probes the real host.
 pub fn assemble() -> Result<Env, CliError> {
-    match std::env::var("BOSUN_FIXTURE") {
-        Ok(path) => from_fixture(&path),
-        Err(_) => from_host(),
+    let fixture = std::env::var("BOSUN_FIXTURE").ok();
+    let state_dir = std::env::var("BOSUN_STATE_DIR").ok();
+    match (fixture, state_dir) {
+        (Some(fixture), Some(state_dir)) => {
+            eprintln!(
+                "bosun: test fixture active (BOSUN_FIXTURE={fixture}), not touching the real host"
+            );
+            from_fixture(&fixture, &state_dir)
+        }
+        (Some(_), None) | (None, Some(_)) => Err(CliError::Environment(
+            "the test seam needs both BOSUN_FIXTURE and BOSUN_STATE_DIR; set both or neither"
+                .to_string(),
+        )),
+        (None, None) => from_host(),
     }
 }
 
-/// The state store: a `BOSUN_STATE_DIR` override (tests) or the §4.6 defaults.
-fn state_store() -> Result<FileStateStore, CliError> {
-    match std::env::var("BOSUN_STATE_DIR") {
-        Ok(dir) => {
-            let d = PathBuf::from(dir);
-            Ok(FileStateStore::new(
-                d.join("system").join("state.json"),
-                d.join("user").join("state.json"),
-            ))
-        }
-        Err(_) => {
-            FileStateStore::with_default_paths().map_err(|e| CliError::Environment(e.to_string()))
-        }
-    }
-}
-
-/// The purl type, vers type, and platform-independence for an M1 backend
-/// (§5.6). The wiring the resolver's `ResolvableBackend` needs; a backend the
-/// resolver cannot place is left out.
-fn backend_meta(id: &str) -> Option<(&'static str, &'static str, bool)> {
-    match id {
-        "apt" => Some(("deb", "deb", false)),
-        "cargo" => Some(("cargo", "cargo", true)),
-        "github-release" => Some(("github", "semver", false)),
-        _ => None,
-    }
+/// A state store over an explicit directory (the fixture seam's `BOSUN_STATE_DIR`).
+fn state_store_at(dir: &str) -> FileStateStore {
+    let d = PathBuf::from(dir);
+    FileStateStore::new(
+        d.join("system").join("state.json"),
+        d.join("user").join("state.json"),
+    )
 }
 
 fn reason_text(reason: &SkipReason) -> String {
@@ -157,20 +151,21 @@ fn from_host() -> Result<Env, CliError> {
 
     let backends = registered
         .into_iter()
-        .filter_map(|rb| {
-            let (purl_type, vers_type, platform_independent) = backend_meta(rb.id.as_str())?;
+        .map(|rb| {
+            // Metadata comes from the backend's factory (§5.1); nothing here
+            // decides which backends exist or how to place them.
             let Backend {
                 index,
                 installer: _,
             } = rb.backend;
-            Some(BackendEntry {
+            BackendEntry {
                 id: rb.id,
                 version: rb.version,
-                purl_type: purl_type.to_string(),
-                vers_type: vers_type.to_string(),
-                platform_independent,
+                purl_type: rb.meta.purl_type.to_string(),
+                vers_type: rb.meta.vers_type.to_string(),
+                platform_independent: rb.meta.platform_independent,
                 index,
-            })
+            }
         })
         .collect();
     let skipped = skipped
@@ -185,7 +180,8 @@ fn from_host() -> Result<Env, CliError> {
         os,
         arch,
         distro,
-        state: state_store()?,
+        state: FileStateStore::with_default_paths()
+            .map_err(|e| CliError::Environment(e.to_string()))?,
         backends,
         skipped,
     })
@@ -197,7 +193,7 @@ fn home_dir() -> PathBuf {
         .unwrap_or_default()
 }
 
-fn from_fixture(path: &str) -> Result<Env, CliError> {
+fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
     let text = fs::read_to_string(path).map_err(|e| CliError::Io {
         path: PathBuf::from(path),
         detail: e.to_string(),
@@ -245,7 +241,7 @@ fn from_fixture(path: &str) -> Result<Env, CliError> {
         os,
         arch,
         distro,
-        state: state_store()?,
+        state: state_store_at(state_dir),
         backends,
         skipped: Vec::new(),
     })

@@ -31,6 +31,14 @@ impl CargoFactory {
 }
 
 impl BackendFactory for CargoFactory {
+    fn meta(&self) -> bosun_ports::BackendMeta {
+        bosun_ports::BackendMeta {
+            purl_type: "cargo",
+            vers_type: "cargo",
+            platform_independent: true,
+        }
+    }
+
     fn id(&self) -> BackendId {
         BackendId::new(BACKEND)
     }

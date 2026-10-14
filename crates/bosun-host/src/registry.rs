@@ -8,7 +8,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::thread;
 
 use bosun_core::{BackendId, Version};
-use bosun_ports::{Backend, BackendFactory, HostInfo, Probe};
+use bosun_ports::{Backend, BackendFactory, BackendMeta, HostInfo, Probe};
 use tracing::debug;
 
 use crate::logmsg;
@@ -20,6 +20,8 @@ pub struct RegisteredBackend {
     pub id: BackendId,
     /// The package manager's own version (§5.3).
     pub version: Version,
+    /// The resolver metadata (§5.6), from the factory.
+    pub meta: BackendMeta,
     /// The query and mutation sides.
     pub backend: Backend,
 }
@@ -112,10 +114,12 @@ pub fn build_registry(factories: Vec<Box<dyn BackendFactory>>, host: &HostInfo) 
             Outcome::Present(probe) => {
                 let version = probe.version.clone();
                 debug!(message = logmsg::BACKEND_REGISTERED, backend = %id.as_str(), version = %version);
+                let meta = factory.meta();
                 let backend = factory.build(probe);
                 backends.push(RegisteredBackend {
                     id,
                     version,
+                    meta,
                     backend,
                 });
             }
@@ -208,6 +212,13 @@ mod tests {
     impl BackendFactory for TestFactory {
         fn id(&self) -> BackendId {
             BackendId::new(self.id)
+        }
+        fn meta(&self) -> BackendMeta {
+            BackendMeta {
+                purl_type: "generic",
+                vers_type: "generic",
+                platform_independent: true,
+            }
         }
         fn probe(&self, _: &HostInfo) -> Result<Option<Probe>, PortError> {
             match self.behaviour {

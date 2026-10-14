@@ -10,9 +10,7 @@ rust-version.workspace = true
 [dependencies]
 bosun-core.workspace = true
 bosun-ports.workspace = true
-annals-diagnostic.workspace = true
 thiserror.workspace = true
-tracing.workspace = true
 
 [lints]
 workspace = true

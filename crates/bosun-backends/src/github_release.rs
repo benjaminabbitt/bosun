@@ -61,6 +61,15 @@ impl GithubReleaseFactory {
 }
 
 impl BackendFactory for GithubReleaseFactory {
+    fn meta(&self) -> bosun_ports::BackendMeta {
+        bosun_ports::BackendMeta {
+            // github tags compare as semver though the purl type is `github` (§6).
+            purl_type: "github",
+            vers_type: "semver",
+            platform_independent: false,
+        }
+    }
+
     fn id(&self) -> BackendId {
         BackendId::new(BACKEND)
     }

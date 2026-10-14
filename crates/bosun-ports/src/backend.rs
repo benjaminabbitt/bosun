@@ -89,11 +89,28 @@ pub struct Backend {
 }
 
 /// Registers a backend when it is present (§5.3). Every backend is compiled
+/// Static metadata the resolver needs about a backend (§5.6): the purl type for
+/// identity, the vers type for version comparison (§6), and whether it resolves
+/// under `any` (§4.7). Fixed per backend, independent of any probe, so the
+/// resolver can place a backend without a lookup table elsewhere (§5.1: adding
+/// a backend is one more impl, never a change in the CLI).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BackendMeta {
+    /// The purl type for identity (`deb`, `cargo`, `github`).
+    pub purl_type: &'static str,
+    /// The vers type versions compare under (`deb`, `cargo`, `semver`).
+    pub vers_type: &'static str,
+    /// Whether it resolves once under `any` (cargo, go, npm, …).
+    pub platform_independent: bool,
+}
+
 /// in; only those whose probe succeeds are built for the run. `Send + Sync`
 /// so all factories can be probed in parallel (§5.3).
 pub trait BackendFactory: Send + Sync {
     /// The backend's stable id.
     fn id(&self) -> BackendId;
+    /// The resolver metadata for this backend (§5.6), fixed and probe-independent.
+    fn meta(&self) -> BackendMeta;
     /// Cheap presence check against the host; `Ok(None)` means not present.
     fn probe(&self, host: &HostInfo) -> Result<Option<Probe>, PortError>;
     /// Build the backend from a successful probe. Called only when present.

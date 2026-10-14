@@ -290,3 +290,41 @@ fn a_non_applicable_entry_is_reported_with_its_reason() {
         "diagnostics: {diagnostics:?}"
     );
 }
+
+#[test]
+fn the_fixture_seam_requires_both_env_vars() {
+    let dir = project();
+    // BOSUN_FIXTURE alone (no state dir) → structured environment error, exit 1.
+    let only_fixture = Command::cargo_bin("bosun")
+        .unwrap()
+        .env("BOSUN_FIXTURE", dir.path().join("fixture.json"))
+        .env_remove("BOSUN_STATE_DIR")
+        .args(["--format", "json", "backends"])
+        .assert()
+        .code(1);
+    assert_eq!(
+        stdout_json(&only_fixture.get_output().stdout)["error"],
+        "bosun.cli.environment"
+    );
+
+    // BOSUN_STATE_DIR alone (no fixture) → the same error, never a real probe.
+    let only_state = Command::cargo_bin("bosun")
+        .unwrap()
+        .env("BOSUN_STATE_DIR", dir.path().join("state"))
+        .env_remove("BOSUN_FIXTURE")
+        .args(["--format", "json", "backends"])
+        .assert()
+        .code(1);
+    assert_eq!(
+        stdout_json(&only_state.get_output().stdout)["error"],
+        "bosun.cli.environment"
+    );
+}
+
+#[test]
+fn the_fixture_seam_warns_on_stderr_while_active() {
+    let dir = project();
+    let assert = bosun(dir.path()).arg("backends").assert().success();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(stderr.contains("test fixture active"), "stderr: {stderr}");
+}

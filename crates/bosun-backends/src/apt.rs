@@ -31,6 +31,14 @@ impl AptFactory {
 }
 
 impl BackendFactory for AptFactory {
+    fn meta(&self) -> bosun_ports::BackendMeta {
+        bosun_ports::BackendMeta {
+            purl_type: "deb",
+            vers_type: "deb",
+            platform_independent: false,
+        }
+    }
+
     fn id(&self) -> BackendId {
         BackendId::new(BACKEND)
     }
