@@ -449,11 +449,14 @@ fn unelevated_system_changes_require_elevation() {
     let machine = FakeMachine {
         privilege: Privilege::Unelevated,
     };
+    // The plan installs AND holds jq (apt holds); it must be named once.
     let err = check_privilege(&system_install_plan(), &machine, None).unwrap_err();
-    assert!(matches!(
-        err,
-        PrivilegeError::ElevationRequired { packages } if packages.iter().any(|p| p.name == "jq")
-    ));
+    match err {
+        PrivilegeError::ElevationRequired { packages } => {
+            assert_eq!(packages.iter().filter(|p| p.name == "jq").count(), 1);
+        }
+        other => panic!("expected elevation required, got {other:?}"),
+    }
 }
 
 #[test]

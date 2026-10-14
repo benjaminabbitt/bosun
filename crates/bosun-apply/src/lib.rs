@@ -671,14 +671,23 @@ pub fn check_privilege(
 ) -> Result<(), PrivilegeError> {
     let in_scope = |scope: Scope| requested.is_none_or(|r| r == scope);
     let collect = |scope: Scope| -> Vec<PackageRef> {
-        plan.actions
+        // One entry per package, not per action: a package with both an install
+        // and a hold needs root once, and must be named once (§5.5).
+        let mut refs: Vec<PackageRef> = Vec::new();
+        for a in plan
+            .actions
             .iter()
             .filter(|a| a.kind.changes_machine() && a.scope == scope && in_scope(scope))
-            .map(|a| PackageRef {
+        {
+            let pkg = PackageRef {
                 name: a.name.clone(),
                 backend: a.backend.clone(),
-            })
-            .collect()
+            };
+            if !refs.contains(&pkg) {
+                refs.push(pkg);
+            }
+        }
+        refs
     };
     let system = collect(Scope::System);
     let user = collect(Scope::User);

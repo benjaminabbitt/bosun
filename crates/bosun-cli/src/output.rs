@@ -80,3 +80,75 @@ struct ErrorValue {
     error: &'static str,
     message: String,
 }
+
+/// Render a privilege failure with its §5.5 remedy and return exit code 1. The
+/// remedy wording comes from the machine's `Elevation`.
+pub fn render_privilege_error(
+    err: &bosun_apply::PrivilegeError,
+    elevation: bosun_ports::Elevation,
+    format: Format,
+    out: &mut impl Write,
+) -> i32 {
+    use bosun_apply::PrivilegeError as P;
+    let (code, packages) = match err {
+        P::ElevationRequired { packages } => ("elevation_required", packages.as_slice()),
+        P::MustNotBeElevated { packages } => ("must_not_be_elevated", packages.as_slice()),
+        P::MixedScope { .. } => ("mixed_scope", [].as_slice()),
+    };
+    let value = PrivilegeErrorValue {
+        error: code,
+        message: err.to_string(),
+        remedy: remedy_text(err, elevation),
+        packages: packages
+            .iter()
+            .map(|p| PackageRefValue {
+                name: p.name.clone(),
+                backend: p.backend.as_str().to_string(),
+            })
+            .collect(),
+    };
+    let _ = match format {
+        Format::Text => writeln!(out, "error: {}\n  {}", value.message, value.remedy),
+        Format::Json => writeln!(out, "{}", serde_json::to_string_pretty(&value).unwrap()),
+        Format::Yaml => write!(out, "{}", serde_norway::to_string(&value).unwrap()),
+    };
+    1
+}
+
+fn remedy_text(err: &bosun_apply::PrivilegeError, elevation: bosun_ports::Elevation) -> String {
+    use bosun_apply::PrivilegeError as P;
+    use bosun_ports::Elevation as E;
+    match (err, elevation) {
+        (P::ElevationRequired { .. }, E::Sudo) => {
+            "re-run as root: sudo bosun install --scope system".to_string()
+        }
+        (P::ElevationRequired { .. }, E::AdministratorTerminal) => {
+            "open a terminal as Administrator and re-run: bosun install --scope system".to_string()
+        }
+        (P::MustNotBeElevated { .. }, _) => {
+            "re-run without elevation: bosun install --scope user".to_string()
+        }
+        (P::MixedScope { .. }, E::Sudo) => {
+            "run each scope: `sudo bosun install --scope system`, then `bosun install --scope user`"
+                .to_string()
+        }
+        (P::MixedScope { .. }, E::AdministratorTerminal) => {
+            "run each scope: `bosun install --scope system` as Administrator, then `bosun install --scope user`"
+                .to_string()
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct PrivilegeErrorValue {
+    error: &'static str,
+    message: String,
+    remedy: String,
+    packages: Vec<PackageRefValue>,
+}
+
+#[derive(Serialize)]
+struct PackageRefValue {
+    name: String,
+    backend: String,
+}

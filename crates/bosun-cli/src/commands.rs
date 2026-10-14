@@ -421,3 +421,308 @@ fn empty_lock() -> LockDocument {
         packages: Vec::new(),
     }
 }
+
+// --- install / uninstall / prune (§4.2, §4.8) ------------------------------
+
+use bosun_apply::{
+    build_install_plan, build_prune_plan, build_uninstall_plan, ApplyReport, ApplyResult, Current,
+    Diagnostic, Managed, Plan,
+};
+use bosun_core::{Claim, Target};
+use bosun_resolve::frozen_select;
+
+/// Options for `install`.
+pub struct InstallOpts {
+    /// The manifest directory or file.
+    pub path: Option<PathBuf>,
+    /// Apply the lockfile verbatim, no re-resolve (§7).
+    pub frozen: bool,
+}
+
+/// Build the `install` plan (§4.8): resolve the manifest (or read the lock with
+/// `--frozen`), compare to machine state, and plan installs/upgrades/holds.
+pub fn install_plan(env: &Env, opts: InstallOpts, pref: &[BackendId]) -> Result<Plan, CliError> {
+    let file = manifest_file(opts.path)?;
+    let manifest = load(&file)?;
+    let hash = manifest_hash(&manifest);
+    let sys = read_state(env, Scope::System)?;
+    let usr = read_state(env, Scope::User)?;
+
+    let (managed, carried) = if opts.frozen {
+        let lock_path = lock_path(&file);
+        let lock = read_lock(&lock_path)?.ok_or_else(|| {
+            CliError::Resolve(format!(
+                "--frozen needs a lockfile at {}",
+                lock_path.display()
+            ))
+        })?;
+        (
+            managed_from_lock(env, &file, &lock, &sys, &usr)?,
+            Vec::new(),
+        )
+    } else {
+        let resolution = resolve(&manifest, &hash, &env.host(), &env.resolvables(), pref)
+            .map_err(|e| CliError::Resolve(e.to_string()))?;
+        managed_from_resolution(env, &file, &resolution, &sys, &usr)?
+    };
+
+    build_install_plan(&managed, carried).map_err(|e| CliError::Resolve(e.to_string()))
+}
+
+/// Build the `uninstall` plan for one manifest (§9), from state, so it works
+/// after the manifest is edited or deleted.
+pub fn uninstall_plan(env: &Env, path: Option<PathBuf>) -> Result<Plan, CliError> {
+    let manifest_path = claim_manifest_path(path);
+    let state = combined_state(env)?;
+    let installers = env.installers();
+    build_uninstall_plan(&manifest_path, &state, &installers)
+        .map_err(|e| CliError::Resolve(e.to_string()))
+}
+
+/// Build the machine-wide `prune` plan (§9).
+pub fn prune_plan(env: &Env) -> Result<Plan, CliError> {
+    let state = combined_state(env)?;
+    let installers = env.installers();
+    build_prune_plan(&state, &installers, |p| p.exists())
+        .map_err(|e| CliError::Resolve(e.to_string()))
+}
+
+fn managed_from_resolution<'a>(
+    env: &'a Env,
+    manifest_path: &Path,
+    resolution: &bosun_resolve::Resolution,
+    sys: &StateDocument,
+    usr: &StateDocument,
+) -> Result<(Vec<Managed<'a>>, Vec<Diagnostic>), CliError> {
+    let mut managed = Vec::new();
+    let mut carried = Vec::new();
+    for entry in &resolution.outcomes {
+        match &entry.outcome {
+            Outcome::Resolved {
+                target,
+                backend,
+                version,
+            } => {
+                let pkg = resolution
+                    .lock
+                    .packages
+                    .iter()
+                    .find(|p| p.name == entry.name)
+                    .expect("a resolved entry is in the lock");
+                let leaf = pkg
+                    .targets
+                    .get(target)
+                    .expect("the resolved target is in the lock");
+                let installer = env.installer_for(backend).ok_or_else(|| {
+                    CliError::Environment(format!("no installer for {}", backend.as_str()))
+                })?;
+                let scope = installer.scope();
+                let doc = scope_state(scope, sys, usr);
+                managed.push(Managed {
+                    name: entry.name.clone(),
+                    purl: leaf.placement.purl.clone(),
+                    backend: backend.clone(),
+                    resolved: version.clone(),
+                    vers_type: env.vers_type(backend).unwrap_or("generic").to_string(),
+                    claims: claims_for(manifest_path, &entry.name, &pkg.meta.canonical(), doc),
+                    current: current_of(doc, &entry.name),
+                    installer,
+                });
+            }
+            Outcome::NotApplicable(na) => carried.push(not_applicable_diagnostic(&entry.name, na)),
+            Outcome::Unsatisfiable { spec, available } => carried.push(Diagnostic::Unsatisfiable {
+                name: entry.name.clone(),
+                spec: spec.clone(),
+                available: available.clone(),
+            }),
+        }
+    }
+    Ok((managed, carried))
+}
+
+fn managed_from_lock<'a>(
+    env: &'a Env,
+    manifest_path: &Path,
+    lock: &LockDocument,
+    sys: &StateDocument,
+    usr: &StateDocument,
+) -> Result<Vec<Managed<'a>>, CliError> {
+    let mut managed = Vec::new();
+    for pkg in &lock.packages {
+        // The leaf for this machine's platform, or the platform-independent one.
+        let leaf = match pkg
+            .targets
+            .get(&env.target())
+            .or_else(|| pkg.targets.get(&Target::Any))
+        {
+            Some(leaf) => leaf,
+            None => continue,
+        };
+        let backend = &leaf.placement.backend;
+        let installer = env.installer_for(backend).ok_or_else(|| {
+            CliError::Environment(format!("no installer for {}", backend.as_str()))
+        })?;
+        let vers_type = env.vers_type(backend).unwrap_or("generic").to_string();
+        let scope = installer.scope();
+        let doc = scope_state(scope, sys, usr);
+        let claims = claims_for(manifest_path, &pkg.name, &pkg.meta.canonical(), doc);
+        // §7 --frozen: refuse if another claim's spec excludes the locked version.
+        frozen_select(&leaf.resolved, &claims, &vers_type)
+            .map_err(|e| CliError::Resolve(e.to_string()))?;
+        managed.push(Managed {
+            name: pkg.name.clone(),
+            purl: leaf.placement.purl.clone(),
+            backend: backend.clone(),
+            resolved: leaf.resolved.clone(),
+            vers_type,
+            claims,
+            current: current_of(doc, &pkg.name),
+            installer,
+        });
+    }
+    Ok(managed)
+}
+
+fn not_applicable_diagnostic(name: &str, na: &NotApplicable) -> Diagnostic {
+    match na {
+        NotApplicable::NoRegisteredBackend { candidates } => Diagnostic::MissingBackend {
+            name: name.to_string(),
+            candidates: candidates.clone(),
+        },
+        NotApplicable::NoSelector | NotApplicable::NoBackend => Diagnostic::NotApplicable {
+            name: name.to_string(),
+        },
+    }
+}
+
+fn scope_state<'a>(
+    scope: Scope,
+    sys: &'a StateDocument,
+    usr: &'a StateDocument,
+) -> &'a StateDocument {
+    match scope {
+        Scope::System => sys,
+        Scope::User => usr,
+    }
+}
+
+fn current_of(doc: &StateDocument, name: &str) -> Current {
+    match doc
+        .packages
+        .iter()
+        .find(|p| p.name == name)
+        .and_then(|p| p.targets.values().next())
+    {
+        Some(leaf) => Current::Present {
+            version: Some(leaf.installed.clone()),
+            origin: leaf.origin,
+        },
+        None => Current::Absent,
+    }
+}
+
+/// The claims to record: every other manifest's claim on this package, plus the
+/// current project's (canonical spec; the applier stamps the user, §4.6).
+fn claims_for(manifest_path: &Path, name: &str, spec: &str, doc: &StateDocument) -> Vec<Claim> {
+    let mut claims: Vec<Claim> = doc
+        .packages
+        .iter()
+        .find(|p| p.name == name)
+        .and_then(|p| p.targets.values().next())
+        .map(|leaf| {
+            leaf.claimed_by
+                .iter()
+                .filter(|c| c.manifest != manifest_path)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    claims.push(Claim {
+        manifest: manifest_path.to_path_buf(),
+        spec: spec.to_string(),
+        user: None,
+    });
+    claims
+}
+
+fn read_state(env: &Env, scope: Scope) -> Result<StateDocument, CliError> {
+    env.state
+        .read(scope)
+        .map_err(|e| CliError::Environment(e.to_string()))
+}
+
+fn combined_state(env: &Env) -> Result<StateDocument, CliError> {
+    let mut packages = read_state(env, Scope::System)?.packages;
+    packages.extend(read_state(env, Scope::User)?.packages);
+    Ok(StateDocument {
+        state_version: 1,
+        packages,
+    })
+}
+
+fn lock_path(manifest_file: &Path) -> PathBuf {
+    manifest_file
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("bosun.lock")
+}
+
+/// Resolve the manifest path for a claim without requiring the file to exist
+/// (uninstall works after the repo is gone, §9).
+fn claim_manifest_path(path: Option<PathBuf>) -> PathBuf {
+    let base = path.unwrap_or_else(|| PathBuf::from("."));
+    match base.extension().and_then(|e| e.to_str()) {
+        Some("yaml") | Some("yml") => base,
+        _ => base.join("bosun.yaml"),
+    }
+}
+
+impl Render for Plan {
+    fn text(&self) -> String {
+        let mut lines = Vec::new();
+        for a in &self.actions {
+            let version = match (&a.from, &a.to) {
+                (Some(f), Some(t)) => format!("{} → {}", f.as_str(), t.as_str()),
+                (None, Some(t)) => t.as_str().to_string(),
+                (Some(f), None) => f.as_str().to_string(),
+                (None, None) => String::new(),
+            };
+            lines.push(format!(
+                "{:<10} {:<16} {:<8} {}",
+                a.kind.label(),
+                a.name,
+                a.backend.as_str(),
+                version
+            ));
+        }
+        for d in &self.diagnostics {
+            lines.push(format!("! {d}"));
+        }
+        lines.push(format!("Plan: {} action(s)", self.actions.len()));
+        lines.join("\n")
+    }
+
+    fn exit_code(&self) -> i32 {
+        Plan::exit_code(self)
+    }
+}
+
+impl Render for ApplyReport {
+    fn text(&self) -> String {
+        if self.outcomes.is_empty() {
+            return "nothing to apply".to_string();
+        }
+        self.outcomes
+            .iter()
+            .map(|o| {
+                let result = match &o.result {
+                    ApplyResult::Applied => "applied".to_string(),
+                    ApplyResult::Failed { error } => format!("FAILED: {error}"),
+                    ApplyResult::Skipped => "skipped".to_string(),
+                };
+                format!("{:<10} {:<16} {}", o.kind.label(), o.name, result)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}

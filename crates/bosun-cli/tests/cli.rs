@@ -3,7 +3,7 @@
 //! redirected to a temp dir via `BOSUN_STATE_DIR`.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
 use serde_json::Value;
@@ -327,4 +327,323 @@ fn the_fixture_seam_warns_on_stderr_while_active() {
     let assert = bosun(dir.path()).arg("backends").assert().success();
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
     assert!(stderr.contains("test fixture active"), "stderr: {stderr}");
+}
+
+// --- 10-2: install / uninstall / prune ------------------------------------
+
+/// A fixture with install sides: ripgrep via cargo (user) and jq via apt
+/// (system), each reporting its version from verify after apply.
+const APPLY_FIXTURE: &str = r#"{
+  "os": "linux", "arch": "amd64",
+  "distro": {"id": "debian", "codename": "bookworm"},
+  "privilege": "unelevated", "user": "babbitt",
+  "backends": [
+    {"id":"cargo","version":"1.76.0","purl_type":"cargo","vers_type":"cargo","platform_independent":true,
+     "scope":"user","supports_hold":false,
+     "available":{"ripgrep":["14.1.1"]},"installed":{"ripgrep":"14.1.1"}},
+    {"id":"apt","version":"2.6.1","purl_type":"deb","vers_type":"deb","platform_independent":false,
+     "scope":"system","supports_hold":true,
+     "available":{"jq":["1.7.1-3"]},"installed":{"jq":"1.7.1-3"}}
+  ]
+}"#;
+
+const USER_MANIFEST: &str = r#"version: 1
+targets: [linux/amd64]
+packages:
+  - name: ripgrep
+    spec: ">=14.0.0|<15.0.0"
+    install:
+      linux: {backend: cargo}
+"#;
+
+const SYSTEM_MANIFEST: &str = r#"version: 1
+targets: [linux/amd64]
+packages:
+  - name: jq
+    spec: ">=1.7|<2"
+    install:
+      linux:debian: {backend: apt}
+"#;
+
+fn apply_project(manifest: &str) -> TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("fixture.json"), APPLY_FIXTURE).unwrap();
+    fs::write(dir.path().join("bosun.yaml"), manifest).unwrap();
+    dir
+}
+
+fn state_file(dir: &Path) -> PathBuf {
+    dir.join("state").join("user").join("state.json")
+}
+
+#[test]
+fn install_plan_shows_the_plan_and_writes_no_state() {
+    let dir = apply_project(USER_MANIFEST);
+    let assert = bosun(dir.path())
+        .args(["--format", "json", "install"])
+        .arg(dir.path())
+        .arg("--plan")
+        .assert()
+        .code(2); // changes pending
+    let json = stdout_json(&assert.get_output().stdout);
+    assert_eq!(json["actions"][0]["action"], "install");
+    assert!(!state_file(dir.path()).exists(), "--plan writes nothing");
+}
+
+#[test]
+fn install_applies_and_records_state() {
+    let dir = apply_project(USER_MANIFEST);
+    let assert = bosun(dir.path())
+        .args(["--format", "json", "install"])
+        .arg(dir.path())
+        .arg("--yes")
+        .assert()
+        .code(0);
+    let json = stdout_json(&assert.get_output().stdout);
+    assert_eq!(json["outcomes"][0]["result"], "applied");
+    let state = fs::read_to_string(state_file(dir.path())).unwrap();
+    assert!(state.contains("\"ripgrep\""), "state: {state}");
+    assert!(
+        state.contains("\"installed\": \"14.1.1\""),
+        "state: {state}"
+    );
+}
+
+#[test]
+fn install_without_a_terminal_and_without_yes_refuses() {
+    let dir = apply_project(USER_MANIFEST);
+    // assert_cmd gives no TTY; no --yes → refuse (exit 1), nothing installed.
+    let assert = bosun(dir.path())
+        .args(["--format", "json", "install"])
+        .arg(dir.path())
+        .assert()
+        .code(1);
+    assert_eq!(
+        stdout_json(&assert.get_output().stdout)["error"],
+        "bosun.cli.environment"
+    );
+    assert!(!state_file(dir.path()).exists());
+}
+
+#[test]
+fn a_system_install_unelevated_needs_root_with_a_remedy() {
+    let dir = apply_project(SYSTEM_MANIFEST);
+    let assert = bosun(dir.path())
+        .args(["--format", "json", "install"])
+        .arg(dir.path())
+        .arg("--yes")
+        .assert()
+        .code(1);
+    let json = stdout_json(&assert.get_output().stdout);
+    assert_eq!(json["error"], "elevation_required");
+    assert!(
+        json["remedy"].as_str().unwrap().contains("sudo"),
+        "remedy: {json}"
+    );
+    // jq named exactly once despite install + hold.
+    assert_eq!(json["packages"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn frozen_install_applies_the_locked_version() {
+    let dir = apply_project(USER_MANIFEST);
+    bosun(dir.path())
+        .args(["lock"])
+        .arg(dir.path())
+        .assert()
+        .success();
+    let assert = bosun(dir.path())
+        .args(["--format", "json", "install"])
+        .arg(dir.path())
+        .args(["--yes", "--frozen"])
+        .assert()
+        .code(0);
+    assert_eq!(
+        stdout_json(&assert.get_output().stdout)["outcomes"][0]["result"],
+        "applied"
+    );
+    let state = fs::read_to_string(state_file(dir.path())).unwrap();
+    assert!(
+        state.contains("\"installed\": \"14.1.1\""),
+        "state: {state}"
+    );
+}
+
+#[test]
+fn uninstall_removes_the_package_from_state() {
+    let dir = apply_project(USER_MANIFEST);
+    bosun(dir.path())
+        .args(["install"])
+        .arg(dir.path())
+        .arg("--yes")
+        .assert()
+        .success();
+    assert!(fs::read_to_string(state_file(dir.path()))
+        .unwrap()
+        .contains("ripgrep"));
+
+    bosun(dir.path())
+        .args(["uninstall"])
+        .arg(dir.path())
+        .arg("--yes")
+        .assert()
+        .success();
+    let state = fs::read_to_string(state_file(dir.path())).unwrap();
+    assert!(!state.contains("ripgrep"), "state after uninstall: {state}");
+}
+
+#[test]
+fn prune_removes_an_orphan_whose_manifest_is_gone() {
+    let dir = apply_project(USER_MANIFEST);
+    bosun(dir.path())
+        .args(["install"])
+        .arg(dir.path())
+        .arg("--yes")
+        .assert()
+        .success();
+    // Delete the manifest; its claim is now orphaned.
+    fs::remove_file(dir.path().join("bosun.yaml")).unwrap();
+
+    let assert = bosun(dir.path())
+        .args(["--format", "json", "prune"])
+        .arg("--yes")
+        .assert()
+        .code(0);
+    assert_eq!(
+        stdout_json(&assert.get_output().stdout)["outcomes"][0]["action"],
+        "remove"
+    );
+    let state = fs::read_to_string(state_file(dir.path())).unwrap();
+    assert!(!state.contains("ripgrep"), "state after prune: {state}");
+}
+
+#[test]
+fn a_failed_step_mid_apply_keeps_the_earlier_package() {
+    // Two cargo packages; the step for "two" fails. "one" installs and is
+    // checkpointed before "two" runs, so it survives the failure (Appendix B).
+    let fixture = r#"{
+      "os":"linux","arch":"amd64","privilege":"unelevated","user":"t",
+      "fail_step":"two",
+      "backends":[
+        {"id":"cargo","version":"1.76.0","purl_type":"cargo","vers_type":"cargo","platform_independent":true,
+         "scope":"user","supports_hold":false,
+         "available":{"one":["1.0.0"],"two":["2.0.0"]},"installed":{"one":"1.0.0","two":"2.0.0"}}
+      ]
+    }"#;
+    let manifest = "version: 1\ntargets: [linux/amd64]\npackages:\n  - name: one\n    spec: \">=1.0.0|<2.0.0\"\n    install:\n      linux: {backend: cargo}\n  - name: two\n    spec: \">=2.0.0|<3.0.0\"\n    install:\n      linux: {backend: cargo}\n";
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("fixture.json"), fixture).unwrap();
+    fs::write(dir.path().join("bosun.yaml"), manifest).unwrap();
+
+    let assert = bosun(dir.path())
+        .args(["--format", "json", "install"])
+        .arg(dir.path())
+        .arg("--yes")
+        .assert()
+        .code(1); // a failed action → non-zero
+    let json = stdout_json(&assert.get_output().stdout);
+    let results: Vec<(&str, &str)> = json["outcomes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| (o["name"].as_str().unwrap(), o["result"].as_str().unwrap()))
+        .collect();
+    assert!(results.contains(&("one", "applied")));
+    assert!(results.iter().any(|(n, r)| *n == "two" && *r == "failed"));
+    // "one" was checkpointed to disk before "two" failed.
+    let state = fs::read_to_string(state_file(dir.path())).unwrap();
+    assert!(state.contains("\"one\""), "state: {state}");
+    assert!(!state.contains("\"two\""), "state: {state}");
+}
+
+fn write_user_state(dir: &Path, json: &str) {
+    let d = dir.join("state").join("user");
+    fs::create_dir_all(&d).unwrap();
+    fs::write(d.join("state.json"), json).unwrap();
+}
+
+#[test]
+fn install_over_an_existing_package_upgrades_and_merges_claims() {
+    let dir = apply_project(USER_MANIFEST);
+    // ripgrep already at an older version, claimed by another manifest.
+    write_user_state(
+        dir.path(),
+        r#"{"stateVersion":1,"packages":[{"name":"ripgrep","targets":{"linux/amd64":{"backend":"cargo","purl":"pkg:cargo/ripgrep","installed":"14.0.0","origin":"installed","claimedBy":[{"manifest":"/other/bosun.yaml","spec":"vers:cargo/>=14.0.0|<15.0.0"}]}}}]}"#,
+    );
+    // The plan is an upgrade (installed 14.0.0 < wanted 14.1.1).
+    let plan = bosun(dir.path())
+        .args(["--format", "json", "install"])
+        .arg(dir.path())
+        .arg("--plan")
+        .assert()
+        .code(2);
+    assert_eq!(
+        stdout_json(&plan.get_output().stdout)["actions"][0]["action"],
+        "upgrade"
+    );
+
+    // Applying merges the other manifest's claim with this project's.
+    bosun(dir.path())
+        .args(["install"])
+        .arg(dir.path())
+        .arg("--yes")
+        .assert()
+        .success();
+    let state: Value =
+        serde_json::from_str(&fs::read_to_string(state_file(dir.path())).unwrap()).unwrap();
+    let rg = state["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "ripgrep")
+        .unwrap();
+    let claims = rg["targets"]["linux/amd64"]["claimedBy"]
+        .as_array()
+        .unwrap();
+    assert_eq!(claims.len(), 2, "both claims kept: {claims:?}");
+}
+
+#[test]
+fn install_plan_and_apply_render_as_text() {
+    let dir = apply_project(USER_MANIFEST);
+    let plan = bosun(dir.path())
+        .args(["--format", "text", "install"])
+        .arg(dir.path())
+        .arg("--plan")
+        .assert()
+        .code(2);
+    let text = String::from_utf8_lossy(&plan.get_output().stdout).to_string();
+    assert!(
+        text.contains("install") && text.contains("Plan:"),
+        "plan text: {text}"
+    );
+
+    let applied = bosun(dir.path())
+        .args(["--format", "text", "install"])
+        .arg(dir.path())
+        .arg("--yes")
+        .assert()
+        .code(0);
+    let text = String::from_utf8_lossy(&applied.get_output().stdout).to_string();
+    assert!(text.contains("applied"), "apply text: {text}");
+}
+
+#[test]
+fn uninstall_accepts_a_manifest_file_path() {
+    let dir = apply_project(USER_MANIFEST);
+    bosun(dir.path())
+        .args(["install"])
+        .arg(dir.path())
+        .arg("--yes")
+        .assert()
+        .success();
+    // Pass the manifest file path directly (not the directory).
+    bosun(dir.path())
+        .args(["uninstall"])
+        .arg(dir.path().join("bosun.yaml"))
+        .arg("--yes")
+        .assert()
+        .success();
+    let state = fs::read_to_string(state_file(dir.path())).unwrap();
+    assert!(!state.contains("ripgrep"), "state after uninstall: {state}");
 }

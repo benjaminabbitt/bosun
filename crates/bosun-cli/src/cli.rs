@@ -3,9 +3,28 @@
 
 use std::path::PathBuf;
 
+use bosun_core::Scope;
 use clap::{Parser, Subcommand};
 
 use crate::output::Format;
+
+/// The `--scope` choice (§5.5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum ScopeArg {
+    /// Machine-wide installs (apt, …); needs elevation.
+    System,
+    /// Per-user installs (cargo, …); must not run elevated.
+    User,
+}
+
+impl From<ScopeArg> for Scope {
+    fn from(s: ScopeArg) -> Scope {
+        match s {
+            ScopeArg::System => Scope::System,
+            ScopeArg::User => Scope::User,
+        }
+    }
+}
 
 /// Pin and propagate tool versions across machines.
 #[derive(Parser)]
@@ -45,5 +64,48 @@ pub enum Command {
         /// Report stale or missing targets instead of writing (a CI gate).
         #[arg(long)]
         check: bool,
+    },
+    /// Move the machine toward a manifest (install, upgrade, downgrade, hold).
+    Install {
+        /// The manifest directory or file (default: current directory).
+        path: Option<PathBuf>,
+        /// Show the plan and stop (needs no root, changes nothing).
+        #[arg(long)]
+        plan: bool,
+        /// Restrict to one install scope (splits a mixed plan, §5.5).
+        #[arg(long, value_enum)]
+        scope: Option<ScopeArg>,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+        /// Apply `bosun.lock` verbatim; never re-resolve (§7).
+        #[arg(long)]
+        frozen: bool,
+    },
+    /// Drop one manifest's claims and uninstall what it alone installed (§9).
+    Uninstall {
+        /// The manifest directory or file (default: current directory).
+        path: Option<PathBuf>,
+        /// Show the plan and stop.
+        #[arg(long)]
+        plan: bool,
+        /// Restrict to one install scope.
+        #[arg(long, value_enum)]
+        scope: Option<ScopeArg>,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Drop claims of vanished manifests and uninstall the orphans (§9).
+    Prune {
+        /// Show the plan and stop.
+        #[arg(long)]
+        plan: bool,
+        /// Restrict to one install scope.
+        #[arg(long, value_enum)]
+        scope: Option<ScopeArg>,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
     },
 }
