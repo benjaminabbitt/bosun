@@ -19,8 +19,9 @@
 
 use std::collections::BTreeMap;
 
-use crate::model::{BackendId, Checksum, Claim, Origin, PackageId, SourceId};
+use crate::model::{BackendId, Checksum, Claim, Origin};
 use crate::platform::Target;
+use crate::purl::Purl;
 use crate::spec::Spec;
 use crate::version::Version;
 
@@ -37,15 +38,16 @@ pub struct Package<M, L> {
 }
 
 /// What every per-target entry shares: which backend installed/would install
-/// the package, under which package id, from which source (§4.5, §4.6).
+/// the package, and its canonical identity (§4.5, §4.6, §5.6).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Placement {
-    /// The backend for this target.
+    /// The backend for this target. A purl type doesn't always pick the
+    /// installer (pypi → uv or pipx), so `backend` is recorded too (§5.6).
     pub backend: BackendId,
-    /// The package id as the backend names it (§5.4).
-    pub package: PackageId,
-    /// The source it comes from, when one is needed (§9).
-    pub source: Option<SourceId>,
+    /// The unversioned canonical purl: type, namespace, name, and qualifiers
+    /// (`repository_url`, `arch`, `distro`) subsume the separate package id
+    /// and source (§5.6). The backend's native id is `purl.native_id()`.
+    pub purl: Purl,
 }
 
 /// A lockfile per-target leaf (§4.5): the resolved version and its provenance.
@@ -116,7 +118,7 @@ pub struct StateDocument {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Scope;
+    use crate::model::{PackageId, Scope};
     use crate::platform::{Arch, Os};
     use crate::version::Scheme;
     use std::path::PathBuf;
@@ -132,8 +134,7 @@ mod tests {
     fn placement() -> Placement {
         Placement {
             backend: BackendId::new("apt"),
-            package: PackageId::new("jq"),
-            source: None,
+            purl: "pkg:deb/debian/jq".parse().unwrap(),
         }
     }
 

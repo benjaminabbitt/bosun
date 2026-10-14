@@ -19,6 +19,17 @@ pub const VERS_BAD_PERCENT: &str = "invalid percent-encoding in vers version";
 /// No available version satisfies a spec's vers set.
 pub const SELECT_UNSATISFIABLE: &str = "no available version satisfies the spec";
 
+/// A purl string missing the literal `pkg:` scheme.
+pub const PURL_NO_SCHEME: &str = "purl must start with pkg:";
+/// A purl type that is empty or has an invalid character.
+pub const PURL_INVALID_TYPE: &str = "invalid purl type";
+/// A purl with no name (names are required).
+pub const PURL_EMPTY_NAME: &str = "purl name is required";
+/// A purl qualifier key that is empty or has an invalid character.
+pub const PURL_INVALID_QUALIFIER: &str = "invalid purl qualifier key";
+/// A malformed `%HH` escape in a purl component.
+pub const PURL_BAD_PERCENT: &str = "invalid percent-encoding in purl";
+
 /// A string that is not one of bosun's known operating systems.
 pub const PLATFORM_UNKNOWN_OS: &str = "unknown operating system";
 /// A string that is not one of bosun's known architectures.

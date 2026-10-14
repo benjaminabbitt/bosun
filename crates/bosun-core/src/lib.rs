@@ -5,6 +5,7 @@
 pub mod errmsg;
 pub mod model;
 pub mod platform;
+pub mod purl;
 pub mod record;
 pub mod spec;
 pub mod vers;
@@ -15,6 +16,7 @@ pub use model::{
     SourceId,
 };
 pub use platform::{Arch, Distro, Os, PlatformError, Selector, Target};
+pub use purl::{Purl, PurlError};
 pub use record::{
     LockDocument, LockLeaf, LockPackage, Package, Placement, StateDocument, StateLeaf,
     StatePackage, TargetLock,

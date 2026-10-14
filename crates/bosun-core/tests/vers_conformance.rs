@@ -78,7 +78,9 @@ fn vers_canonical_parse_conformance() {
         }
     }
     eprintln!("vers canonical parse: {run} run, {skip} skipped (out of scope)");
-    assert!(run > 0, "no in-scope canonical-parse cases ran");
+    // Exact counts, so a fixture or filter regression fails loudly.
+    assert_eq!(run, 12, "in-scope vers canonical-parse count changed");
+    assert_eq!(skip, 8, "out-of-scope vers canonical-parse count changed");
 }
 
 #[derive(Deserialize)]
