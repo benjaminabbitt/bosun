@@ -1009,6 +1009,14 @@ remote indexes. Traits stay ready; nothing is stubbed.
 - Mutation testing inside agent containers runs `--in-place` on a disposable copy of the tree
   with `TMPDIR` off `/tmp`: the shared `.git` is read-only there, so `git worktree add` fails.
 - The dogfood `bosun.yaml` targets plain `linux:debian`, not a specific release.
+- **Range grammar is per version scheme:** SemVer entries use `semver::VersionReq` (`^`, `~`,
+  `*`, and SemVer's rule that a range admits a pre-release only when it names one, §12);
+  Debian/generic entries use AND-ed comparators (`>=`, `>`, `<=`, `<`, `=`, bare).
+  `1.2.*` and `^` are SemVer-only.
+- **Tolerant in M1 is pin round-up only** (next-higher, never below). The "accept any point
+  release in a range" form of tolerant (§7, e.g. `1.7.1-*`) is deferred past M1.
+- Error and log text lives in `errmsg` / `logmsg` constants; data-carrying thiserror
+  variants use a named binding (`#[error("{kind}: {0}", kind = errmsg::X)]`).
 
 **Slice status:**
 
@@ -1016,7 +1024,8 @@ remote indexes. Traits stay ready; nothing is stubbed.
 |---|---|---|
 | 0 | workspace skeleton, justfile, bacon.toml, LICENSE | landed |
 | 1 | bosun-core version model (§6) | landed; 24 tests, mutation 25/25 viable caught |
-| 2–13 | policy, domain, ports, io, host, backends, resolve, apply, cli, acceptance, dogfood, quality | not started |
+| 2 | bosun-core Spec/Policy, exact/range/tolerant (§7) | landed; 46 tests, mutation 17/17 viable caught |
+| 3–13 | domain, ports, io, host, backends, resolve, apply, cli, acceptance, dogfood, quality | not started |
 
 **Active implementor:** `lame-wide-chant` (worktree branch `ctxloom/lame-wide-chant`), one
 slice per turn, reporting to the orchestrator after each. Previous: `hoary-quick-elm` (crashed
