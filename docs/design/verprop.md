@@ -1155,6 +1155,11 @@ remote indexes. Traits stay ready; nothing is stubbed.
   (default: the entry's logical name, set by resolve) and an optional `asset` template (e.g.
   for goreleaser's `_full` archives); the default asset match is goreleaser's exact name
   `{binary}_{version}_{os}_{arch}.tar.gz`.
+- Resolve takes a narrow `Host { os, arch, distro }` and `ResolvableBackend { id, purl_type,
+  vers_type, platform_independent, index }` values built by the CLI from the registry, and
+  the manifest hash passed in, so bosun-resolve depends on neither bosun-host nor bosun-io.
+  Install blocks hold an ordered `backends` list (the YAML accepts a scalar or a sequence).
+  The deb `distro` qualifier is os-release `VERSION_CODENAME`.
 - `Arch` is amd64/arm64 only; `Os` uses Docker's spelling (`darwin`).
 
 **Slice status:**
@@ -1176,7 +1181,8 @@ remote indexes. Traits stay ready; nothing is stubbed.
 | 7-2 | executor hardening (atomic temp→fsync→rename writes; regular-file members, `./name` ≡ `name`) + cargo backend (sparse-index listing) | landed; 147 tests; mutation cargo 22/24 (2 equivalent) |
 | 7-3 | github-release backend (goreleaser picker, enforced checksums.txt, `~/.local/bin`) | landed together with 7-4 |
 | 7-4 | fix-up: no sentinel version in `verify_installed` (Absent / Present{version?}); `binary` purl qualifier; real v0.6.4 fixtures, exact goreleaser asset match | landed; 163 tests; mutation github_release+model 36/38 (2 equivalent) |
-| 8 | bosun-resolve: selectors, purl building, installer preference, multi-claim selection, lock merge | in progress |
+| 8-1 | bosun-resolve: single-manifest resolve (selectors, installer preference, purl building, highest-in-set, `any` target) | landed; 182 tests; mutation 14/14 viable caught |
+| 8-2 | multi-claim intersection, lock merge per target, `--frozen`, `lock --check` | in progress |
 | 9–13 | apply, cli, acceptance, dogfood, quality | not started |
 
 **Active implementor:** `lame-wide-chant` (worktree branch `ctxloom/lame-wide-chant`), one
