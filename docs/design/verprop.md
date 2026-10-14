@@ -1019,7 +1019,8 @@ Future driver: CI.
 - Lockfile merge conflicts in git: two branches re-locking different platforms touch different
   target keys, but both rewrite the same file. Confirm the sorted, per-target layout keeps
   these as clean textual merges, or provide a `bosun lock --merge` helper.
-- Dogfood (§12): confirm the `github-release` backend and its two exceptions to §9 (bosun
+- Dogfood (§12): how do ltk, taskloom and harp install, given that only `ctxloom` is published
+  as a release asset? Confirm the `github-release` backend and its two exceptions to §9 (bosun
   verifies checksums; bosun picks a bin directory); decide how a family of entries shares one
   release version; find out how reprise ships.
 
@@ -1035,9 +1036,13 @@ The first real manifest manages bosun's own toolbelt: **just, jq, and the ctxloo
 | ctxloom, ltk, taskloom, harp | GitHub release archive | brew tap `ctxloom/tap` | GitHub release archive |
 | reprise | not in the ctxloom release config; distribution to find out | | |
 
-ctxloom, ltk, taskloom and harp ship from **one** goreleaser release of `ctxloom/ctxloom`:
-per-binary archives per OS/arch, a `checksums.txt`, and a formula per binary in
-`ctxloom/homebrew-tap`. The project's own Linux/Windows install path is a `curl | bash` script
+**Verified 2026-10-14 against the public `ctxloom/ctxloom` releases (latest `v0.6.4`):** only
+the `ctxloom` binary is published. Each OS/arch has `ctxloom_<ver>_<os>_<arch>.tar.gz` and a
+`…_full.tar.gz` variant (Windows: `.zip`), plus `checksums.txt`, `install.sh` and
+`install.ps1`. The archive holds `ctxloom` at its root, with LICENSE, README.md and man pages.
+No pre-releases are published (`0.7.0-pre1` exists only as local dev builds). **ltk, taskloom
+and harp are not release assets**, so their install path is an open question (§11).
+(Earlier assumption, now known wrong: per-binary archives for all four.) The project's own Linux/Windows install path is a `curl | bash` script
 over those archives. (`go install` from the module is possible but needs a Go toolchain and
 builds rather than installs a release.)
 
@@ -1162,7 +1167,8 @@ remote indexes. Traits stay ready; nothing is stubbed.
 | 6 | bosun-host: LinuxMachine/FakeMachine, os-release, privilege, probe registry | landed; 115 workspace tests; mutation os_release+machine 21/22 (miss: host-I/O `detect()` wrapper) |
 | 7-1 | step-list Installer contract, host StepExecutor, apt backend (§5.1) | landed; 136 tests; mutation apt+executor 33/33 viable caught |
 | 7-2 | executor hardening (atomic temp→fsync→rename writes; regular-file members, `./name` ≡ `name`) + cargo backend (sparse-index listing) | landed; 147 tests; mutation cargo 22/24 (2 equivalent) |
-| 7-3 | github-release backend (goreleaser picker, enforced checksums.txt, `~/.local/bin`) | in progress |
+| 7-3 | github-release backend (goreleaser picker, enforced checksums.txt, `~/.local/bin`) | done on child branch (`f3f2f79`), held for fix-up 7-4 |
+| 7-4 | fix-up: no sentinel version in `verify_installed` (Absent / Present{version?}); explicit `binary` (default = logical name, purl qualifier); real v0.6.4 fixtures, exact goreleaser asset match | in progress |
 | 8–13 | resolve, apply, cli, acceptance, dogfood, quality | not started |
 
 **Active implementor:** `lame-wide-chant` (worktree branch `ctxloom/lame-wide-chant`), one
