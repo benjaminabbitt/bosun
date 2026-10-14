@@ -1078,6 +1078,9 @@ remote indexes. Traits stay ready; nothing is stubbed.
   vendored under `crates/bosun-core/tests/conformance/` (pinned revs in its README). The vers
   suite covers only the registered types (npm, pypi), so deb containment is covered by
   bosun's own unit tests.
+- Backends work in **native IDs** (`Ref`/`Installed` in bosun-ports carry the backend's own
+  package ID); bosun builds the canonical purl only for what it records (`Placement =
+  {backend, purl}` in lock and state). `native_id()`: github → `namespace/name`, else `name`.
 - `Arch` is amd64/arm64 only; `Os` uses Docker's spelling (`darwin`).
 
 **Slice status:**
@@ -1091,7 +1094,7 @@ remote indexes. Traits stay ready; nothing is stubbed.
 | 4 | bosun-ports traits (§5.1, §5.3, §5.5) + bosun-core Distro | landed; 71 tests, mutation 28/28 viable caught |
 | 2b | tolerant-with-range on the pre-vers wildcard grammar | superseded; its commit sits on main beneath 4b-1, which removes it |
 | 4b-1 | vers ranges + single-rule selection; Policy/Deviation/tolerant removed (§5.6) | landed (with 2b's commit beneath it); 71 tests incl. vers conformance (npm canonical-parse + containment), mutation 53/53 viable caught |
-| 4b-2 | purl identity: conformant purl module; PackageId → unversioned purl in lock/state | in progress |
+| 4b-2 | purl identity: conformant purl module; PackageId → unversioned purl in lock/state | landed; 87 tests; purl conformance 65/65 required (spec, deb, cargo, github, generic), 98/107 other types best-effort; mutation 72/72 viable caught |
 | 5–13 | io, host, backends, resolve, apply, cli, acceptance, dogfood, quality | not started |
 
 **Active implementor:** `lame-wide-chant` (worktree branch `ctxloom/lame-wide-chant`), one
