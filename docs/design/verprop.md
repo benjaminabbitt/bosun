@@ -1072,6 +1072,12 @@ remote indexes. Traits stay ready; nothing is stubbed.
 - `Driver` is defined in slice 9 with the plan type; `BackendFactory::build` returns both
   halves (`Backend { index, installer }`) because resolve needs the query side too. Process
   and HTTP ports (with fakes) live in bosun-ports; a non-zero exit is data, not an error.
+- **purl and vers are implemented in bosun-core**, not taken from crates: `purl` 0.1.6 fails
+  the official suites for deb/github/generic (unsupported types), and `vers-rs` / `unive_rs`
+  carry their own version comparison rather than bosun's §6 ordering. The official suites are
+  vendored under `crates/bosun-core/tests/conformance/` (pinned revs in its README). The vers
+  suite covers only the registered types (npm, pypi), so deb containment is covered by
+  bosun's own unit tests.
 - `Arch` is amd64/arm64 only; `Os` uses Docker's spelling (`darwin`).
 
 **Slice status:**
@@ -1083,8 +1089,9 @@ remote indexes. Traits stay ready; nothing is stubbed.
 | 2 | bosun-core Spec/Policy, exact/range/tolerant (§7) | landed; 46 tests, mutation 17/17 viable caught |
 | 3 | bosun-core platform/backend/record value types (§4.5, §4.6, §5.4) | landed; 64 tests, mutation 18/18 viable caught |
 | 4 | bosun-ports traits (§5.1, §5.3, §5.5) + bosun-core Distro | landed; 71 tests, mutation 28/28 viable caught |
-| 2b | tolerant-with-range on the pre-vers wildcard grammar (child commit `3b2a989`) | **not landed**: built before the vers decision reached the child; superseded by 4b |
-| 4b | adopt purl + vers (§5.6): rework slice 2 range grammar and slice 3 PackageId; remove Policy/Deviation/tolerant | in progress |
+| 2b | tolerant-with-range on the pre-vers wildcard grammar | superseded; its commit sits on main beneath 4b-1, which removes it |
+| 4b-1 | vers ranges + single-rule selection; Policy/Deviation/tolerant removed (§5.6) | landed (with 2b's commit beneath it); 71 tests incl. vers conformance (npm canonical-parse + containment), mutation 53/53 viable caught |
+| 4b-2 | purl identity: conformant purl module; PackageId → unversioned purl in lock/state | in progress |
 | 5–13 | io, host, backends, resolve, apply, cli, acceptance, dogfood, quality | not started |
 
 **Active implementor:** `lame-wide-chant` (worktree branch `ctxloom/lame-wide-chant`), one
