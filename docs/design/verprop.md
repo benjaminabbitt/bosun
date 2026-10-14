@@ -1134,6 +1134,11 @@ remote indexes. Traits stay ready; nothing is stubbed.
   unknown key is an error); both come back with the features that need them.
 - `StateStore` is transactional: `begin` (exclusive lock + load, held across plan and apply) /
   `try_begin` / `read` (shared lock) and `StateTransaction::commit` (atomic write).
+- Probing is parallel (`std::thread::scope`); `CommandRunner` and `BackendFactory` are
+  `Send + Sync`, while built backends need not be. `LinuxMachine` takes its state paths
+  injected (the CLI supplies them from bosun-io). geteuid comes via `rustix`; no `unsafe`.
+- Every slice's gate is literally `cargo clippy --workspace --all-targets -- -D warnings`
+  plus `cargo test --workspace`, re-run by the orchestrator before landing.
 - `Arch` is amd64/arm64 only; `Os` uses Docker's spelling (`darwin`).
 
 **Slice status:**
@@ -1150,8 +1155,9 @@ remote indexes. Traits stay ready; nothing is stubbed.
 | 4b-2 | purl identity: conformant purl module; PackageId → unversioned purl in lock/state | landed; 87 tests; purl conformance 65/65 required (spec, deb, cargo, github, generic), 98/107 other types best-effort; mutation 72/72 viable caught |
 | 5-1 | bosun-io: lockfile + state JSON, FileStateStore, user config | landed; golden + round-trip tests; mutation deferred to 13 |
 | 5-2 | bosun-io: manifest + manifestHash; transactional StateStore on std file locks | landed; 106 workspace tests; hash proven comment-insensitive |
-| 6 | bosun-host: LinuxMachine/FakeMachine, os-release, privilege, probe registry | done on child branch (`6bb0264`), held: clippy `--all-targets` failure sent back for fix |
-| 7–13 | backends, resolve, apply, cli, acceptance, dogfood, quality | not started |
+| 6 | bosun-host: LinuxMachine/FakeMachine, os-release, privilege, probe registry | landed; 115 workspace tests; mutation os_release+machine 21/22 (miss: host-I/O `detect()` wrapper) |
+| 7 | backends apt, cargo, github-release + step-list Installer contract (§5.1) | in progress |
+| 8–13 | resolve, apply, cli, acceptance, dogfood, quality | not started |
 
 **Active implementor:** `lame-wide-chant` (worktree branch `ctxloom/lame-wide-chant`), one
 slice per turn, reporting to the orchestrator after each. Previous: `hoary-quick-elm` (crashed
