@@ -1013,8 +1013,9 @@ remote indexes. Traits stay ready; nothing is stubbed.
   `*`, and SemVer's rule that a range admits a pre-release only when it names one, §12);
   Debian/generic entries use AND-ed comparators (`>=`, `>`, `<=`, `<`, `=`, bare).
   `1.2.*` and `^` are SemVer-only.
-- **Tolerant in M1 is pin round-up only** (next-higher, never below). The "accept any point
-  release in a range" form of tolerant (§7, e.g. `1.7.1-*`) is deferred past M1.
+- **Tolerant covers both forms in M1** (user decision): pin round-up (next-higher, never
+  below) and "accept any point release in a range" (§7, e.g. `1.7.1-*`). The range form is
+  slice 2b, done after slice 4.
 - Error and log text lives in `errmsg` / `logmsg` constants; data-carrying thiserror
   variants use a named binding (`#[error("{kind}: {0}", kind = errmsg::X)]`).
 
@@ -1033,6 +1034,7 @@ remote indexes. Traits stay ready; nothing is stubbed.
 | 1 | bosun-core version model (§6) | landed; 24 tests, mutation 25/25 viable caught |
 | 2 | bosun-core Spec/Policy, exact/range/tolerant (§7) | landed; 46 tests, mutation 17/17 viable caught |
 | 3 | bosun-core platform/backend/record value types (§4.5, §4.6, §5.4) | landed; 64 tests, mutation 18/18 viable caught |
+| 2b | tolerant-with-range (§7) | not started; queued after slice 4 |
 | 4–13 | ports, io, host, backends, resolve, apply, cli, acceptance, dogfood, quality | not started |
 
 **Active implementor:** `lame-wide-chant` (worktree branch `ctxloom/lame-wide-chant`), one
