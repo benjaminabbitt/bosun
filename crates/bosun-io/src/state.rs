@@ -108,7 +108,7 @@ impl StateDoc {
         }
     }
 
-    fn into_core(self, schemes: &BackendSchemes) -> Result<StateDocument, IoError> {
+    fn into_core(self, schemes: &BackendSchemes, source: &Path) -> Result<StateDocument, IoError> {
         let packages = self
             .packages
             .into_iter()
@@ -119,7 +119,7 @@ impl StateDoc {
                     .map(|(t, e)| {
                         // §6: the version's scheme comes from the leaf's backend's
                         // declared vers type, not the purl type.
-                        let scheme = crate::scheme_of(schemes, &e.backend);
+                        let scheme = crate::scheme_of(schemes, &e.backend, source)?;
                         Ok((parse_target(&t)?, leaf(e, scheme)?))
                     })
                     .collect::<Result<_, IoError>>()?;
@@ -187,7 +187,7 @@ pub fn from_json(
         path: source.to_path_buf(),
         detail: e.to_string(),
     })?;
-    doc.into_core(schemes)
+    doc.into_core(schemes, source)
 }
 
 /// A [`StateStore`] backed by one JSON file per scope (§4.6). Carries the
@@ -438,6 +438,32 @@ mod tests {
             back.packages[0].targets.values().next().unwrap().origin,
             Origin::Accepted
         );
+    }
+
+    #[test]
+    fn an_unknown_backend_is_a_load_error_naming_the_id_and_file() {
+        // A leaf for a backend this build does not know cannot be read: its
+        // version scheme is unknown, so fail rather than guess Generic.
+        let text = r#"{"stateVersion":1,"packages":[{"name":"x","targets":{"linux/amd64":{
+            "backend":"mystery","purl":"pkg:deb/debian/x?arch=amd64","installed":"1.0","origin":"installed","claimedBy":[]}}}]}"#;
+        let err = from_json(text, Path::new("state.json"), &schemes()).unwrap_err();
+        assert!(matches!(&err, IoError::UnknownBackend { backend, .. } if backend == "mystery"));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("mystery") && msg.contains("state.json"),
+            "message names the id and file: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_known_backend_reads_its_version_under_its_own_scheme() {
+        // The map carries apt's scheme even when apt isn't present this run; its
+        // state entry reads as Debian, not Generic.
+        let text = r#"{"stateVersion":1,"packages":[{"name":"jq","targets":{"linux/amd64":{
+            "backend":"apt","purl":"pkg:deb/debian/jq?arch=amd64","installed":"1.7.1-3","origin":"installed","claimedBy":[]}}}]}"#;
+        let doc = from_json(text, Path::new("state.json"), &schemes()).unwrap();
+        let leaf = doc.packages[0].targets.values().next().unwrap();
+        assert_eq!(leaf.installed.scheme(), Scheme::Debian);
     }
 
     #[test]

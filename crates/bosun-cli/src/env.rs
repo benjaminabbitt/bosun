@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use bosun_apply::{ApplyReport, Driver, HostApplier, Plan};
 use bosun_backends::{AptFactory, CargoFactory, GithubReleaseFactory};
+use bosun_core::vers::scheme_for_type;
 use bosun_core::version::Scheme;
 use bosun_core::{Arch, BackendId, Distro, Os, Scope, Target, Version};
 use bosun_host::{
@@ -73,6 +74,9 @@ pub struct Env {
     pub backends: Vec<BackendEntry>,
     /// Backends that did not register.
     pub skipped: Vec<Skipped>,
+    /// The backend→scheme map (§6) for every compiled-in backend, present or
+    /// not, so lock/state versions always read under the right scheme.
+    schemes: bosun_io::BackendSchemes,
     machine: Box<dyn Machine>,
     exec: Exec,
 }
@@ -139,9 +143,10 @@ impl Env {
     }
 
     /// The backend→scheme map (§6) for reading lockfile versions: a version's
-    /// scheme comes from its backend's declared vers type, not the purl type.
+    /// scheme comes from its backend's declared vers type, not the purl type,
+    /// and covers every compiled-in backend whether or not it is present.
     pub fn schemes(&self) -> bosun_io::BackendSchemes {
-        backend_schemes(&self.backends)
+        self.schemes.clone()
     }
 
     /// The vers type of a backend, for parsing claim specs (§5.6).
@@ -216,6 +221,36 @@ fn backend_schemes(backends: &[BackendEntry]) -> bosun_io::BackendSchemes {
     )
 }
 
+/// Every compiled-in backend factory, built (not probed). The schemes map is
+/// taken from these so a backend absent this run is still known (§6).
+fn compiled_in_factories(
+    runner: Arc<dyn CommandRunner>,
+    fetcher: Arc<dyn HttpFetcher>,
+    bin_dir: PathBuf,
+    os: Os,
+    arch: Arch,
+) -> Vec<Box<dyn BackendFactory>> {
+    vec![
+        Box::new(AptFactory::new(runner.clone())),
+        Box::new(CargoFactory::new(runner, fetcher.clone())),
+        Box::new(GithubReleaseFactory::new(fetcher, bin_dir, os, arch)),
+    ]
+}
+
+/// The backend→scheme map (§6) from factory metadata alone, no probe — so it
+/// covers every compiled-in backend, present or not.
+fn factory_schemes(factories: &[Box<dyn BackendFactory>]) -> bosun_io::BackendSchemes {
+    factories
+        .iter()
+        .map(|f| {
+            (
+                f.id().as_str().to_string(),
+                scheme_for_type(f.meta().vers_type),
+            )
+        })
+        .collect()
+}
+
 fn reason_text(reason: &SkipReason) -> String {
     match reason {
         SkipReason::NotPresent => "not present".to_string(),
@@ -238,16 +273,12 @@ fn from_host() -> Result<Env, CliError> {
     let runner: Arc<dyn CommandRunner> = Arc::new(ProcessCommandRunner);
     let fetcher: Arc<dyn HttpFetcher> = Arc::new(UreqHttpFetcher::new());
     let bin_dir = home_dir().join(".local").join("bin");
-    let factories: Vec<Box<dyn BackendFactory>> = vec![
-        Box::new(AptFactory::new(runner.clone())),
-        Box::new(CargoFactory::new(runner.clone(), fetcher.clone())),
-        Box::new(GithubReleaseFactory::new(
-            fetcher.clone(),
-            bin_dir,
-            os,
-            arch,
-        )),
-    ];
+    let factories = compiled_in_factories(runner.clone(), fetcher.clone(), bin_dir, os, arch);
+    // §6: the version scheme for a backend comes from its factory metadata and
+    // must be known for every compiled-in backend — not only those present this
+    // run — so state recorded for an absent backend still reads correctly.
+    let schemes = factory_schemes(&factories);
+
     let info = HostInfo {
         os,
         arch,
@@ -281,11 +312,11 @@ fn from_host() -> Result<Env, CliError> {
         .collect();
 
     let machine = LinuxMachine::new(arch, distro, system.clone(), user.clone());
-    let schemes = backend_schemes(&backends);
     Ok(Env {
-        state: FileStateStore::new(system, user, schemes),
+        state: FileStateStore::new(system, user, schemes.clone()),
         backends,
         skipped,
+        schemes,
         machine: Box::new(machine),
         exec: Exec::Host { runner, fetcher },
     })
@@ -375,7 +406,8 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
         })
         .collect::<Result<Vec<_>, CliError>>()?;
 
-    let store = FileStateStore::new(system.clone(), user.clone(), backend_schemes(&backends));
+    let schemes = backend_schemes(&backends);
+    let store = FileStateStore::new(system.clone(), user.clone(), schemes.clone());
     let machine = FakeMachine {
         os,
         arch,
@@ -393,6 +425,7 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
         state: store,
         backends,
         skipped: Vec::new(),
+        schemes,
         machine: Box::new(machine),
         exec: Exec::Fixture(Box::new(FixtureStepRunner::new(
             fx.fail_step,
@@ -440,6 +473,25 @@ mod tests {
             r#"{"os":"linux","arch":"amd64","backends":[]}"#,
         );
         assert_eq!(plain.machine.privilege(), Privilege::Unelevated);
+    }
+
+    #[test]
+    fn factory_schemes_cover_every_compiled_in_backend_without_probing() {
+        // The scheme map is built from factory metadata, not from the probed set,
+        // so an absent backend's state/lock entries still read under its scheme.
+        let runner: Arc<dyn CommandRunner> = Arc::new(ProcessCommandRunner);
+        let fetcher: Arc<dyn HttpFetcher> = Arc::new(UreqHttpFetcher::new());
+        let factories = compiled_in_factories(
+            runner,
+            fetcher,
+            PathBuf::from("/tmp/bin"),
+            Os::Linux,
+            Arch::Amd64,
+        );
+        let schemes = factory_schemes(&factories);
+        assert_eq!(schemes.get("apt"), Some(&Scheme::Debian));
+        assert_eq!(schemes.get("cargo"), Some(&Scheme::Semver));
+        assert_eq!(schemes.get("github-release"), Some(&Scheme::Semver));
     }
 
     #[test]

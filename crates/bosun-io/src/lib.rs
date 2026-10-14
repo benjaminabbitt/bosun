@@ -25,18 +25,33 @@ use bosun_core::Scheme;
 /// How a lock/state leaf picks its version's §6 comparison scheme: from the
 /// `backend` it records, mapped to that backend's declared vers type (§6) —
 /// never the purl type (github's purl type is `github` but its versions compare
-/// as semver). The CLI builds this from the registered backends. A backend not
-/// listed falls back to [`Scheme::Generic`].
+/// as semver). The CLI builds this from **every compiled-in backend**, not just
+/// the ones present this run, so a leaf for an absent-but-known backend still
+/// reads correctly. A `backend` not in the map is unknown to this build and is
+/// a load error — never silently generic.
 pub type BackendSchemes = std::collections::BTreeMap<String, Scheme>;
 
 /// The §6 scheme for a leaf recorded under `backend`, by that backend's vers
-/// type; [`Scheme::Generic`] when the backend is not registered this run.
-pub(crate) fn scheme_of(schemes: &BackendSchemes, backend: &str) -> Scheme {
-    schemes.get(backend).copied().unwrap_or(Scheme::Generic)
+/// type. A backend this build does not know is a load error naming it and
+/// `source` — never [`Scheme::Generic`], which would compare its versions
+/// wrongly.
+pub(crate) fn scheme_of(
+    schemes: &BackendSchemes,
+    backend: &str,
+    source: &std::path::Path,
+) -> Result<Scheme, IoError> {
+    schemes
+        .get(backend)
+        .copied()
+        .ok_or_else(|| IoError::UnknownBackend {
+            path: source.to_path_buf(),
+            backend: backend.to_string(),
+        })
 }
 
 /// Build a [`BackendSchemes`] from `(backend id, vers type)` pairs (the vers
-/// type decides the scheme, §6), for callers assembling it from a registry.
+/// type decides the scheme, §6), for callers assembling it from the compiled-in
+/// backends.
 pub fn schemes_from<'a>(backends: impl IntoIterator<Item = (&'a str, &'a str)>) -> BackendSchemes {
     backends
         .into_iter()

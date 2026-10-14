@@ -99,7 +99,7 @@ impl LockDoc {
         }
     }
 
-    fn into_core(self, schemes: &BackendSchemes) -> Result<LockDocument, IoError> {
+    fn into_core(self, schemes: &BackendSchemes, source: &Path) -> Result<LockDocument, IoError> {
         let targets = self
             .targets
             .into_iter()
@@ -123,7 +123,7 @@ impl LockDoc {
                     .map(|(t, e)| {
                         // §6: the version's scheme comes from the leaf's backend's
                         // declared vers type, not the purl type.
-                        let scheme = crate::scheme_of(schemes, &e.backend);
+                        let scheme = crate::scheme_of(schemes, &e.backend, source)?;
                         Ok((parse_target(&t)?, leaf(e, scheme)?))
                     })
                     .collect::<Result<_, IoError>>()?;
@@ -199,7 +199,7 @@ pub fn from_json(
             max: LOCKFILE_VERSION,
         });
     }
-    doc.into_core(schemes)
+    doc.into_core(schemes, source)
 }
 
 #[cfg(test)]
@@ -324,6 +324,34 @@ mod tests {
         assert!(
             pkg.meta.range().contains(&leaf.resolved),
             "the locked version must satisfy its own spec"
+        );
+    }
+
+    #[test]
+    fn an_unknown_backend_is_a_load_error_naming_the_id_and_file() {
+        // A leaf naming a backend this build does not know cannot be read: its
+        // version scheme is unknown, so fail rather than guess Generic.
+        let text = r#"{
+  "lockfileVersion": 1,
+  "targets": { "linux/amd64": { "manifestHash": "sha256:x" } },
+  "packages": [
+    {
+      "name": "x",
+      "spec": "vers:deb/>=1",
+      "targets": { "linux/amd64": {
+        "backend": "mystery",
+        "purl": "pkg:deb/debian/x?arch=amd64",
+        "resolved": "1.0"
+      } }
+    }
+  ]
+}"#;
+        let err = from_json(text, Path::new("bosun.lock"), &schemes()).unwrap_err();
+        assert!(matches!(&err, IoError::UnknownBackend { backend, .. } if backend == "mystery"));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("mystery") && msg.contains("bosun.lock"),
+            "message names the id and file: {msg}"
         );
     }
 }

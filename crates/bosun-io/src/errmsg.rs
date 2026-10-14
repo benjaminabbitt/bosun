@@ -12,3 +12,6 @@ pub const LOCK: &str = "could not lock machine state";
 pub const LOCKFILE_VERSION: &str = "unsupported lockfile version";
 /// A recorded value could not be converted to bosun's domain model.
 pub const CONVERT: &str = "invalid recorded value";
+/// A lock/state leaf names a backend this build does not know, so its version
+/// scheme is unknown and the file cannot be read.
+pub const UNKNOWN_BACKEND: &str = "unknown backend";

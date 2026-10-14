@@ -54,6 +54,15 @@ pub enum IoError {
         /// What could not be converted.
         detail: String,
     },
+    /// A lock/state leaf names a backend this build does not know, so its
+    /// version scheme cannot be determined (§6).
+    #[error("{kind}: {backend:?} in {path}", kind = errmsg::UNKNOWN_BACKEND)]
+    UnknownBackend {
+        /// The file the leaf came from.
+        path: PathBuf,
+        /// The unrecognised backend id.
+        backend: String,
+    },
 }
 
 impl From<IoError> for bosun_ports::PortError {
