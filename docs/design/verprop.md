@@ -1164,6 +1164,14 @@ remote indexes. Traits stay ready; nothing is stubbed.
   available) whether the specs are disjoint or nothing published fits; telling those apart
   needs vers interval algebra, deferred. Reporting lockfiles a plain `install` doesn't match is
   the command layer's job.
+- **Plan exit code counts package changes only** (install / upgrade / downgrade / hold /
+  remove). Claim bookkeeping (`accept`, `drop-claim`) is shown and applied but exits 0, so
+  `install --plan` stays a drift check on a fresh CI machine whose tools are already present.
+- **Unsupported capability degrades** (§5.2): a hold the backend can't do is a warning and is
+  skipped; a downgrade it can't do is an error diagnostic for that package, not a failure of
+  the whole plan.
+- Holds are change-driven: emitted only when the package changes this run, so a fully-applied
+  manifest plans to nothing.
 - `Arch` is amd64/arm64 only; `Os` uses Docker's spelling (`darwin`).
 
 **Slice status:**
@@ -1187,7 +1195,8 @@ remote indexes. Traits stay ready; nothing is stubbed.
 | 7-4 | fix-up: no sentinel version in `verify_installed` (Absent / Present{version?}); `binary` purl qualifier; real v0.6.4 fixtures, exact goreleaser asset match | landed; 163 tests; mutation github_release+model 36/38 (2 equivalent) |
 | 8-1 | bosun-resolve: single-manifest resolve (selectors, installer preference, purl building, highest-in-set, `any` target) | landed; 182 tests; mutation 14/14 viable caught |
 | 8-2 | multi-claim intersection, lock merge per target, `--frozen`, `lock --check` (pure functions) | landed; 193 tests; mutation 31/31 viable caught |
-| 9 | bosun-apply: plan builder (§4.8), privilege check (§5.5), Driver + host applier | in progress |
+| 9-1 | bosun-apply: plan builder (§4.8) + privilege check (§5.5); JSON via one-way DTO views | landed; 216 tests; mutation 48/48 viable caught |
+| 9-2 | Driver + host applier; exit code counts package changes only; unsupported capability → diagnostic | in progress |
 | 10–13 | cli, acceptance, dogfood, quality | not started |
 
 **Active implementor:** `lame-wide-chant` (worktree branch `ctxloom/lame-wide-chant`), one
