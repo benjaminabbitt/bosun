@@ -49,7 +49,8 @@ impl Ord for Segment {
         match (self, other) {
             (Segment::Numeric(a), Segment::Numeric(b)) => a.cmp(b),
             (Segment::Alpha(a), Segment::Alpha(b)) => a.cmp(b),
-            (Segment::Tilde, Segment::Tilde) => Ordering::Equal,
+            // Two tildes carry no value to compare; the equal-rank fallback
+            // below already yields `Equal`, so no explicit arm is needed.
             _ => self.rank().cmp(&other.rank()),
         }
     }
@@ -99,9 +100,10 @@ pub fn tokenize(s: &str) -> Vec<Segment> {
 
 /// Compare two tokenized version sequences (§6 rule 3 for the tails).
 pub fn compare(a: &[Segment], b: &[Segment]) -> Ordering {
-    let mut i = 0;
+    let mut a = a.iter();
+    let mut b = b.iter();
     loop {
-        match (a.get(i), b.get(i)) {
+        match (a.next(), b.next()) {
             (Some(x), Some(y)) => {
                 let o = x.cmp(y);
                 if o != Ordering::Equal {
@@ -114,7 +116,6 @@ pub fn compare(a: &[Segment], b: &[Segment]) -> Ordering {
             (None, Some(_)) => return Ordering::Less,
             (None, None) => return Ordering::Equal,
         }
-        i += 1;
     }
 }
 

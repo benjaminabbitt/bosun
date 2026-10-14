@@ -179,7 +179,10 @@ mod tests {
     fn empty_is_rejected_every_scheme() {
         assert_eq!(Version::parse("", Scheme::Debian), Err(VersionError::Empty));
         assert_eq!(Version::parse("", Scheme::Semver), Err(VersionError::Empty));
-        assert_eq!(Version::parse("", Scheme::Generic), Err(VersionError::Empty));
+        assert_eq!(
+            Version::parse("", Scheme::Generic),
+            Err(VersionError::Empty)
+        );
     }
 
     #[test]
@@ -227,6 +230,23 @@ mod tests {
         assert_eq!(deb("1.0-1"), deb("1.0-1"));
         assert_eq!(sem("1.0.0"), sem("1.0.0"));
         assert_eq!(gen("1.0"), gen("1.0"));
+    }
+
+    #[test]
+    fn unequal_versions_are_not_eq() {
+        // `<`/`>` go through `cmp`; this pins `PartialEq::eq` itself.
+        assert_ne!(deb("1.0"), deb("2.0"));
+        assert_ne!(sem("1.0.0"), sem("1.0.1"));
+        assert_ne!(gen("1.0"), gen("1.0.1"));
+    }
+
+    #[test]
+    fn version_error_messages_are_rendered() {
+        assert_eq!(VersionError::Empty.to_string(), "empty version string");
+        assert_eq!(
+            VersionError::Semver("unexpected end of input".into()).to_string(),
+            "invalid semver version: unexpected end of input"
+        );
     }
 
     #[test]
