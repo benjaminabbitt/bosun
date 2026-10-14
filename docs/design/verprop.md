@@ -1004,7 +1004,10 @@ remote indexes. Traits stay ready; nothing is stubbed.
 
 - annals is pinned by git rev `3c5fbac`. `annals_yaml::edit` is not published yet, so `add`
   and `remove` are **left out of the CLI entirely** (no "unavailable" stub) until it lands.
-- `rust-toolchain.toml` pins **1.96.1**, matching the host and the agent image.
+- `rust-toolchain.toml` pins **1.96.1**, matching the host and the agent image; the workspace
+  `rust-version` is 1.96.1 too (cargo refuses to build under a lower toolchain).
+- Mutation testing inside agent containers runs `--in-place` on a disposable copy of the tree
+  with `TMPDIR` off `/tmp`: the shared `.git` is read-only there, so `git worktree add` fails.
 - The dogfood `bosun.yaml` targets plain `linux:debian`, not a specific release.
 
 **Slice status:**
@@ -1012,7 +1015,7 @@ remote indexes. Traits stay ready; nothing is stubbed.
 | slice | what | state |
 |---|---|---|
 | 0 | workspace skeleton, justfile, bacon.toml, LICENSE | landed |
-| 1 | bosun-core version model (§6) | WIP on main, unverified (run interrupted mid mutation test) |
+| 1 | bosun-core version model (§6) | landed; 24 tests, mutation 25/25 viable caught |
 | 2–13 | policy, domain, ports, io, host, backends, resolve, apply, cli, acceptance, dogfood, quality | not started |
 
 **Active implementor:** `lame-wide-chant` (worktree branch `ctxloom/lame-wide-chant`), one
