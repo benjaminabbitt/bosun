@@ -272,7 +272,7 @@ Only the header and the per-target leaf fields differ:
       "name": "jq",
       "targets": {
         "linux/amd64": {
-          "backend": "apt", "package": "jq",
+          "backend": "apt", "purl": "pkg:deb/ubuntu/jq?arch=amd64&distro=noble",
           "installed": "1.7.1-3ubuntu0.1", "origin": "installed",
           "claimedBy": [
             { "manifest": "/home/babbitt/workspace/verprop/bosun.yaml", "spec": "vers:deb/>=1.7|<2" },
@@ -285,7 +285,7 @@ Only the header and the per-target leaf fields differ:
       "name": "git",
       "targets": {
         "linux/amd64": {
-          "backend": "apt", "package": "git",
+          "backend": "apt", "purl": "pkg:deb/ubuntu/git?arch=amd64&distro=noble",
           "installed": "2.43.0", "origin": "accepted",
           "claimedBy": [
             { "manifest": "/home/babbitt/workspace/verprop/bosun.yaml", "spec": "vers:deb/>=2.40" }
@@ -317,7 +317,7 @@ Only the header and the per-target leaf fields differ:
   in a project adds or updates that project's claims, and drops its claims for entries no longer
   in its manifest — a state-only change; the package stays installed until `prune`. `status`
   reports claims whose manifest no longer exists (repo moved or deleted); `prune` drops them.
-- `package` records the backend package ID **as actually installed**, so prune removes the
+- `purl` records the package **as actually installed** (§5.6), so prune removes the
   right thing even if the manifest's name mapping changes later (§5.4).
 - **User-level manifest:** `<config dir>/bosun/bosun.yaml` holds personal tools. It is just
   another claimant.
@@ -1081,6 +1081,9 @@ remote indexes. Traits stay ready; nothing is stubbed.
 - Backends work in **native IDs** (`Ref`/`Installed` in bosun-ports carry the backend's own
   package ID); bosun builds the canonical purl only for what it records (`Placement =
   {backend, purl}` in lock and state). `native_id()`: github → `namespace/name`, else `name`.
+- **State locking:** a mutating run holds an exclusive lock on the state file from load to
+  save (the lock spans the plan and apply), using `std::fs::File::lock`; writes are atomic
+  (temp file, fsync, rename). A save-only lock would lose claims when two runs interleave.
 - `Arch` is amd64/arm64 only; `Os` uses Docker's spelling (`darwin`).
 
 **Slice status:**
@@ -1095,7 +1098,9 @@ remote indexes. Traits stay ready; nothing is stubbed.
 | 2b | tolerant-with-range on the pre-vers wildcard grammar | superseded; its commit sits on main beneath 4b-1, which removes it |
 | 4b-1 | vers ranges + single-rule selection; Policy/Deviation/tolerant removed (§5.6) | landed (with 2b's commit beneath it); 71 tests incl. vers conformance (npm canonical-parse + containment), mutation 53/53 viable caught |
 | 4b-2 | purl identity: conformant purl module; PackageId → unversioned purl in lock/state | landed; 87 tests; purl conformance 65/65 required (spec, deb, cargo, github, generic), 98/107 other types best-effort; mutation 72/72 viable caught |
-| 5–13 | io, host, backends, resolve, apply, cli, acceptance, dogfood, quality | not started |
+| 5-1 | bosun-io: lockfile + state JSON, FileStateStore, user config | landed; golden + round-trip tests; mutation deferred to 13 |
+| 5-2 | bosun-io: manifest + manifestHash; std file lock held across load→save | in progress |
+| 6–13 | host, backends, resolve, apply, cli, acceptance, dogfood, quality | not started |
 
 **Active implementor:** `lame-wide-chant` (worktree branch `ctxloom/lame-wide-chant`), one
 slice per turn, reporting to the orchestrator after each. Previous: `hoary-quick-elm` (crashed
