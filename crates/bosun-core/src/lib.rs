@@ -13,7 +13,7 @@ pub use model::{
     BackendId, Capabilities, Checksum, Claim, Installed, Origin, PackageId, Ref, Scope, Source,
     SourceId,
 };
-pub use platform::{Arch, Os, PlatformError, Selector, Target};
+pub use platform::{Arch, Distro, Os, PlatformError, Selector, Target};
 pub use policy::{Deviation, Entry, Policy, Resolution, ResolveError, Spec, SpecError};
 pub use record::{
     LockDocument, LockLeaf, LockPackage, Package, Placement, StateDocument, StateLeaf,

@@ -215,6 +215,28 @@ impl FromStr for Selector {
     }
 }
 
+/// Distro facts read from `/etc/os-release` (§5.4). The `Machine` interface
+/// surfaces these; os-release parsing itself lives in bosun-host.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Distro {
+    /// The `ID` field, e.g. `ubuntu`, `debian`, `fedora`.
+    pub id: String,
+    /// The `ID_LIKE` families, e.g. `[debian]` for Ubuntu.
+    pub id_like: Vec<String>,
+    /// The `VERSION_ID` field, when present (absent on rolling distros).
+    pub version_id: Option<String>,
+}
+
+impl Distro {
+    /// Whether this distro belongs to `family` by the §5.4 rule: its `ID`
+    /// equals the family, or its `ID_LIKE` contains it. So Ubuntu, Mint and
+    /// Pop!_OS all satisfy `debian`. Combining this with the OS and ranking
+    /// selector specificity is resolution's job, not this type's.
+    pub fn satisfies_family(&self, family: &str) -> bool {
+        self.id == family || self.id_like.iter().any(|f| f == family)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,6 +341,18 @@ mod tests {
         assert_eq!(od.os(), Os::Linux);
         assert_eq!(od.distro(), Some("debian"));
         assert_eq!(os.distro(), None);
+    }
+
+    #[test]
+    fn distro_satisfies_family_by_id_or_id_like() {
+        let ubuntu = Distro {
+            id: "ubuntu".into(),
+            id_like: vec!["debian".into()],
+            version_id: Some("24.04".into()),
+        };
+        assert!(ubuntu.satisfies_family("ubuntu")); // by ID
+        assert!(ubuntu.satisfies_family("debian")); // by ID_LIKE
+        assert!(!ubuntu.satisfies_family("fedora"));
     }
 
     #[test]
