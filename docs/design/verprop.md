@@ -1214,8 +1214,9 @@ remote indexes. Traits stay ready; nothing is stubbed.
 | 10-3 | blockers from the first real-host smoke run (below) + cross-claim selection in `install` | landed; 265 tests; host re-run: jq → `accept`, invalid spec → parse error + exit 1, ctxloom 0.6.4 planned |
 | 11-1 | acceptance seam tier: cucumber-rs over the real binary, 4 features / 20 scenarios, under `cargo test --workspace`; hold support `Supported / Unsupported / NotNeeded` | landed; 266 tests + 20 scenarios |
 | 11-2 | acceptance real-backend tier in a disposable container (`just acceptance-real`; guarded by `BOSUN_ACCEPTANCE_REAL=1` + a container marker) | landed; real run 2/2 scenarios (apt hello install → hold → prune; github-release ctxloom 0.6.4 checksum-verified); found 2 bugs (below) |
-| 13 | quality: hermetic regressions for the 11-2 bugs, workspace mutation run, coverage ≥ 90% | in progress |
-| 12–13 | cli, acceptance, dogfood, quality | not started |
+| 13 | quality: hermetic regressions for the 11-2 bugs, workspace mutation run, coverage ≥ 90% | landed; 284 tests; coverage 90.60% lines / 90.32% regions (re-measured by orchestrator); every mutation target met, survivors justified |
+| 13b | mutation for bosun-io / bosun-ports | in progress (`finer-urban-brunt`) |
+| 12 | dogfood: `bosun.yaml` (just, jq, ctxloom) committed; plan-only host run (user decision) | manifest committed; host run found 5 bugs (below); fixes queued |
 
 **First real-host smoke run (2026-10-14, release build, Debian 13, read-only `--plan` and
 `lock` in a scratch dir).** `backends` found apt 3.0.3, cargo 1.96.1 and github-release; jq
@@ -1233,7 +1234,25 @@ seam couldn't: apt `uninstall` left a lingering `apt-mark hold` (now unholds bef
 and a user-scope `install` opened and locked root-owned system state (now each scope's state is
 read only when needed). Cargo was skipped for compile time.
 
-**Active implementor:** `lame-wide-chant` (worktree branch `ctxloom/lame-wide-chant`), one
+**Dogfood host run (2026-10-14, Debian 13, plan-only per user decision).** `lock` resolved just
+1.40.0-1+b1, jq 1.7.1-6+deb13u2 and ctxloom 0.6.4. `install --plan` gives `install ctxloom`,
+`accept just`, `accept jq` (exit 2), and no state was written. Five bugs:
+
+1. `install --frozen` refuses ctxloom: "0.6.4 excluded by `vers:semver/>=0.6.4|<0.7.0`",
+   though 0.6.4 is in the range.
+2. Claims record the manifest as the relative `./bosun.yaml`; §4.6 needs the canonical
+   absolute path.
+3. The lockfile carries no `checksum` for github-release (§12 says it's enforced), though the
+   plan's Fetch step carries the right sha256.
+4. `status` reports present-but-unmanaged packages (jq, just) as "not installed".
+5. `--frozen` with an accepted (not bosun-owned) package installed at a different version
+   than the lock (jq u1 vs locked u2) needs a defined outcome: an error diagnostic naming
+   both versions, with no change.
+
+User decisions: ltk, taskloom and harp stay out of M1; the host dogfood is plan-only (the
+user runs the real install). `bosun.lock` is committed once bug 3 is fixed.
+
+**Active implementor:** `finer-urban-brunt` (fresh worktree from main). Previous: `lame-wide-chant`, which can't be resumed (ctxloom compares worktree branch `refs/heads/…` with a short name; see the alpha-issues write-up); all its work is on main, and its worktree is kept as evidence. Before it: `lame-wide-chant` (worktree branch `ctxloom/lame-wide-chant`), one
 slice per turn, reporting to the orchestrator after each. Previous: `hoary-quick-elm` (crashed
 during slice 1; its scaffold and WIP were cherry-picked onto main; its worktree and branch are removed, and its
 session record is kept as crash evidence).
