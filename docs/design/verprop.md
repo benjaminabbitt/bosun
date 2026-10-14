@@ -1127,6 +1127,13 @@ remote indexes. Traits stay ready; nothing is stubbed.
   container renderer turns them into `Containerfile.bosun` (§8.2). **Binding on slice 7**; the
   ports trait change goes in with it. Rendering itself (`render`, `Containerfile.bosun`) stays
   after M1; render args/env and the bosun layer are both supported shapes.
+- The manifest model lives in bosun-core; its loader, `ManifestError` (an annals
+  `Diagnostic`) and `manifest_hash` (sha256 of a canonical serialization of the parsed model)
+  live in bosun-io. Specs stay raw until resolve, which parses them as vers using the
+  selected backend's purl type. The M1 manifest schema has no `sources` or `adopt` keys (an
+  unknown key is an error); both come back with the features that need them.
+- `StateStore` is transactional: `begin` (exclusive lock + load, held across plan and apply) /
+  `try_begin` / `read` (shared lock) and `StateTransaction::commit` (atomic write).
 - `Arch` is amd64/arm64 only; `Os` uses Docker's spelling (`darwin`).
 
 **Slice status:**
@@ -1142,8 +1149,9 @@ remote indexes. Traits stay ready; nothing is stubbed.
 | 4b-1 | vers ranges + single-rule selection; Policy/Deviation/tolerant removed (§5.6) | landed (with 2b's commit beneath it); 71 tests incl. vers conformance (npm canonical-parse + containment), mutation 53/53 viable caught |
 | 4b-2 | purl identity: conformant purl module; PackageId → unversioned purl in lock/state | landed; 87 tests; purl conformance 65/65 required (spec, deb, cargo, github, generic), 98/107 other types best-effort; mutation 72/72 viable caught |
 | 5-1 | bosun-io: lockfile + state JSON, FileStateStore, user config | landed; golden + round-trip tests; mutation deferred to 13 |
-| 5-2 | bosun-io: manifest + manifestHash; std file lock held across load→save | in progress |
-| 6–13 | host, backends, resolve, apply, cli, acceptance, dogfood, quality | not started |
+| 5-2 | bosun-io: manifest + manifestHash; transactional StateStore on std file locks | landed; 106 workspace tests; hash proven comment-insensitive |
+| 6 | bosun-host: LinuxMachine/FakeMachine, os-release, privilege, probe registry | in progress |
+| 7–13 | backends, resolve, apply, cli, acceptance, dogfood, quality | not started |
 
 **Active implementor:** `lame-wide-chant` (worktree branch `ctxloom/lame-wide-chant`), one
 slice per turn, reporting to the orchestrator after each. Previous: `hoary-quick-elm` (crashed
