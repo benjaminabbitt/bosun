@@ -1208,8 +1208,9 @@ remote indexes. Traits stay ready; nothing is stubbed.
 | 9-2 | Driver + host applier (one transaction, per-backend isolation, verify-before-record); exit code and capability fixes | landed; 226 tests; mutation 64/64 viable caught |
 | 10-1 | per-action state checkpoints + ApplyReport JSON; real adapters (std::process, ureq/rustls); wiring; `backends` / `status` / `lock [--check]`; `--format` | landed; 245 tests |
 | 10-2 | `install` / `uninstall` / `prune` + confirmation; backend metadata on the factory; fixture-seam guard | landed; 258 tests |
-| 10-3 | blockers from the first real-host smoke run (below) + cross-claim selection in `install` | in progress |
-| 11–13 | cli, acceptance, dogfood, quality | not started |
+| 10-3 | blockers from the first real-host smoke run (below) + cross-claim selection in `install` | landed; 265 tests; host re-run: jq → `accept`, invalid spec → parse error + exit 1, ctxloom 0.6.4 planned |
+| 11 | acceptance: cucumber-rs over the real binary; seam tier + real-backend tier in a disposable container | in progress |
+| 12–13 | cli, acceptance, dogfood, quality | not started |
 
 **First real-host smoke run (2026-10-14, release build, Debian 13, read-only `--plan` and
 `lock` in a scratch dir).** `backends` found apt 3.0.3, cargo 1.96.1 and github-release; jq
