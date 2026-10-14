@@ -1223,7 +1223,8 @@ remote indexes. Traits stay ready; nothing is stubbed.
 | 13 | quality: hermetic regressions for the 11-2 bugs, workspace mutation run, coverage ≥ 90% | landed; 284 tests; coverage 90.60% lines / 90.32% regions (re-measured by orchestrator); every mutation target met, survivors justified |
 | 13b | mutation for bosun-io / bosun-ports | landed; 290 tests; io 31/31 and ports 11/11 viable caught (6 survivors killed with new tests) |
 | 12-1 | fixes for the 5 dogfood bugs (below) | landed; 296 tests; host re-run clean; `bosun.lock` committed (ctxloom checksum recorded) |
-| 12-2 | installed-version scheme from backend metadata (state + lock); idempotency scenario per backend | in progress (`finer-urban-brunt`) |
+| 12-2 | installed-version scheme from backend metadata (state + lock); idempotency test per backend | landed; 299 tests; github-release idempotency test confirmed red without the fix |
+| 12-3 | scheme map from every compiled-in backend; unknown backend id in lock/state is an error, not Generic | in progress (`finer-urban-brunt`) |
 | 12 | dogfood: `bosun.yaml` (just, jq, ctxloom) committed; plan-only host run (user decision) | manifest committed; host run found 5 bugs (below) → 12-1 |
 
 **First real-host smoke run (2026-10-14, release build, Debian 13, read-only `--plan` and
