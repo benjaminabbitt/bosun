@@ -1089,7 +1089,8 @@ remote indexes. Traits stay ready; nothing is stubbed.
 
 **Active implementor:** `lame-wide-chant` (worktree branch `ctxloom/lame-wide-chant`), one
 slice per turn, reporting to the orchestrator after each. Previous: `hoary-quick-elm` (crashed
-during slice 1; its scaffold and WIP were cherry-picked onto main).
+during slice 1; its scaffold and WIP were cherry-picked onto main; its worktree and branch are removed, and its
+session record is kept as crash evidence).
 
 **Resume procedure:** dispatch a new `implementor` agent (worktree) with a brief pointing at
 this section; it continues from the first slice not marked landed, and the orchestrator updates
