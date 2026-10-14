@@ -1,11 +1,14 @@
 //! Backend and package value types shared by the ports, resolver, and
 //! applier: how a package is named to a backend, what a backend can do, and
-//! what an install or a claim records.
+//! what a verify or a claim records.
 //!
-//! These are plain data. Their JSON/YAML wire format is bosun-io's concern
-//! (slice 5); this module only fixes the Rust shape.
+//! These are plain data. Their JSON/YAML wire format is bosun-io's concern;
+//! this module only fixes the Rust shape.
 
 use std::path::PathBuf;
+
+use crate::purl::Purl;
+use crate::version::Version;
 
 /// A backend's stable identifier: `apt`, `cargo`, `github-release`, … (§5.3).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -20,39 +23,6 @@ impl BackendId {
     /// The identifier as a string slice.
     pub fn as_str(&self) -> &str {
         &self.0
-    }
-}
-
-/// A package's identifier *as a backend names it* (§5.4): `fd-find` on apt,
-/// `sharkdp.fd` on winget, `<owner>/bosun` for github-release.
-///
-/// Some backends distinguish a *kind* under one manager — brew formula vs
-/// cask, scoop `bucket/app` (Appendix B). M1 backends don't need it, so
-/// `kind` is an opaque optional string rather than a closed enum; it is
-/// carried so verify and prune target exactly what install did.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct PackageId {
-    /// The backend-native package identifier.
-    pub id: String,
-    /// An optional backend-specific kind (e.g. `cask`), opaque in M1.
-    pub kind: Option<String>,
-}
-
-impl PackageId {
-    /// A plain package id with no kind.
-    pub fn new(id: impl Into<String>) -> PackageId {
-        PackageId {
-            id: id.into(),
-            kind: None,
-        }
-    }
-
-    /// A package id carrying a backend-specific kind.
-    pub fn with_kind(id: impl Into<String>, kind: impl Into<String>) -> PackageId {
-        PackageId {
-            id: id.into(),
-            kind: Some(kind.into()),
-        }
     }
 }
 
@@ -83,24 +53,21 @@ pub struct Source {
     pub id: SourceId,
 }
 
-/// A backend-facing reference to one package: its id and, where relevant, the
-/// source it comes from. Passed to [`Index`](crate) queries and installer
-/// operations; the backend itself is implied by which installer is called.
+/// A backend-facing reference to one package: its canonical purl (§5.6). A
+/// backend derives its native id (`purl.native_id()`), its qualifiers
+/// (`arch`/`distro`/`repository_url`/`binary`) and its source from the purl.
+/// Passed to [`Index`](crate) queries and installer operations; the backend
+/// itself is implied by which installer is called.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ref {
-    /// The package id, as the backend names it.
-    pub package: PackageId,
-    /// The source it is installed from, when one is needed.
-    pub source: Option<SourceId>,
+    /// The package's canonical purl.
+    pub purl: Purl,
 }
 
 impl Ref {
-    /// A reference to a package with no explicit source.
-    pub fn new(package: PackageId) -> Ref {
-        Ref {
-            package,
-            source: None,
-        }
+    /// A reference to `purl`.
+    pub fn new(purl: Purl) -> Ref {
+        Ref { purl }
     }
 }
 
@@ -123,6 +90,26 @@ pub enum Origin {
     /// Already present, satisfying a claim; bosun never changes or removes it
     /// until explicitly adopted.
     Accepted,
+}
+
+/// What `verify_installed` found (§5.1): whether the package is present and,
+/// when the backend can read it, its version.
+///
+/// A backend that reads the version from the manager (apt, cargo) reports
+/// `Present { version: Some(..) }`. One that cannot without running a binary
+/// it did not build (github-release) reports `Present { version: None }`, and
+/// bosun state is the version authority (§4.6). There is **no sentinel
+/// version**, so a version-less presence can never be mistaken for a version
+/// in a comparison (which would reinstall every run — Appendix B).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Installed {
+    /// The package is not installed.
+    Absent,
+    /// The package is installed, with its version if the backend can read it.
+    Present {
+        /// The installed version, or `None` when the backend cannot read it.
+        version: Option<Version>,
+    },
 }
 
 /// What a backend can honour (§5.1, §5.2). bosun degrades with a warning when
@@ -158,33 +145,33 @@ pub struct Claim {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::version::Scheme;
 
     #[test]
-    fn package_id_defaults_to_no_kind() {
-        let p = PackageId::new("fd-find");
-        assert_eq!(p.id, "fd-find");
-        assert_eq!(p.kind, None);
-    }
-
-    #[test]
-    fn package_id_can_carry_a_kind() {
-        let p = PackageId::with_kind("font-fira-code", "cask");
-        assert_eq!(p.id, "font-fira-code");
-        assert_eq!(p.kind.as_deref(), Some("cask"));
-        // Same id, different kind, are distinct packages.
-        assert_ne!(p, PackageId::new("font-fira-code"));
-    }
-
-    #[test]
-    fn ref_defaults_to_no_source() {
-        let r = Ref::new(PackageId::new("jq"));
-        assert_eq!(r.source, None);
-        assert_eq!(r.package.id, "jq");
+    fn ref_carries_the_purl() {
+        let r = Ref::new("pkg:deb/debian/jq".parse().unwrap());
+        assert_eq!(r.purl.native_id(), "jq");
     }
 
     #[test]
     fn backend_and_source_ids_expose_str() {
         assert_eq!(BackendId::new("apt").as_str(), "apt");
         assert_eq!(SourceId::new("ctxloom/tap").as_str(), "ctxloom/tap");
+    }
+
+    #[test]
+    fn installed_present_without_a_version_carries_no_version() {
+        // A version-less presence has no Version to compare against a spec.
+        let absent = Installed::Absent;
+        let present_unknown = Installed::Present { version: None };
+        let present_known = Installed::Present {
+            version: Some(Version::parse("1.2.3", Scheme::Semver).unwrap()),
+        };
+        assert_ne!(absent, present_unknown);
+        assert_ne!(present_unknown, present_known);
+        match present_unknown {
+            Installed::Present { version } => assert!(version.is_none()),
+            Installed::Absent => unreachable!(),
+        }
     }
 }

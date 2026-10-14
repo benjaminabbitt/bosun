@@ -142,7 +142,7 @@ pub fn build_registry(factories: Vec<Box<dyn BackendFactory>>, host: &HostInfo) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bosun_core::{Arch, Capabilities, Os, Ref, Scheme, Scope, Source, Target};
+    use bosun_core::{Arch, Capabilities, Installed, Os, Ref, Scheme, Scope, Source, Target};
     use bosun_ports::testing::FakeCommandRunner;
     use bosun_ports::{Index, Installer, PortError, Steps};
 
@@ -173,8 +173,8 @@ mod tests {
         fn install_exact(&self, _: &Ref, _: &Version) -> Result<Steps, PortError> {
             Ok(vec![])
         }
-        fn verify_installed(&self, _: &Ref) -> Result<Option<Version>, PortError> {
-            Ok(None)
+        fn verify_installed(&self, _: &Ref) -> Result<Installed, PortError> {
+            Ok(Installed::Absent)
         }
         fn hold(&self, _: &Ref, _: &Version) -> Result<Steps, PortError> {
             Ok(vec![])

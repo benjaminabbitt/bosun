@@ -21,7 +21,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use bosun_core::{Arch, BackendId, Capabilities, Os, Ref, Scheme, Scope, Source, Target, Version};
+use bosun_core::{
+    Arch, BackendId, Capabilities, Installed, Os, Ref, Scheme, Scope, Source, Target, Version,
+};
 use bosun_ports::{
     Backend, BackendFactory, HostInfo, HttpFetcher, HttpRequest, HttpResponse, Index, Installer,
     PortError, Probe, Step, Steps,
@@ -164,45 +166,50 @@ fn version_from_tag(tag: &str) -> Option<Version> {
 }
 
 impl GithubReleaseBackend {
-    /// The binary name: the package id's `kind`, else the repo's last segment.
+    /// The binary name: the purl's `binary` qualifier, else the purl's name
+    /// (the repo segment). The shared ctxloom repo would set `binary` to keep
+    /// its tools distinct; a single-binary repo needs nothing.
     fn binary_of(pkg: &Ref) -> String {
-        pkg.package.kind.clone().unwrap_or_else(|| {
-            pkg.package
-                .id
-                .rsplit('/')
-                .next()
-                .unwrap_or(&pkg.package.id)
-                .to_string()
-        })
+        pkg.purl
+            .qualifiers()
+            .get("binary")
+            .cloned()
+            .unwrap_or_else(|| pkg.purl.name().to_string())
     }
 
-    /// Pick the one asset matching (binary, os, arch) by goreleaser's default
-    /// name; error (listing candidates) when zero or several match.
+    /// The expected archive name for (binary, version, os, arch): the `asset`
+    /// qualifier as a template (`{binary}`/`{version}`/`{os}`/`{arch}`), else
+    /// goreleaser's default `<binary>_<version>_<os>_<arch>.tar.gz`.
+    fn expected_asset(&self, pkg: &Ref, binary: &str, version: &Version) -> String {
+        let os = self.os.to_string();
+        let arch = self.arch.to_string();
+        match pkg.purl.qualifiers().get("asset") {
+            Some(template) => template
+                .replace("{binary}", binary)
+                .replace("{version}", version.as_str())
+                .replace("{os}", &os)
+                .replace("{arch}", &arch),
+            None => format!("{binary}_{}_{os}_{arch}.tar.gz", version.as_str()),
+        }
+    }
+
+    /// Pick the asset whose name is **exactly** `expected` (not a prefix, so a
+    /// `_full` variant never matches the plain archive); error listing the
+    /// candidates when none (or, defensively, several) match.
     fn pick_archive<'a>(
         &self,
-        binary: &str,
+        expected: &str,
         assets: &'a [ReleaseAsset],
     ) -> Result<&'a ReleaseAsset, PortError> {
-        let prefix = format!("{}_", binary.to_ascii_lowercase());
-        let suffix = format!("_{}_{}.tar.gz", self.os, self.arch);
-        let matches: Vec<&ReleaseAsset> = assets
-            .iter()
-            .filter(|a| {
-                let n = a.name.to_ascii_lowercase();
-                n.starts_with(&prefix) && n.ends_with(&suffix)
-            })
-            .collect();
+        let matches: Vec<&ReleaseAsset> = assets.iter().filter(|a| a.name == expected).collect();
         match matches.as_slice() {
             [one] => Ok(one),
             found => {
                 let candidates: Vec<&str> = assets.iter().map(|a| a.name.as_str()).collect();
                 Err(PortError::Backend {
                     detail: format!(
-                        "{} asset(s) match {binary} for {}/{} (expected 1); candidates: {:?}",
+                        "{} asset(s) named {expected:?} (expected 1); candidates: {candidates:?}",
                         found.len(),
-                        self.os,
-                        self.arch,
-                        candidates
                     ),
                 })
             }
@@ -250,7 +257,7 @@ impl Index for GithubReleaseBackend {
     }
 
     fn query_available(&self, pkg: &Ref, _target: &Target) -> Result<Vec<Version>, PortError> {
-        let repo = &pkg.package.id;
+        let repo = pkg.purl.native_id();
         let mut versions = Vec::new();
         for page in 1.. {
             let url =
@@ -295,10 +302,11 @@ impl Installer for GithubReleaseBackend {
     }
 
     fn install_exact(&self, pkg: &Ref, version: &Version) -> Result<Steps, PortError> {
-        let repo = pkg.package.id.clone();
+        let repo = pkg.purl.native_id();
         let binary = Self::binary_of(pkg);
         let release = self.fetch_release(&repo, version)?;
-        let archive = self.pick_archive(&binary, &release.assets)?;
+        let expected = self.expected_asset(pkg, &binary, version);
+        let archive = self.pick_archive(&expected, &release.assets)?;
 
         // Enforce the checksum (§12): checksums.txt must exist and list it.
         let sums = release
@@ -334,13 +342,17 @@ impl Installer for GithubReleaseBackend {
         ])
     }
 
-    fn verify_installed(&self, pkg: &Ref) -> Result<Option<Version>, PortError> {
-        // Presence only: the binary exists at the recorded path. bosun state is
-        // the version authority (§4.6), and we never run a binary we didn't
-        // build. `Some` means present; its version is the presence marker, not
-        // a real reading — the apply layer records the resolved version.
+    fn verify_installed(&self, pkg: &Ref) -> Result<Installed, PortError> {
+        // Presence only: the binary exists at the recorded path. bosun never
+        // runs a binary it didn't build, and `Present { version: None }` carries
+        // no version — bosun state is the version authority (§4.6), so this can
+        // never be mistaken for a version in a comparison.
         let path = self.bin_dir.join(Self::binary_of(pkg));
-        Ok(path.exists().then(present_marker))
+        Ok(if path.exists() {
+            Installed::Present { version: None }
+        } else {
+            Installed::Absent
+        })
     }
 
     fn hold(&self, _pkg: &Ref, _version: &Version) -> Result<Steps, PortError> {
@@ -368,19 +380,22 @@ impl Installer for GithubReleaseBackend {
     }
 }
 
-/// The version `verify_installed` returns to signal "present" (see its docs).
-fn present_marker() -> Version {
-    Version::parse("0.0.0", Scheme::Semver).unwrap_or_else(|_| unreachable!())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bosun_core::PackageId;
     use bosun_ports::testing::FakeHttpFetcher;
+
+    // Real ctxloom v0.6.4 data (ctxloom/ctxloom; only `ctxloom` ships, no
+    // pre-releases). See tests/fixtures/github/README once vendored.
+    const RELEASES: &str = include_str!("../tests/fixtures/github/ctxloom-releases-page1.json");
+    const CHECKSUMS: &str = include_str!("../tests/fixtures/github/ctxloom-v0.6.4-checksums.txt");
 
     fn sem(v: &str) -> Version {
         Version::parse(v, Scheme::Semver).unwrap()
+    }
+
+    fn gh(purl: &str) -> Ref {
+        Ref::new(purl.parse().unwrap())
     }
 
     fn backend(fetcher: Arc<dyn HttpFetcher>, bin_dir: PathBuf) -> GithubReleaseBackend {
@@ -393,9 +408,20 @@ mod tests {
         }
     }
 
-    /// A github package: repo via id, binary via kind.
-    fn ghr(repo: &str, binary: &str) -> Ref {
-        Ref::new(PackageId::with_kind(repo, binary))
+    fn asset(name: &str) -> ReleaseAsset {
+        ReleaseAsset {
+            name: name.to_string(),
+            browser_download_url: format!("https://dl/{name}"),
+        }
+    }
+
+    /// The v0.6.4 release from the real fixture.
+    fn ctxloom_v064() -> Release {
+        serde_json::from_str::<Vec<Release>>(RELEASES)
+            .unwrap()
+            .into_iter()
+            .find(|r| r.tag_name == "v0.6.4")
+            .unwrap()
     }
 
     #[test]
@@ -407,97 +433,138 @@ mod tests {
     }
 
     #[test]
-    fn binary_defaults_to_repo_segment() {
+    fn binary_defaults_to_the_purl_name_or_the_binary_qualifier() {
+        // Single-binary repo: binary defaults to the entry/repo name.
         assert_eq!(
-            GithubReleaseBackend::binary_of(&Ref::new(PackageId::new("owner/repo"))),
-            "repo"
+            GithubReleaseBackend::binary_of(&gh("pkg:github/ctxloom/ctxloom")),
+            "ctxloom"
+        );
+        // A `binary` qualifier gives two tools from one repo distinct identities.
+        assert_eq!(
+            GithubReleaseBackend::binary_of(&gh("pkg:github/acme/tools?binary=foo")),
+            "foo"
         );
         assert_eq!(
-            GithubReleaseBackend::binary_of(&ghr("ctxloom/ctxloom", "ltk")),
-            "ltk"
+            GithubReleaseBackend::binary_of(&gh("pkg:github/acme/tools?binary=bar")),
+            "bar"
         );
     }
 
     #[test]
-    fn picks_the_matching_archive() {
+    fn expected_asset_default_and_override() {
         let b = backend(Arc::new(FakeHttpFetcher::new()), PathBuf::from("/b"));
-        let assets = vec![
-            asset("ltk_0.7.0_linux_amd64.tar.gz"),
-            asset("ltk_0.7.0_linux_arm64.tar.gz"),
-            asset("ltk_0.7.0_darwin_amd64.tar.gz"),
-            asset("ctxloom_0.7.0_linux_amd64.tar.gz"),
-            asset("checksums.txt"),
-        ];
-        let got = b.pick_archive("ltk", &assets).unwrap();
-        assert_eq!(got.name, "ltk_0.7.0_linux_amd64.tar.gz");
+        let plain = gh("pkg:github/ctxloom/ctxloom");
+        assert_eq!(
+            b.expected_asset(&plain, "ctxloom", &sem("0.6.4")),
+            "ctxloom_0.6.4_linux_amd64.tar.gz"
+        );
+        let full = gh("pkg:github/ctxloom/ctxloom?asset=%7Bbinary%7D_%7Bversion%7D_%7Bos%7D_%7Barch%7D_full.tar.gz");
+        assert_eq!(
+            b.expected_asset(&full, "ctxloom", &sem("0.6.4")),
+            "ctxloom_0.6.4_linux_amd64_full.tar.gz"
+        );
+    }
+
+    #[test]
+    fn picker_chooses_the_plain_archive_not_full() {
+        let b = backend(Arc::new(FakeHttpFetcher::new()), PathBuf::from("/b"));
+        let assets = ctxloom_v064().assets;
+        // Exact match: the plain archive, never the `_full` variant.
+        let got = b
+            .pick_archive("ctxloom_0.6.4_linux_amd64.tar.gz", &assets)
+            .unwrap();
+        assert_eq!(got.name, "ctxloom_0.6.4_linux_amd64.tar.gz");
+        // The override template reaches the `_full` asset.
+        let full = b
+            .pick_archive("ctxloom_0.6.4_linux_amd64_full.tar.gz", &assets)
+            .unwrap();
+        assert_eq!(full.name, "ctxloom_0.6.4_linux_amd64_full.tar.gz");
     }
 
     #[test]
     fn picker_errors_on_zero_and_lists_candidates() {
         let b = backend(Arc::new(FakeHttpFetcher::new()), PathBuf::from("/b"));
-        let assets = vec![asset("ltk_0.7.0_windows_amd64.tar.gz")];
-        let err = b.pick_archive("ltk", &assets).unwrap_err();
+        let assets = vec![asset("ctxloom_0.6.4_windows_amd64.zip")];
+        let err = b
+            .pick_archive("ctxloom_0.6.4_linux_amd64.tar.gz", &assets)
+            .unwrap_err();
         assert!(matches!(err, PortError::Backend { detail }
             if detail.contains("0 asset") && detail.contains("windows_amd64")));
     }
 
     #[test]
-    fn checksum_lookup() {
-        let body = "abc123  ltk_0.7.0_linux_amd64.tar.gz\ndef456  other.tar.gz\n";
+    fn checksum_lookup_from_real_checksums() {
         assert_eq!(
-            GithubReleaseBackend::checksum_for(body, "ltk_0.7.0_linux_amd64.tar.gz"),
-            Some("abc123".to_string())
+            GithubReleaseBackend::checksum_for(CHECKSUMS, "ctxloom_0.6.4_linux_amd64.tar.gz"),
+            Some("89a356c697c9458929ecf851bc85da3a9548d19aa978837b54c0b0b27100810f".to_string())
         );
         assert_eq!(
-            GithubReleaseBackend::checksum_for(body, "absent.tar.gz"),
+            GithubReleaseBackend::checksum_for(CHECKSUMS, "absent.tar.gz"),
             None
         );
     }
 
-    fn asset(name: &str) -> ReleaseAsset {
-        ReleaseAsset {
-            name: name.to_string(),
-            browser_download_url: format!("https://dl/{name}"),
-        }
-    }
-
     #[test]
-    fn install_exact_builds_fetch_then_extract_with_checksum() {
-        let tag_url = "https://api.github.com/repos/ctxloom/ctxloom/releases/tags/v0.7.0";
-        let release = r#"{"tag_name":"v0.7.0","assets":[
-            {"name":"ltk_0.7.0_linux_amd64.tar.gz","browser_download_url":"https://dl/ltk.tgz"},
-            {"name":"checksums.txt","browser_download_url":"https://dl/checksums.txt"}
-        ]}"#;
-        let sums = "deadbeef  ltk_0.7.0_linux_amd64.tar.gz\n";
+    fn install_exact_uses_real_release_data() {
+        let release = ctxloom_v064();
+        let sums_url = release
+            .assets
+            .iter()
+            .find(|a| a.name == "checksums.txt")
+            .unwrap()
+            .browser_download_url
+            .clone();
+        let archive_url = release
+            .assets
+            .iter()
+            .find(|a| a.name == "ctxloom_0.6.4_linux_amd64.tar.gz")
+            .unwrap()
+            .browser_download_url
+            .clone();
         let fetcher = Arc::new(
             FakeHttpFetcher::new()
-                .with_body(tag_url, release)
-                .with_body("https://dl/checksums.txt", sums),
+                .with_body(
+                    "https://api.github.com/repos/ctxloom/ctxloom/releases/tags/v0.6.4",
+                    serde_json::to_string(&json_of(&release)).unwrap(),
+                )
+                .with_body(&sums_url, CHECKSUMS),
         );
         let b = backend(fetcher, PathBuf::from("/home/x/.local/bin"));
         let steps = b
-            .install_exact(&ghr("ctxloom/ctxloom", "ltk"), &sem("0.7.0"))
+            .install_exact(&gh("pkg:github/ctxloom/ctxloom"), &sem("0.6.4"))
             .unwrap();
         assert_eq!(
             steps,
             vec![
                 Step::Fetch {
-                    url: "https://dl/ltk.tgz".into(),
-                    sha256: "deadbeef".into(),
+                    url: archive_url,
+                    sha256: "89a356c697c9458929ecf851bc85da3a9548d19aa978837b54c0b0b27100810f"
+                        .into(),
                     dest: PathBuf::from(
-                        "/home/x/.local/bin/.bosun-cache/ltk_0.7.0_linux_amd64.tar.gz"
+                        "/home/x/.local/bin/.bosun-cache/ctxloom_0.6.4_linux_amd64.tar.gz"
                     ),
                 },
                 Step::Extract {
                     archive: PathBuf::from(
-                        "/home/x/.local/bin/.bosun-cache/ltk_0.7.0_linux_amd64.tar.gz"
+                        "/home/x/.local/bin/.bosun-cache/ctxloom_0.6.4_linux_amd64.tar.gz"
                     ),
-                    member: "ltk".into(),
-                    dest: PathBuf::from("/home/x/.local/bin/ltk"),
+                    member: "ctxloom".into(),
+                    dest: PathBuf::from("/home/x/.local/bin/ctxloom"),
                     mode: 0o755,
                 },
             ]
         );
+    }
+
+    /// Re-serialize a parsed Release as the tag-endpoint JSON body.
+    fn json_of(release: &Release) -> serde_json::Value {
+        serde_json::json!({
+            "tag_name": release.tag_name,
+            "assets": release.assets.iter().map(|a| serde_json::json!({
+                "name": a.name,
+                "browser_download_url": a.browser_download_url,
+            })).collect::<Vec<_>>(),
+        })
     }
 
     #[test]
@@ -508,27 +575,32 @@ mod tests {
             {"name":"r_0.7.0_linux_amd64.tar.gz","browser_download_url":"https://dl/r.tgz"}
         ]}"#;
         let fetcher = Arc::new(FakeHttpFetcher::new().with_body(tag_url, release));
-        let b = backend(fetcher, PathBuf::from("/b"));
-        let err = b
-            .install_exact(&Ref::new(PackageId::new("o/r")), &sem("0.7.0"))
+        let err = backend(fetcher, PathBuf::from("/b"))
+            .install_exact(&gh("pkg:github/o/r"), &sem("0.7.0"))
             .unwrap_err();
         assert!(matches!(err, PortError::Backend { detail } if detail.contains("checksums.txt")));
     }
 
     #[test]
-    fn query_available_lists_tags_including_prereleases() {
-        let url = "https://api.github.com/repos/o/r/releases?per_page=100&page=1";
-        let body = r#"[{"tag_name":"v0.7.0","assets":[]},
-                       {"tag_name":"v0.7.0-pre1","assets":[]},
-                       {"tag_name":"v0.6.0","assets":[]}]"#;
-        let fetcher = Arc::new(FakeHttpFetcher::new().with_body(url, body));
+    fn query_available_from_real_releases_has_no_prereleases() {
+        let fetcher = Arc::new(FakeHttpFetcher::new().with_body(
+            "https://api.github.com/repos/ctxloom/ctxloom/releases?per_page=100&page=1",
+            RELEASES,
+        ));
         let got = backend(fetcher, PathBuf::from("/b"))
             .query_available(
-                &Ref::new(PackageId::new("o/r")),
+                &gh("pkg:github/ctxloom/ctxloom"),
                 &"linux/amd64".parse().unwrap(),
             )
             .unwrap();
-        assert_eq!(got, vec![sem("0.7.0"), sem("0.7.0-pre1"), sem("0.6.0")]);
+        assert!(got.contains(&sem("0.6.4")));
+        assert!(got.contains(&sem("0.6.2")));
+        assert!(got.contains(&sem("0.5.4")));
+        // ctxloom publishes no pre-releases.
+        assert!(
+            got.iter().all(|v| !v.is_prerelease()),
+            "unexpected pre-release: {got:?}"
+        );
     }
 
     #[test]
@@ -542,10 +614,7 @@ mod tests {
             },
         ));
         let err = backend(fetcher, PathBuf::from("/b"))
-            .query_available(
-                &Ref::new(PackageId::new("o/r")),
-                &"linux/amd64".parse().unwrap(),
-            )
+            .query_available(&gh("pkg:github/o/r"), &"linux/amd64".parse().unwrap())
             .unwrap_err();
         assert!(matches!(err, PortError::Backend { detail } if detail.contains("GITHUB_TOKEN")));
     }
@@ -554,10 +623,14 @@ mod tests {
     fn verify_installed_is_presence_only() {
         let dir = tempfile::tempdir().unwrap();
         let b = backend(Arc::new(FakeHttpFetcher::new()), dir.path().to_path_buf());
-        let pkg = ghr("ctxloom/ctxloom", "ltk");
-        assert_eq!(b.verify_installed(&pkg).unwrap(), None);
-        std::fs::write(dir.path().join("ltk"), b"bin").unwrap();
-        assert_eq!(b.verify_installed(&pkg).unwrap(), Some(present_marker()));
+        let pkg = gh("pkg:github/ctxloom/ctxloom");
+        assert_eq!(b.verify_installed(&pkg).unwrap(), Installed::Absent);
+        std::fs::write(dir.path().join("ctxloom"), b"bin").unwrap();
+        // Present with no version — bosun state is the version authority.
+        assert_eq!(
+            b.verify_installed(&pkg).unwrap(),
+            Installed::Present { version: None }
+        );
     }
 
     #[test]
@@ -625,10 +698,7 @@ mod tests {
                 ),
         );
         let got = backend(fetcher, PathBuf::from("/b"))
-            .query_available(
-                &Ref::new(PackageId::new("o/r")),
-                &"linux/amd64".parse().unwrap(),
-            )
+            .query_available(&gh("pkg:github/o/r"), &"linux/amd64".parse().unwrap())
             .unwrap();
         // 100 from page 1 + 1 from page 2: a full page must trigger the next.
         assert_eq!(got.len(), 101);
@@ -642,9 +712,13 @@ mod tests {
             PathBuf::from("/home/x/.local/bin"),
         );
         assert_eq!(
-            b.uninstall(&ghr("ctxloom/ctxloom", "ltk")).unwrap(),
+            b.uninstall(&gh("pkg:github/ctxloom/ctxloom")).unwrap(),
             vec![Step::Run {
-                argv: vec!["rm".into(), "-f".into(), "/home/x/.local/bin/ltk".into()],
+                argv: vec![
+                    "rm".into(),
+                    "-f".into(),
+                    "/home/x/.local/bin/ctxloom".into()
+                ],
                 env: vec![],
                 scope: Scope::User,
             }]
@@ -653,26 +727,28 @@ mod tests {
 
     #[test]
     fn downgrade_is_install_exact() {
-        let tag_url = "https://api.github.com/repos/ctxloom/ctxloom/releases/tags/v0.7.0";
-        let release = r#"{"tag_name":"v0.7.0","assets":[
-            {"name":"ltk_0.7.0_linux_amd64.tar.gz","browser_download_url":"https://dl/ltk.tgz"},
-            {"name":"checksums.txt","browser_download_url":"https://dl/checksums.txt"}
-        ]}"#;
+        let release = ctxloom_v064();
+        let sums_url = release
+            .assets
+            .iter()
+            .find(|a| a.name == "checksums.txt")
+            .unwrap()
+            .browser_download_url
+            .clone();
         let fetcher = Arc::new(
             FakeHttpFetcher::new()
-                .with_body(tag_url, release)
                 .with_body(
-                    "https://dl/checksums.txt",
-                    "deadbeef  ltk_0.7.0_linux_amd64.tar.gz\n",
-                ),
+                    "https://api.github.com/repos/ctxloom/ctxloom/releases/tags/v0.6.4",
+                    serde_json::to_string(&json_of(&release)).unwrap(),
+                )
+                .with_body(&sums_url, CHECKSUMS),
         );
         let b = backend(fetcher, PathBuf::from("/b"));
-        let pkg = ghr("ctxloom/ctxloom", "ltk");
-        // Same steps as install (downgrade just re-fetches a lower version).
+        let pkg = gh("pkg:github/ctxloom/ctxloom");
         assert_eq!(
-            b.downgrade(&pkg, &sem("0.7.0")).unwrap(),
-            b.install_exact(&pkg, &sem("0.7.0")).unwrap()
+            b.downgrade(&pkg, &sem("0.6.4")).unwrap(),
+            b.install_exact(&pkg, &sem("0.6.4")).unwrap()
         );
-        assert_eq!(b.downgrade(&pkg, &sem("0.7.0")).unwrap().len(), 2);
+        assert_eq!(b.downgrade(&pkg, &sem("0.6.4")).unwrap().len(), 2);
     }
 }

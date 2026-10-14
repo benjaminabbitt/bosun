@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use bosun_core::{BackendId, Capabilities, Ref, Scheme, Scope, Source, Target, Version};
+use bosun_core::{BackendId, Capabilities, Installed, Ref, Scheme, Scope, Source, Target, Version};
 use bosun_ports::{
     Backend, BackendFactory, Command, CommandRunner, HostInfo, HttpFetcher, HttpRequest, Index,
     Installer, PortError, Probe, Step, Steps,
@@ -102,7 +102,7 @@ fn argv(parts: &[&str]) -> Vec<String> {
 
 /// `name@version`, how cargo names an exact install.
 fn at(pkg: &Ref, version: &Version) -> String {
-    format!("{}@{}", pkg.package.id, version.as_str())
+    format!("{}@{}", pkg.purl.native_id(), version.as_str())
 }
 
 impl Index for CargoBackend {
@@ -112,7 +112,10 @@ impl Index for CargoBackend {
     }
 
     fn query_available(&self, pkg: &Ref, _target: &Target) -> Result<Vec<Version>, PortError> {
-        let url = format!("https://index.crates.io/{}", sparse_path(&pkg.package.id));
+        let url = format!(
+            "https://index.crates.io/{}",
+            sparse_path(&pkg.purl.native_id())
+        );
         let resp = self.fetcher.fetch(&HttpRequest::get(&url))?;
         if resp.status == 404 {
             return Ok(vec![]); // unknown crate
@@ -174,13 +177,13 @@ impl Installer for CargoBackend {
         }])
     }
 
-    fn verify_installed(&self, pkg: &Ref) -> Result<Option<Version>, PortError> {
+    fn verify_installed(&self, pkg: &Ref) -> Result<Installed, PortError> {
         // `cargo install --list` prints `name vX.Y.Z:` then its binaries.
         let out = self
             .runner
             .run(&Command::new("cargo", argv(&["install", "--list"])))?;
         if !out.success() {
-            return Ok(None);
+            return Ok(Installed::Absent);
         }
         for line in out.stdout_utf8().lines() {
             // Package lines have no leading whitespace; binary lines do.
@@ -191,16 +194,16 @@ impl Installer for CargoBackend {
             let (Some(name), Some(vers)) = (toks.next(), toks.next()) else {
                 continue;
             };
-            if name == pkg.package.id {
+            if name == pkg.purl.native_id() {
                 let v = vers.trim_end_matches(':').trim_start_matches('v');
-                return Version::parse(v, Scheme::Semver).map(Some).map_err(|e| {
-                    PortError::CommandOutput {
+                return Version::parse(v, Scheme::Semver)
+                    .map(|v| Installed::Present { version: Some(v) })
+                    .map_err(|e| PortError::CommandOutput {
                         detail: format!("cargo list version {v:?}: {e}"),
-                    }
-                });
+                    });
             }
         }
-        Ok(None)
+        Ok(Installed::Absent)
     }
 
     fn hold(&self, _pkg: &Ref, _version: &Version) -> Result<Steps, PortError> {
@@ -214,7 +217,7 @@ impl Installer for CargoBackend {
 
     fn uninstall(&self, pkg: &Ref) -> Result<Steps, PortError> {
         Ok(vec![Step::Run {
-            argv: argv(&["cargo", "uninstall", &pkg.package.id]),
+            argv: argv(&["cargo", "uninstall", &pkg.purl.native_id()]),
             env: vec![],
             scope: Scope::User,
         }])
@@ -224,7 +227,7 @@ impl Installer for CargoBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bosun_core::{Os, PackageId};
+    use bosun_core::Os;
     use bosun_ports::testing::{FakeCommandRunner, FakeHttpFetcher};
     use bosun_ports::Output;
 
@@ -233,7 +236,7 @@ mod tests {
     }
 
     fn reff(name: &str) -> Ref {
-        Ref::new(PackageId::new(name))
+        Ref::new(format!("pkg:cargo/{name}").parse().unwrap())
     }
 
     fn backend(runner: Arc<dyn CommandRunner>, fetcher: Arc<dyn HttpFetcher>) -> CargoBackend {
@@ -303,14 +306,19 @@ mod tests {
         let b = backend(fake.clone(), Arc::new(FakeHttpFetcher::new()));
         assert_eq!(
             b.verify_installed(&reff("ripgrep")).unwrap(),
-            Some(sem("14.1.1"))
+            Installed::Present {
+                version: Some(sem("14.1.1"))
+            }
         );
-        assert_eq!(b.verify_installed(&reff("absent")).unwrap(), None);
+        assert_eq!(
+            b.verify_installed(&reff("absent")).unwrap(),
+            Installed::Absent
+        );
         assert_eq!(fake.calls()[0].args, vec!["install", "--list"]);
     }
 
     #[test]
-    fn verify_installed_not_installed_is_none() {
+    fn verify_installed_not_installed_is_absent() {
         let fake = Arc::new(FakeCommandRunner::new().with_output(Output {
             code: Some(101),
             stdout: vec![],
@@ -320,7 +328,7 @@ mod tests {
             backend(fake, Arc::new(FakeHttpFetcher::new()))
                 .verify_installed(&reff("x"))
                 .unwrap(),
-            None
+            Installed::Absent
         );
     }
 

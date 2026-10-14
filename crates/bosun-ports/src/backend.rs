@@ -6,7 +6,7 @@
 //! other than the current machine (§4.7): [`Index`] (query side) may run
 //! anywhere; [`Installer`] (mutation side) runs only on a matching host.
 
-use bosun_core::{BackendId, Capabilities, Distro, Ref, Scope, Source, Target, Version};
+use bosun_core::{BackendId, Capabilities, Distro, Installed, Ref, Scope, Source, Target, Version};
 
 use crate::error::PortError;
 use crate::exec::CommandRunner;
@@ -42,10 +42,10 @@ pub trait Installer {
     /// landed is read back with `verify_installed` after the steps run
     /// (Appendix B #229/#130).
     fn install_exact(&self, pkg: &Ref, version: &Version) -> Result<Steps, PortError>;
-    /// The installed version of `pkg`, or `None` if it is not installed. A
+    /// Whether `pkg` is installed and, when readable, its version (§5.1). A
     /// direct read, by package id through the manager, never by binary name
-    /// (§5.4).
-    fn verify_installed(&self, pkg: &Ref) -> Result<Option<Version>, PortError>;
+    /// (§5.4). No sentinel version — see [`Installed`].
+    fn verify_installed(&self, pkg: &Ref) -> Result<Installed, PortError>;
     /// Steps to durably hold `pkg` at `version` (`apt-mark hold`, …).
     fn hold(&self, pkg: &Ref, version: &Version) -> Result<Steps, PortError>;
     /// Steps to move `pkg` down to `version` (explicit; some backends refuse).

@@ -8,7 +8,9 @@
 
 use std::sync::Arc;
 
-use bosun_core::{BackendId, Capabilities, Os, Ref, Scheme, Scope, Source, Target, Version};
+use bosun_core::{
+    BackendId, Capabilities, Installed, Os, Ref, Scheme, Scope, Source, Target, Version,
+};
 use bosun_ports::{
     Backend, BackendFactory, Command, CommandRunner, HostInfo, Index, Installer, PortError, Probe,
     Step, Steps,
@@ -94,7 +96,7 @@ fn argv(parts: &[&str]) -> Vec<String> {
 
 /// `<package>=<version>`, how apt names an exact install.
 fn pinned(pkg: &Ref, version: &Version) -> String {
-    format!("{}={}", pkg.package.id, version.as_str())
+    format!("{}={}", pkg.purl.native_id(), version.as_str())
 }
 
 impl Index for AptBackend {
@@ -117,7 +119,7 @@ impl Index for AptBackend {
         // `apt-cache madison <pkg>` lists `pkg | version | source` per line.
         let out = self.runner.run(&Command::new(
             "apt-cache",
-            argv(&["madison", &pkg.package.id]),
+            argv(&["madison", &pkg.purl.native_id()]),
         ))?;
         if !out.success() {
             return Ok(vec![]); // unknown package → no versions
@@ -180,23 +182,23 @@ impl Installer for AptBackend {
         }])
     }
 
-    fn verify_installed(&self, pkg: &Ref) -> Result<Option<Version>, PortError> {
+    fn verify_installed(&self, pkg: &Ref) -> Result<Installed, PortError> {
         // `dpkg-query -W -f=${Version} <pkg>`: a non-zero exit (not installed)
         // is data, not an error.
         let out = self.runner.run(&Command::new(
             "dpkg-query",
-            argv(&["-W", "-f=${Version}", &pkg.package.id]),
+            argv(&["-W", "-f=${Version}", &pkg.purl.native_id()]),
         ))?;
         if !out.success() {
-            return Ok(None);
+            return Ok(Installed::Absent);
         }
         let raw = out.stdout_utf8();
         let raw = raw.trim();
         if raw.is_empty() {
-            return Ok(None);
+            return Ok(Installed::Absent);
         }
         Version::parse(raw, Scheme::Debian)
-            .map(Some)
+            .map(|v| Installed::Present { version: Some(v) })
             .map_err(|e| PortError::CommandOutput {
                 detail: format!("dpkg version {raw:?}: {e}"),
             })
@@ -204,7 +206,7 @@ impl Installer for AptBackend {
 
     fn hold(&self, pkg: &Ref, _version: &Version) -> Result<Steps, PortError> {
         Ok(vec![Step::Run {
-            argv: argv(&["apt-mark", "hold", &pkg.package.id]),
+            argv: argv(&["apt-mark", "hold", &pkg.purl.native_id()]),
             env: noninteractive(),
             scope: Scope::System,
         }])
@@ -226,7 +228,7 @@ impl Installer for AptBackend {
 
     fn uninstall(&self, pkg: &Ref) -> Result<Steps, PortError> {
         Ok(vec![Step::Run {
-            argv: argv(&["apt-get", "remove", "-y", &pkg.package.id]),
+            argv: argv(&["apt-get", "remove", "-y", &pkg.purl.native_id()]),
             env: noninteractive(),
             scope: Scope::System,
         }])
@@ -236,7 +238,7 @@ impl Installer for AptBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bosun_core::{Arch, PackageId, SourceId};
+    use bosun_core::{Arch, SourceId};
     use bosun_ports::testing::FakeCommandRunner;
     use bosun_ports::Output;
 
@@ -245,7 +247,7 @@ mod tests {
     }
 
     fn reff(name: &str) -> Ref {
-        Ref::new(PackageId::new(name))
+        Ref::new(format!("pkg:deb/debian/{name}").parse().unwrap())
     }
 
     fn backend(runner: Arc<dyn CommandRunner>) -> AptBackend {
@@ -383,7 +385,9 @@ mod tests {
         let b = backend(fake.clone());
         assert_eq!(
             b.verify_installed(&reff("jq")).unwrap(),
-            Some(deb("1.7.1-3ubuntu0.1"))
+            Installed::Present {
+                version: Some(deb("1.7.1-3ubuntu0.1"))
+            }
         );
         let calls = fake.calls();
         assert_eq!(calls[0].program, "dpkg-query");
@@ -391,7 +395,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_installed_not_installed_is_none_not_error() {
+    fn verify_installed_not_installed_is_absent_not_error() {
         // dpkg-query exits non-zero when the package is unknown.
         let fake = Arc::new(FakeCommandRunner::new().with_output(Output {
             code: Some(1),
@@ -400,7 +404,7 @@ mod tests {
         }));
         assert_eq!(
             backend(fake).verify_installed(&reff("absent")).unwrap(),
-            None
+            Installed::Absent
         );
     }
 

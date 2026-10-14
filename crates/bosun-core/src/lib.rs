@@ -14,7 +14,7 @@ pub mod version;
 
 pub use manifest::{InstallBlock, Manifest, ManifestEntry};
 pub use model::{
-    BackendId, Capabilities, Checksum, Claim, Origin, PackageId, Ref, Scope, Source, SourceId,
+    BackendId, Capabilities, Checksum, Claim, Installed, Origin, Ref, Scope, Source, SourceId,
 };
 pub use platform::{Arch, Distro, Os, PlatformError, Selector, Target};
 pub use purl::{Purl, PurlError};
