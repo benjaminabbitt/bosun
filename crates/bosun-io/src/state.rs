@@ -287,6 +287,13 @@ impl StateTransaction for FileStateTxn {
         &self.state
     }
 
+    fn checkpoint(&mut self, state: &StateDocument) -> Result<(), PortError> {
+        // Atomic write; the lock stays held so the next action continues the
+        // same transaction (Appendix B crash-safety).
+        save_atomic(&self.path, to_json(state).as_bytes())?;
+        Ok(())
+    }
+
     fn commit(self, state: StateDocument) -> Result<(), PortError> {
         let FileStateTxn {
             path,
@@ -400,6 +407,27 @@ mod tests {
         assert_eq!(back, sample());
     }
 
+    #[test]
+    fn roundtrips_the_accepted_origin() {
+        let mut doc = sample();
+        doc.packages[0].targets.values_mut().next().unwrap().origin = Origin::Accepted;
+        let back = from_json(&to_json(&doc), Path::new("state.json")).unwrap();
+        assert_eq!(
+            back.packages[0].targets.values().next().unwrap().origin,
+            Origin::Accepted
+        );
+    }
+
+    #[test]
+    fn read_surfaces_an_error_that_is_not_a_missing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("state-is-a-dir");
+        std::fs::create_dir(&dir).unwrap();
+        // Reading a directory errors with a kind other than NotFound, so it
+        // must surface rather than be treated as "empty state".
+        assert!(read_or_empty(&dir).is_err());
+    }
+
     fn store(tmp: &tempfile::TempDir) -> FileStateStore {
         FileStateStore::new(
             tmp.path().join("sys/state.json"),
@@ -415,6 +443,24 @@ mod tests {
         assert!(txn.state().packages.is_empty()); // nothing recorded yet
         txn.commit(sample()).unwrap();
         assert_eq!(store.read(Scope::User).unwrap(), sample());
+    }
+
+    #[test]
+    fn checkpoint_persists_without_releasing_the_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = store(&tmp);
+        let mut txn = store.begin(Scope::User).unwrap();
+        txn.checkpoint(&sample()).unwrap();
+        // Persisted and readable mid-transaction (a crash now keeps this).
+        assert_eq!(read_or_empty(store.path(Scope::User)).unwrap(), sample());
+        // The lock is still held, so another run still backs off.
+        assert!(
+            store.try_begin(Scope::User).unwrap().is_none(),
+            "lock held across checkpoint"
+        );
+        // Commit still writes and releases.
+        txn.commit(sample()).unwrap();
+        assert!(store.try_begin(Scope::User).unwrap().is_some());
     }
 
     #[test]

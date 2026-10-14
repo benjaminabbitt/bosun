@@ -36,6 +36,12 @@ pub trait StateTransaction {
     /// The state loaded when the transaction began.
     fn state(&self) -> &StateDocument;
 
+    /// Atomically persist `state` **without** releasing the lock, so progress
+    /// survives a crash or kill mid-apply (Appendix B): the applier calls this
+    /// after each verified action, so a package already installed is already
+    /// recorded even if the run never reaches [`commit`](Self::commit).
+    fn checkpoint(&mut self, state: &StateDocument) -> Result<(), PortError>;
+
     /// Atomically persist `state` and release the lock. Written only after
     /// installs are verified (Appendix B #229/#130), so this records
     /// confirmed facts.

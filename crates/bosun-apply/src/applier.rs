@@ -224,7 +224,7 @@ fn drop_claim(doc: &mut StateDocument, name: &str, target: Target, dropped: &[Cl
 
 impl<S: StateStore> Driver for HostApplier<'_, S> {
     fn apply(&self, plan: &Plan) -> Result<ApplyReport, PortError> {
-        let txn = self.state.begin(self.scope)?;
+        let mut txn = self.state.begin(self.scope)?;
         let mut doc = txn.state().clone();
         let mut outcomes = Vec::new();
         let mut failed: BTreeSet<BackendId> = BTreeSet::new();
@@ -237,7 +237,13 @@ impl<S: StateStore> Driver for HostApplier<'_, S> {
                 ApplyResult::Skipped
             } else {
                 match self.apply_one(action, &mut doc) {
-                    Ok(()) => ApplyResult::Applied,
+                    // Persist after every confirmed action, lock still held, so
+                    // a crash or kill mid-run keeps what already landed and the
+                    // state never diverges from reality (Appendix B).
+                    Ok(()) => {
+                        txn.checkpoint(&doc)?;
+                        ApplyResult::Applied
+                    }
                     Err(e) => {
                         // Isolate the backend: skip its remaining actions (Appendix B).
                         failed.insert(action.backend.clone());
@@ -254,7 +260,7 @@ impl<S: StateStore> Driver for HostApplier<'_, S> {
             });
         }
 
-        // Commit the confirmed facts (only verified installs were recorded).
+        // Final write releases the lock; checkpoints already hold the facts.
         txn.commit(doc)?;
         Ok(ApplyReport { outcomes })
     }

@@ -7,7 +7,7 @@ use bosun_core::{Claim, Scope};
 use bosun_ports::step::Step;
 use serde::{Serialize, Serializer};
 
-use crate::{Action, Diagnostic, Plan, Severity};
+use crate::{Action, ActionOutcome, ApplyReport, ApplyResult, Diagnostic, Plan, Severity};
 
 fn scope_label(scope: Scope) -> &'static str {
     match scope {
@@ -196,6 +196,43 @@ impl Serialize for Plan {
             actions: self.actions.iter().map(action_view).collect(),
             diagnostics: self.diagnostics.iter().map(diag_view).collect(),
             exit_code: self.exit_code(),
+        }
+        .serialize(s)
+    }
+}
+
+#[derive(Serialize)]
+struct ReportView<'a> {
+    outcomes: Vec<OutcomeView<'a>>,
+}
+
+#[derive(Serialize)]
+struct OutcomeView<'a> {
+    name: &'a str,
+    action: &'static str,
+    result: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<&'a str>,
+}
+
+fn outcome_view(o: &ActionOutcome) -> OutcomeView<'_> {
+    let (result, error) = match &o.result {
+        ApplyResult::Applied => ("applied", None),
+        ApplyResult::Failed { error } => ("failed", Some(error.as_str())),
+        ApplyResult::Skipped => ("skipped", None),
+    };
+    OutcomeView {
+        name: &o.name,
+        action: o.kind.label(),
+        result,
+        error,
+    }
+}
+
+impl Serialize for ApplyReport {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        ReportView {
+            outcomes: self.outcomes.iter().map(outcome_view).collect(),
         }
         .serialize(s)
     }

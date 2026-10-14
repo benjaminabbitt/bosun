@@ -801,32 +801,37 @@ impl StepRunner for FakeStepRunner {
     }
 }
 
-/// An in-memory state store; the transaction writes back on commit.
+/// An in-memory state store. `checkpoints` logs each mid-transaction write so a
+/// test can prove per-action durability; `doc` is the latest persisted state.
 struct FakeStateStore {
     doc: Rc<RefCell<StateDocument>>,
+    checkpoints: Rc<RefCell<Vec<StateDocument>>>,
 }
 
 struct FakeTxn {
     doc: Rc<RefCell<StateDocument>>,
+    checkpoints: Rc<RefCell<Vec<StateDocument>>>,
     snapshot: StateDocument,
 }
 
 impl FakeStateStore {
     fn empty() -> FakeStateStore {
-        FakeStateStore {
-            doc: Rc::new(RefCell::new(StateDocument {
-                state_version: 1,
-                packages: Vec::new(),
-            })),
-        }
+        FakeStateStore::with(StateDocument {
+            state_version: 1,
+            packages: Vec::new(),
+        })
     }
     fn with(doc: StateDocument) -> FakeStateStore {
         FakeStateStore {
             doc: Rc::new(RefCell::new(doc)),
+            checkpoints: Rc::new(RefCell::new(Vec::new())),
         }
     }
     fn snapshot(&self) -> StateDocument {
         self.doc.borrow().clone()
+    }
+    fn checkpoints(&self) -> Vec<StateDocument> {
+        self.checkpoints.borrow().clone()
     }
 }
 
@@ -835,6 +840,7 @@ impl StateStore for FakeStateStore {
     fn begin(&self, _scope: Scope) -> Result<FakeTxn, PortError> {
         Ok(FakeTxn {
             doc: self.doc.clone(),
+            checkpoints: self.checkpoints.clone(),
             snapshot: self.doc.borrow().clone(),
         })
     }
@@ -849,6 +855,12 @@ impl StateStore for FakeStateStore {
 impl StateTransaction for FakeTxn {
     fn state(&self) -> &StateDocument {
         &self.snapshot
+    }
+    fn checkpoint(&mut self, state: &StateDocument) -> Result<(), PortError> {
+        // A durable write that keeps the lock: record it and update the store.
+        self.checkpoints.borrow_mut().push(state.clone());
+        *self.doc.borrow_mut() = state.clone();
+        Ok(())
     }
     fn commit(self, state: StateDocument) -> Result<(), PortError> {
         *self.doc.borrow_mut() = state;
@@ -1239,4 +1251,86 @@ fn user_scope_apply_leaves_claims_unstamped() {
 
     let leaf = &store.snapshot().packages[0].targets[&AMD64];
     assert_eq!(leaf.claimed_by[0].user, None);
+}
+
+#[test]
+fn apply_checkpoints_each_confirmed_action_so_progress_survives_a_crash() {
+    // A installs (ok); B's backend then fails. Because state is written after
+    // each verified action, A is already on disk when B fails — a crash right
+    // after B would keep A (no accepted/unheld divergence, Appendix B).
+    let inst_a = verifying(Scope::User, false, false, present("1.0.0"));
+    let inst_b = verifying(Scope::User, false, false, present("1.0.0"));
+    let a = Managed {
+        name: "A".to_string(),
+        purl: "pkg:deb/debian/A".parse().unwrap(),
+        backend: BackendId::new("back-a"),
+        resolved: deb("1.0.0"),
+        vers_type: "deb".to_string(),
+        claims: vec![],
+        current: Current::Absent,
+        installer: &inst_a,
+    };
+    let b = Managed {
+        name: "B".to_string(),
+        purl: "pkg:deb/debian/B".parse().unwrap(),
+        backend: BackendId::new("back-b"),
+        resolved: deb("1.0.0"),
+        vers_type: "deb".to_string(),
+        claims: vec![],
+        current: Current::Absent,
+        installer: &inst_b,
+    };
+    let plan = build_install_plan(&[a, b], vec![]).unwrap();
+
+    let exec = FakeStepRunner::failing("b"); // deb folds the purl name: B's step carries "b"
+    let insts: BTreeMap<BackendId, &dyn Installer> = BTreeMap::from([
+        (BackendId::new("back-a"), &inst_a as &dyn Installer),
+        (BackendId::new("back-b"), &inst_b as &dyn Installer),
+    ]);
+    let store = FakeStateStore::empty();
+    let applier = HostApplier::new(Scope::User, AMD64, None, &exec, &insts, &store);
+
+    let report = applier.apply(&plan).unwrap();
+    let r = results(&report);
+    assert_eq!(r[0], (ActionKind::Install, ApplyResult::Applied));
+    assert!(matches!(
+        r[1],
+        (ActionKind::Install, ApplyResult::Failed { .. })
+    ));
+
+    // One checkpoint — for A, written before B's action ran and failed.
+    let ckpts = store.checkpoints();
+    assert_eq!(ckpts.len(), 1);
+    assert!(ckpts[0].packages.iter().any(|p| p.name == "A"));
+    assert!(!ckpts[0].packages.iter().any(|p| p.name == "B"));
+}
+
+#[test]
+fn apply_report_serializes_to_json() {
+    let apt = verifying(Scope::System, true, true, present("1.7.1-3"));
+    let plan = build_install_plan(
+        &[managed(
+            "jq",
+            "1.7.1-3",
+            Current::Absent,
+            &apt,
+            vec![claim("/w/a", "1.7.1-3")],
+        )],
+        vec![],
+    )
+    .unwrap();
+    let exec = FakeStepRunner::ok();
+    let insts: BTreeMap<BackendId, &dyn Installer> =
+        BTreeMap::from([(BackendId::new("apt"), &apt as &dyn Installer)]);
+    let store = FakeStateStore::empty();
+    let applier = HostApplier::new(Scope::System, AMD64, None, &exec, &insts, &store);
+
+    let report = applier.apply(&plan).unwrap();
+    let json = serde_json::to_value(&report).unwrap();
+    let outcomes = json["outcomes"].as_array().unwrap();
+    assert_eq!(outcomes.len(), 2);
+    assert_eq!(outcomes[0]["action"], "install");
+    assert_eq!(outcomes[0]["result"], "applied");
+    assert_eq!(outcomes[0]["name"], "jq");
+    assert_eq!(outcomes[1]["action"], "hold");
 }
