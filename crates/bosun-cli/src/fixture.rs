@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use bosun_core::vers::scheme_for_type;
-use bosun_core::{Capabilities, Installed, Ref, Scope, Source, Target, Version};
+use bosun_core::{Capabilities, HoldSupport, Installed, Ref, Scope, Source, Target, Version};
 use bosun_ports::backend::{Index, Installer};
 use bosun_ports::step::{Step, StepRunner, Steps};
 use bosun_ports::PortError;
@@ -127,7 +127,7 @@ impl Index for FixtureIndex {
 /// `verify_installed` result, so apply can be driven over the seam.
 pub struct FixtureInstaller {
     scope: Scope,
-    supports_hold: bool,
+    hold: HoldSupport,
     supports_downgrade: bool,
     vers_type: String,
     machine: Machine,
@@ -137,14 +137,14 @@ impl FixtureInstaller {
     /// Build from a fixture backend's install-side fields, sharing the machine.
     pub fn new(
         scope: Scope,
-        supports_hold: bool,
+        hold: HoldSupport,
         supports_downgrade: bool,
         vers_type: String,
         machine: Machine,
     ) -> FixtureInstaller {
         FixtureInstaller {
             scope,
-            supports_hold,
+            hold,
             supports_downgrade,
             vers_type,
             machine,
@@ -168,7 +168,7 @@ impl Installer for FixtureInstaller {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             supports_exact_version: true,
-            supports_hold: self.supports_hold,
+            hold: self.hold,
             supports_downgrade: self.supports_downgrade,
         }
     }

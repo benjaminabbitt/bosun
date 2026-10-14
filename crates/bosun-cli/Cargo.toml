@@ -31,6 +31,12 @@ tracing-subscriber.workspace = true
 tempfile.workspace = true
 assert_cmd.workspace = true
 predicates.workspace = true
+cucumber.workspace = true
+futures.workspace = true
+
+[[test]]
+name = "acceptance"
+harness = false
 
 [lints]
 workspace = true

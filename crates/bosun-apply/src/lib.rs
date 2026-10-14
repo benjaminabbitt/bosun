@@ -28,7 +28,7 @@ use std::path::Path;
 
 use bosun_core::record::StateDocument;
 use bosun_core::spec::Spec;
-use bosun_core::{BackendId, Claim, Origin, Purl, Ref, Scope, Version};
+use bosun_core::{BackendId, Claim, HoldSupport, Origin, Purl, Ref, Scope, Version};
 use bosun_ports::error::PortError;
 use bosun_ports::step::Steps;
 use bosun_ports::{Installer, Machine, Privilege};
@@ -441,10 +441,11 @@ pub fn build_install_plan(
             ActionKind::Downgrade => downgrades.push(action),
             _ => unreachable!("change is only install/upgrade/downgrade"),
         }
-        // Pin the version we chose. A backend that can't hold degrades to a
-        // warning and is skipped (§5.2) — the install still stands, unpinned.
-        if caps.supports_hold {
-            holds.push(Action {
+        // Pin the version we chose (§5.2). A backend that cannot hold but
+        // would benefit from one degrades to a warning; one that does not need
+        // a hold (it owns the binary or re-asserts each run) stays silent.
+        match caps.hold {
+            HoldSupport::Supported => holds.push(Action {
                 kind: ActionKind::Hold,
                 name: m.name.clone(),
                 scope,
@@ -454,12 +455,12 @@ pub fn build_install_plan(
                 to: Some(m.resolved.clone()),
                 claims: m.claims.clone(),
                 steps: m.installer.hold(&pkg, &m.resolved)?,
-            });
-        } else {
-            diagnostics.push(Diagnostic::UnsupportedHold {
+            }),
+            HoldSupport::Unsupported => diagnostics.push(Diagnostic::UnsupportedHold {
                 name: m.name.clone(),
                 backend: m.backend.clone(),
-            });
+            }),
+            HoldSupport::NotNeeded => {}
         }
     }
 

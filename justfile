@@ -40,3 +40,13 @@ mutants target="":
     else
         cargo mutants -d ../.mutants-worktree --in-place --timeout 120
     fi
+
+# Acceptance: hermetic cucumber scenarios against the fixture seam (tier 1).
+acceptance:
+    cargo test -p bosun-cli --test acceptance
+
+# Acceptance against real apt / cargo / github-release (tier 2). Needs a
+# disposable container with the backends and network; ignored by `just test`.
+# Set BOSUN_ACCEPTANCE_REAL=1 so the real-backend scenarios run.
+acceptance-real:
+    BOSUN_ACCEPTANCE_REAL=1 cargo test -p bosun-cli --test acceptance_real -- --nocapture

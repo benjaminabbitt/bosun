@@ -337,9 +337,14 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
                     .borrow_mut()
                     .insert(native.clone(), ver.clone());
             }
+            let hold = if b.supports_hold {
+                bosun_core::HoldSupport::Supported
+            } else {
+                bosun_core::HoldSupport::NotNeeded
+            };
             let installer = FixtureInstaller::new(
                 scope_of(b.scope.as_deref()),
-                b.supports_hold,
+                hold,
                 b.supports_downgrade,
                 b.vers_type.clone(),
                 machine_state.clone(),

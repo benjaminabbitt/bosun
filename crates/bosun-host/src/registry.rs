@@ -170,7 +170,7 @@ mod tests {
         fn capabilities(&self) -> Capabilities {
             Capabilities {
                 supports_exact_version: false,
-                supports_hold: false,
+                hold: bosun_core::HoldSupport::NotNeeded,
                 supports_downgrade: false,
             }
         }

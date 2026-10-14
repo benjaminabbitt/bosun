@@ -112,14 +112,28 @@ pub enum Installed {
     },
 }
 
+/// Whether a backend can (or needs to) durably pin a version (§5.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HoldSupport {
+    /// The backend can pin a version durably (`apt-mark hold`).
+    Supported,
+    /// A hold would be meaningful but this backend cannot do it — bosun warns
+    /// and installs unpinned.
+    Unsupported,
+    /// A hold is unnecessary: the backend owns the binary and nothing else
+    /// upgrades it (github-release), or it re-asserts the exact version each
+    /// run (cargo). No warning.
+    NotNeeded,
+}
+
 /// What a backend can honour (§5.1, §5.2). bosun degrades with a warning when
 /// a backend cannot meet a pin.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Capabilities {
     /// Can install a specific version verbatim.
     pub supports_exact_version: bool,
-    /// Can durably hold/pin an installed version.
-    pub supports_hold: bool,
+    /// Whether a durable hold is supported, unsupported, or not needed (§5.2).
+    pub hold: HoldSupport,
     /// Can move to a lower version on request.
     pub supports_downgrade: bool,
 }

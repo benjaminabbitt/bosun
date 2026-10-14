@@ -163,7 +163,8 @@ impl Installer for CargoBackend {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             supports_exact_version: true,
-            supports_hold: false,     // language tier: no durable hold (§5.2)
+            // Reinstalls the exact version each run, so a hold is unnecessary (§5.2).
+            hold: bosun_core::HoldSupport::NotNeeded,
             supports_downgrade: true, // installing a lower version overwrites
         }
     }
@@ -301,7 +302,7 @@ mod tests {
         );
         let c = b.capabilities();
         assert!(c.supports_exact_version);
-        assert!(!c.supports_hold);
+        assert_eq!(c.hold, bosun_core::HoldSupport::NotNeeded);
         assert!(c.supports_downgrade);
         assert_eq!(b.scope(), Scope::User);
     }

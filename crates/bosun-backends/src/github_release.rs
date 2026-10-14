@@ -297,7 +297,9 @@ impl Installer for GithubReleaseBackend {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             supports_exact_version: true,
-            supports_hold: false, // a fetched binary isn't auto-updated; no PM hold
+            // bosun owns the fetched binary and nothing else upgrades it, so a
+            // hold is unnecessary (§5.2).
+            hold: bosun_core::HoldSupport::NotNeeded,
             supports_downgrade: true,
         }
     }

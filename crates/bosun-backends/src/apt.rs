@@ -150,7 +150,7 @@ impl Installer for AptBackend {
         // downgrades (`--allow-downgrades`) — all supported.
         Capabilities {
             supports_exact_version: true,
-            supports_hold: true,
+            hold: bosun_core::HoldSupport::Supported,
             supports_downgrade: true,
         }
     }
@@ -440,7 +440,8 @@ mod tests {
     fn capabilities_and_scope() {
         let b = backend(Arc::new(FakeCommandRunner::new()));
         let caps = b.capabilities();
-        assert!(caps.supports_exact_version && caps.supports_hold && caps.supports_downgrade);
+        assert!(caps.supports_exact_version && caps.supports_downgrade);
+        assert_eq!(caps.hold, bosun_core::HoldSupport::Supported);
         assert_eq!(b.scope(), Scope::System);
     }
 }

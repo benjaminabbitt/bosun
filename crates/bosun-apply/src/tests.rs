@@ -5,7 +5,9 @@ use std::path::PathBuf;
 
 use bosun_core::record::{Package, Placement, StateDocument, StateLeaf};
 use bosun_core::version::Scheme;
-use bosun_core::{Arch, Capabilities, Distro, Installed, Origin, Os, Ref, Source, Target, Version};
+use bosun_core::{
+    Arch, Capabilities, Distro, HoldSupport, Installed, Origin, Os, Ref, Source, Target, Version,
+};
 use bosun_ports::step::{Step, Steps};
 use bosun_ports::{Elevation, Installer, Machine, Privilege, User};
 
@@ -24,7 +26,7 @@ fn deb(raw: &str) -> Version {
 /// capability flags, and what `verify_installed` reports after apply.
 struct FakeInstaller {
     scope: Scope,
-    supports_hold: bool,
+    hold: HoldSupport,
     downgradable: bool,
     verify: Installed,
 }
@@ -47,7 +49,7 @@ impl Installer for FakeInstaller {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             supports_exact_version: true,
-            supports_hold: self.supports_hold,
+            hold: self.hold,
             supports_downgrade: self.downgradable,
         }
     }
@@ -83,7 +85,7 @@ impl Installer for FakeInstaller {
 fn apt() -> FakeInstaller {
     FakeInstaller {
         scope: Scope::System,
-        supports_hold: true,
+        hold: HoldSupport::Supported,
         downgradable: true,
         verify: Installed::Absent,
     }
@@ -92,7 +94,7 @@ fn apt() -> FakeInstaller {
 fn cargo() -> FakeInstaller {
     FakeInstaller {
         scope: Scope::User,
-        supports_hold: false,
+        hold: HoldSupport::NotNeeded,
         downgradable: false,
         verify: Installed::Absent,
     }
@@ -326,7 +328,39 @@ fn install_plan_orders_installs_then_upgrades_then_holds() {
 }
 
 #[test]
-fn a_backend_that_cannot_hold_warns_and_skips_the_hold() {
+fn an_unsupported_hold_warns_and_skips_the_hold() {
+    // A backend that would benefit from a hold but cannot (§5.2).
+    let brew = FakeInstaller {
+        scope: Scope::User,
+        hold: HoldSupport::Unsupported,
+        downgradable: true,
+        verify: Installed::Absent,
+    };
+    let m = Managed {
+        name: "ripgrep".to_string(),
+        purl: "pkg:generic/ripgrep".parse().unwrap(),
+        backend: BackendId::new("brew"),
+        resolved: Version::parse("14.1.1", Scheme::Semver).unwrap(),
+        vers_type: "semver".to_string(),
+        claims: vec![],
+        current: Current::Absent,
+        installer: &brew,
+    };
+    let plan = build_install_plan(&[m], vec![]).unwrap();
+    // The install still stands; the hold degrades to a warning (§5.2).
+    assert_eq!(kinds(&plan), vec![ActionKind::Install]);
+    assert_eq!(plan.diagnostics.len(), 1);
+    assert_eq!(plan.diagnostics[0].severity(), Severity::Warning);
+    assert!(matches!(
+        &plan.diagnostics[0],
+        Diagnostic::UnsupportedHold { name, backend } if name == "ripgrep" && *backend == BackendId::new("brew")
+    ));
+    assert_eq!(plan.exit_code(), 2);
+}
+
+#[test]
+fn a_not_needed_hold_is_silent() {
+    // cargo/github re-assert or own the binary, so no hold and no warning (§5.2).
     let cargo = cargo();
     let m = Managed {
         name: "ripgrep".to_string(),
@@ -339,16 +373,8 @@ fn a_backend_that_cannot_hold_warns_and_skips_the_hold() {
         installer: &cargo,
     };
     let plan = build_install_plan(&[m], vec![]).unwrap();
-    // The install still stands; the hold degrades to a warning (§5.2).
     assert_eq!(kinds(&plan), vec![ActionKind::Install]);
-    assert_eq!(plan.diagnostics.len(), 1);
-    assert_eq!(plan.diagnostics[0].severity(), Severity::Warning);
-    assert!(matches!(
-        &plan.diagnostics[0],
-        Diagnostic::UnsupportedHold { name, backend } if name == "ripgrep" && *backend == BackendId::new("cargo")
-    ));
-    // A warning does not block: the install still makes this exit "2 pending".
-    assert_eq!(plan.exit_code(), 2);
+    assert!(plan.diagnostics.is_empty(), "not-needed hold is silent");
 }
 
 #[test]
@@ -356,7 +382,7 @@ fn an_unsupported_downgrade_is_an_error_that_skips_the_action() {
     // A backend that can't downgrade, asked to move a package down.
     let frozen = FakeInstaller {
         scope: Scope::User,
-        supports_hold: false,
+        hold: HoldSupport::NotNeeded,
         downgradable: false,
         verify: Installed::Absent,
     };
@@ -880,7 +906,12 @@ fn present(raw: &str) -> Installed {
 fn verifying(scope: Scope, hold: bool, down: bool, verify: Installed) -> FakeInstaller {
     FakeInstaller {
         scope,
-        supports_hold: hold,
+        // true → a real durable hold (apt); false → not needed (cargo/github).
+        hold: if hold {
+            HoldSupport::Supported
+        } else {
+            HoldSupport::NotNeeded
+        },
         downgradable: down,
         verify,
     }
