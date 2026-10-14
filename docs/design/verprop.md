@@ -1148,6 +1148,13 @@ remote indexes. Traits stay ready; nothing is stubbed.
   `DEBIAN_FRONTEND=noninteractive`), `Fetch`, `Extract`. Mutating `Installer` methods return
   `Steps`; the installed version is read back with `verify_installed` after execution, and
   state is written only from that. The `StepExecutor` lives in bosun-host.
+- `verify_installed` returns `Installed::{Absent, Present { version: Option<Version> }}`; there
+  is never a placeholder version. github-release reports `Present { version: None }`, so apply
+  records the resolved version and state is the authority for it.
+- `Ref` carries the canonical purl. github-release identity uses purl qualifiers `binary`
+  (default: the entry's logical name, set by resolve) and an optional `asset` template (e.g.
+  for goreleaser's `_full` archives); the default asset match is goreleaser's exact name
+  `{binary}_{version}_{os}_{arch}.tar.gz`.
 - `Arch` is amd64/arm64 only; `Os` uses Docker's spelling (`darwin`).
 
 **Slice status:**
@@ -1167,9 +1174,10 @@ remote indexes. Traits stay ready; nothing is stubbed.
 | 6 | bosun-host: LinuxMachine/FakeMachine, os-release, privilege, probe registry | landed; 115 workspace tests; mutation os_release+machine 21/22 (miss: host-I/O `detect()` wrapper) |
 | 7-1 | step-list Installer contract, host StepExecutor, apt backend (§5.1) | landed; 136 tests; mutation apt+executor 33/33 viable caught |
 | 7-2 | executor hardening (atomic temp→fsync→rename writes; regular-file members, `./name` ≡ `name`) + cargo backend (sparse-index listing) | landed; 147 tests; mutation cargo 22/24 (2 equivalent) |
-| 7-3 | github-release backend (goreleaser picker, enforced checksums.txt, `~/.local/bin`) | done on child branch (`f3f2f79`), held for fix-up 7-4 |
-| 7-4 | fix-up: no sentinel version in `verify_installed` (Absent / Present{version?}); explicit `binary` (default = logical name, purl qualifier); real v0.6.4 fixtures, exact goreleaser asset match | in progress |
-| 8–13 | resolve, apply, cli, acceptance, dogfood, quality | not started |
+| 7-3 | github-release backend (goreleaser picker, enforced checksums.txt, `~/.local/bin`) | landed together with 7-4 |
+| 7-4 | fix-up: no sentinel version in `verify_installed` (Absent / Present{version?}); `binary` purl qualifier; real v0.6.4 fixtures, exact goreleaser asset match | landed; 163 tests; mutation github_release+model 36/38 (2 equivalent) |
+| 8 | bosun-resolve: selectors, purl building, installer preference, multi-claim selection, lock merge | in progress |
+| 9–13 | apply, cli, acceptance, dogfood, quality | not started |
 
 **Active implementor:** `lame-wide-chant` (worktree branch `ctxloom/lame-wide-chant`), one
 slice per turn, reporting to the orchestrator after each. Previous: `hoary-quick-elm` (crashed
