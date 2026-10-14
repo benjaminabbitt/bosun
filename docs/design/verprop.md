@@ -858,9 +858,12 @@ image builds are the same mechanism. Both of the first two shapes are supported 
   mode fails when the file is out of date with the lockfile (a CI gate).
 - **in-build execution inside that layer** is the alternative when the distro can't be known
   ahead of time: the generated layer `COPY`s the static bosun binary and runs
-  `bosun install --frozen --yes`, which reads the real base's os-release. For dev containers
-  the same thing can ship as a **Dev Container Feature** (the standard way to layer installs
-  onto any base image declared in `devcontainer.json`).
+  `bosun install --frozen --yes`, which reads the real base's os-release.
+- **Not a Dev Container Feature (DECIDED).** Features are consumed only by devcontainer-aware
+  tooling (the devcontainer CLI, VS Code, Codespaces), not by plain `docker build` / `podman
+  build` / `buildah` or CI; ctxloom, for one, builds `.devcontainer/Dockerfile` directly.
+  `Containerfile.bosun` works with any OCI build tool, so it is the one container path. A
+  Feature could later wrap it, if wanted.
 - Standard Dockerfiles have no `INCLUDE` directive (third-party BuildKit frontends add one),
   so "include a bosun fragment into the main Dockerfile" is done by layering with `FROM`
   instead.
