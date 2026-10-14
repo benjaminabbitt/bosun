@@ -1192,6 +1192,21 @@ remote indexes. Traits stay ready; nothing is stubbed.
   github-release returns the `checksums.txt` sha256, the same value its Fetch step enforces.
 - `Arch` is amd64/arm64 only; `Os` uses Docker's spelling (`darwin`).
 
+**M1 status: COMPLETE (2026-10-14).** `bosun backends | status | lock [--check] | install |
+uninstall | prune` with apt, cargo and github-release on Linux; purl identity and vers ranges;
+plan/privilege/apply with per-action crash-safe state; 303 hermetic tests and 20 cucumber
+scenarios, plus a real-backend tier (`just acceptance-real`, container only); coverage 90.6%
+lines; every per-crate mutation target met. The dogfood `bosun.yaml` and `bosun.lock` are
+committed; the real host install is the user's to run (`bosun install`, then
+`sudo bosun install --scope system`).
+
+**Deferred past M1:** `add` / `remove` (wait for `annals_yaml::edit`); `render` and
+`Containerfile.bosun` (§8, steps already describable); `upgrade`, `export`, `adopt`, `sources`,
+`formerly` migration; persisted plans; macOS / Windows machines; other backends; remote
+indexes; distinct messages for disjoint-vs-unpublished claim intersections (needs vers interval
+algebra); ltk / taskloom / harp in the dogfood (not published as release assets); a cargo
+scenario in the real-backend tier (skipped for compile time).
+
 **Slice status:**
 
 | slice | what | state |
@@ -1224,7 +1239,7 @@ remote indexes. Traits stay ready; nothing is stubbed.
 | 13b | mutation for bosun-io / bosun-ports | landed; 290 tests; io 31/31 and ports 11/11 viable caught (6 survivors killed with new tests) |
 | 12-1 | fixes for the 5 dogfood bugs (below) | landed; 296 tests; host re-run clean; `bosun.lock` committed (ctxloom checksum recorded) |
 | 12-2 | installed-version scheme from backend metadata (state + lock); idempotency test per backend | landed; 299 tests; github-release idempotency test confirmed red without the fix |
-| 12-3 | scheme map from every compiled-in backend; unknown backend id in lock/state is an error, not Generic | in progress (`finer-urban-brunt`) |
+| 12-3 | scheme map from every compiled-in backend; unknown backend id in lock/state is an error, not Generic | landed; 303 tests + 20 scenarios |
 | 12 | dogfood: `bosun.yaml` (just, jq, ctxloom) committed; plan-only host run (user decision) | manifest committed; host run found 5 bugs (below) → 12-1 |
 
 **First real-host smoke run (2026-10-14, release build, Debian 13, read-only `--plan` and
@@ -1261,7 +1276,7 @@ read only when needed). Cargo was skipped for compile time.
 User decisions: ltk, taskloom and harp stay out of M1; the host dogfood is plan-only (the
 user runs the real install). `bosun.lock` is committed once bug 3 is fixed.
 
-**Active implementor:** `finer-urban-brunt` (fresh worktree from main). Previous: `lame-wide-chant`, which can't be resumed (ctxloom compares worktree branch `refs/heads/…` with a short name; see the alpha-issues write-up); all its work is on main, and its worktree is kept as evidence. Before it: `lame-wide-chant` (worktree branch `ctxloom/lame-wide-chant`), one
+**Active implementor:** none (M1 done). Last: `finer-urban-brunt` (stopped after 12-3). Previous: `lame-wide-chant`, which can't be resumed (ctxloom compares worktree branch `refs/heads/…` with a short name; see the alpha-issues write-up); all its work is on main, and its worktree is kept as evidence. Before it: `lame-wide-chant` (worktree branch `ctxloom/lame-wide-chant`), one
 slice per turn, reporting to the orchestrator after each. Previous: `hoary-quick-elm` (crashed
 during slice 1; its scaffold and WIP were cherry-picked onto main; its worktree and branch are removed, and its
 session record is kept as crash evidence).
