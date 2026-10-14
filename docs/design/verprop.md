@@ -1160,6 +1160,10 @@ remote indexes. Traits stay ready; nothing is stubbed.
   the manifest hash passed in, so bosun-resolve depends on neither bosun-host nor bosun-io.
   Install blocks hold an ordered `backends` list (the YAML accepts a scalar or a sequence).
   The deb `distro` qualifier is os-release `VERSION_CODENAME`.
+- An empty claim intersection is one refusal (listing each manifest's spec and what's
+  available) whether the specs are disjoint or nothing published fits; telling those apart
+  needs vers interval algebra, deferred. Reporting lockfiles a plain `install` doesn't match is
+  the command layer's job.
 - `Arch` is amd64/arm64 only; `Os` uses Docker's spelling (`darwin`).
 
 **Slice status:**
@@ -1182,8 +1186,9 @@ remote indexes. Traits stay ready; nothing is stubbed.
 | 7-3 | github-release backend (goreleaser picker, enforced checksums.txt, `~/.local/bin`) | landed together with 7-4 |
 | 7-4 | fix-up: no sentinel version in `verify_installed` (Absent / Present{version?}); `binary` purl qualifier; real v0.6.4 fixtures, exact goreleaser asset match | landed; 163 tests; mutation github_release+model 36/38 (2 equivalent) |
 | 8-1 | bosun-resolve: single-manifest resolve (selectors, installer preference, purl building, highest-in-set, `any` target) | landed; 182 tests; mutation 14/14 viable caught |
-| 8-2 | multi-claim intersection, lock merge per target, `--frozen`, `lock --check` | in progress |
-| 9–13 | apply, cli, acceptance, dogfood, quality | not started |
+| 8-2 | multi-claim intersection, lock merge per target, `--frozen`, `lock --check` (pure functions) | landed; 193 tests; mutation 31/31 viable caught |
+| 9 | bosun-apply: plan builder (§4.8), privilege check (§5.5), Driver + host applier | in progress |
+| 10–13 | cli, acceptance, dogfood, quality | not started |
 
 **Active implementor:** `lame-wide-chant` (worktree branch `ctxloom/lame-wide-chant`), one
 slice per turn, reporting to the orchestrator after each. Previous: `hoary-quick-elm` (crashed
