@@ -53,5 +53,8 @@ tar = "0.4.46"
 # Config/state directory resolution (XDG on Linux).
 etcetera = "0.11.0"
 
+# Advisory file locks, so two bosun runs don't interleave machine-state writes.
+fs2 = "0.4.3"
+
 # Test support.
 tempfile = "3"

@@ -11,10 +11,13 @@ rust-version.workspace = true
 bosun-core.workspace = true
 annals-yaml.workspace = true
 annals-diagnostic.workspace = true
+bosun-ports.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 sha2.workspace = true
 etcetera.workspace = true
+fs2.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
