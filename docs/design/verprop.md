@@ -1215,8 +1215,9 @@ remote indexes. Traits stay ready; nothing is stubbed.
 | 11-1 | acceptance seam tier: cucumber-rs over the real binary, 4 features / 20 scenarios, under `cargo test --workspace`; hold support `Supported / Unsupported / NotNeeded` | landed; 266 tests + 20 scenarios |
 | 11-2 | acceptance real-backend tier in a disposable container (`just acceptance-real`; guarded by `BOSUN_ACCEPTANCE_REAL=1` + a container marker) | landed; real run 2/2 scenarios (apt hello install → hold → prune; github-release ctxloom 0.6.4 checksum-verified); found 2 bugs (below) |
 | 13 | quality: hermetic regressions for the 11-2 bugs, workspace mutation run, coverage ≥ 90% | landed; 284 tests; coverage 90.60% lines / 90.32% regions (re-measured by orchestrator); every mutation target met, survivors justified |
-| 13b | mutation for bosun-io / bosun-ports | in progress (`finer-urban-brunt`) |
-| 12 | dogfood: `bosun.yaml` (just, jq, ctxloom) committed; plan-only host run (user decision) | manifest committed; host run found 5 bugs (below); fixes queued |
+| 13b | mutation for bosun-io / bosun-ports | landed; 290 tests; io 31/31 and ports 11/11 viable caught (6 survivors killed with new tests) |
+| 12-1 | fixes for the 5 dogfood bugs (below) | in progress (`finer-urban-brunt`) |
+| 12 | dogfood: `bosun.yaml` (just, jq, ctxloom) committed; plan-only host run (user decision) | manifest committed; host run found 5 bugs (below) → 12-1 |
 
 **First real-host smoke run (2026-10-14, release build, Debian 13, read-only `--plan` and
 `lock` in a scratch dir).** `backends` found apt 3.0.3, cargo 1.96.1 and github-release; jq
