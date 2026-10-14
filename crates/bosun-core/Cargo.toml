@@ -11,7 +11,11 @@ rust-version.workspace = true
 deb-version.workspace = true
 semver.workspace = true
 serde.workspace = true
+thiserror.workspace = true
 annals-diagnostic.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
 
 [lints]
 workspace = true

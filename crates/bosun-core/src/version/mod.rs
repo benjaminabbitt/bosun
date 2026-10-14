@@ -21,6 +21,8 @@ mod segment;
 use std::cmp::Ordering;
 use std::fmt;
 
+use crate::errmsg;
+
 pub use segment::Segment;
 
 /// The version grammar a string is written in.
@@ -45,24 +47,15 @@ impl Scheme {
 }
 
 /// Why a version string could not be parsed under its scheme.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum VersionError {
     /// The string was empty.
+    #[error("{}", errmsg::VERSION_EMPTY)]
     Empty,
     /// A SemVer string `semver` rejected, with its message.
+    #[error("{kind}: {0}", kind = errmsg::VERSION_INVALID_SEMVER)]
     Semver(String),
 }
-
-impl fmt::Display for VersionError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            VersionError::Empty => write!(f, "empty version string"),
-            VersionError::Semver(m) => write!(f, "invalid semver version: {m}"),
-        }
-    }
-}
-
-impl std::error::Error for VersionError {}
 
 /// A version string tagged with the grammar it is read under. Keeps the
 /// original text (what the backend reported) and a parsed form used only for
@@ -111,6 +104,16 @@ impl Version {
     /// The scheme this version is read under.
     pub fn scheme(&self) -> Scheme {
         self.scheme
+    }
+
+    /// The parsed SemVer form, when this version is read under
+    /// [`Scheme::Semver`]. Used by the range engine to evaluate a
+    /// `semver::VersionReq`; `None` for every other scheme.
+    pub(crate) fn as_semver(&self) -> Option<&semver::Version> {
+        match &self.parsed {
+            Parsed::Semver(v) => Some(v),
+            _ => None,
+        }
     }
 
     /// Compare with another version of the same scheme, or `None` if the
