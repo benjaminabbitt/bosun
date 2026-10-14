@@ -1176,6 +1176,11 @@ remote indexes. Traits stay ready; nothing is stubbed.
   lock held throughout; a crash mid-apply never leaves a bosun-installed package unrecorded
   (it would otherwise look `accepted` and never be pruned). The applier depends on a
   `StepRunner` port, implemented by bosun-host's `StepExecutor`.
+- **Backend metadata lives with the backend**: each `BackendFactory` declares its purl type,
+  vers type and platform independence, so adding a backend never touches the CLI (§5.1).
+- The CLI's integration tests drive the real binary through a test seam (`BOSUN_FIXTURE` +
+  `BOSUN_STATE_DIR`). The seam needs both variables, never touches real state paths, and
+  warns on stderr on every run while it's active.
 - `Arch` is amd64/arm64 only; `Os` uses Docker's spelling (`darwin`).
 
 **Slice status:**
@@ -1201,7 +1206,8 @@ remote indexes. Traits stay ready; nothing is stubbed.
 | 8-2 | multi-claim intersection, lock merge per target, `--frozen`, `lock --check` (pure functions) | landed; 193 tests; mutation 31/31 viable caught |
 | 9-1 | bosun-apply: plan builder (§4.8) + privilege check (§5.5); JSON via one-way DTO views | landed; 216 tests; mutation 48/48 viable caught |
 | 9-2 | Driver + host applier (one transaction, per-backend isolation, verify-before-record); exit code and capability fixes | landed; 226 tests; mutation 64/64 viable caught |
-| 10 | bosun-cli: wiring, commands, `--format`, confirmation; per-action durable state writes; ApplyReport JSON | in progress |
+| 10-1 | per-action state checkpoints + ApplyReport JSON; real adapters (std::process, ureq/rustls); wiring; `backends` / `status` / `lock [--check]`; `--format` | landed; 245 tests |
+| 10-2 | `install` / `uninstall` / `prune` + confirmation; backend metadata on the factory; fixture-seam guard | in progress |
 | 11–13 | cli, acceptance, dogfood, quality | not started |
 
 **Active implementor:** `lame-wide-chant` (worktree branch `ctxloom/lame-wide-chant`), one
