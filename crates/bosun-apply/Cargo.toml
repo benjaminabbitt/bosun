@@ -11,7 +11,12 @@ rust-version.workspace = true
 bosun-core.workspace = true
 bosun-ports.workspace = true
 annals-diagnostic.workspace = true
+serde.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
 
 [lints]
 workspace = true

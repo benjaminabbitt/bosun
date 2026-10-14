@@ -108,6 +108,9 @@ dependencies = [
  "annals-diagnostic",
  "bosun-core",
  "bosun-ports",
+ "serde",
+ "serde_json",
+ "thiserror",
  "tracing",
 ]
 
