@@ -1213,7 +1213,8 @@ remote indexes. Traits stay ready; nothing is stubbed.
 | 10-2 | `install` / `uninstall` / `prune` + confirmation; backend metadata on the factory; fixture-seam guard | landed; 258 tests |
 | 10-3 | blockers from the first real-host smoke run (below) + cross-claim selection in `install` | landed; 265 tests; host re-run: jq → `accept`, invalid spec → parse error + exit 1, ctxloom 0.6.4 planned |
 | 11-1 | acceptance seam tier: cucumber-rs over the real binary, 4 features / 20 scenarios, under `cargo test --workspace`; hold support `Supported / Unsupported / NotNeeded` | landed; 266 tests + 20 scenarios |
-| 11-2 | acceptance real-backend tier in a disposable container (`just acceptance-real`, `BOSUN_ACCEPTANCE_REAL=1`) | in progress |
+| 11-2 | acceptance real-backend tier in a disposable container (`just acceptance-real`; guarded by `BOSUN_ACCEPTANCE_REAL=1` + a container marker) | landed; real run 2/2 scenarios (apt hello install → hold → prune; github-release ctxloom 0.6.4 checksum-verified); found 2 bugs (below) |
+| 13 | quality: hermetic regressions for the 11-2 bugs, workspace mutation run, coverage ≥ 90% | in progress |
 | 12–13 | cli, acceptance, dogfood, quality | not started |
 
 **First real-host smoke run (2026-10-14, release build, Debian 13, read-only `--plan` and
@@ -1226,6 +1227,11 @@ to the fake-backed tests:
 2. A constraint version invalid in its scheme (`>=0.6` for SemVer) silently matched nothing
    instead of failing at parse.
 3. `lock` exited 0 and wrote a partial lock with an unsatisfiable entry.
+
+**Real-backend run (11-2, in the agent container: root, Debian 12).** Found two bugs the fake
+seam couldn't: apt `uninstall` left a lingering `apt-mark hold` (now unholds before removing),
+and a user-scope `install` opened and locked root-owned system state (now each scope's state is
+read only when needed). Cargo was skipped for compile time.
 
 **Active implementor:** `lame-wide-chant` (worktree branch `ctxloom/lame-wide-chant`), one
 slice per turn, reporting to the orchestrator after each. Previous: `hoary-quick-elm` (crashed
