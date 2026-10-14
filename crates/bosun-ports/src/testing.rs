@@ -2,7 +2,6 @@
 //! touching a real process or the network. Shipped (not `#[cfg(test)]`) so
 //! every downstream crate's tests can use them.
 
-use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 
@@ -61,11 +60,12 @@ impl CommandRunner for FakeCommandRunner {
 }
 
 /// An [`HttpFetcher`] that returns responses mapped by URL and records every
-/// request.
+/// request. `Mutex` so it is `Sync` and can back a backend held by a
+/// `Send + Sync` factory (§5.3).
 #[derive(Default)]
 pub struct FakeHttpFetcher {
-    responses: RefCell<HashMap<String, HttpResponse>>,
-    calls: RefCell<Vec<HttpRequest>>,
+    responses: Mutex<HashMap<String, HttpResponse>>,
+    calls: Mutex<Vec<HttpRequest>>,
 }
 
 impl FakeHttpFetcher {
@@ -87,21 +87,22 @@ impl FakeHttpFetcher {
 
     /// Map `url` to a raw response.
     pub fn with_response(self, url: impl Into<String>, response: HttpResponse) -> FakeHttpFetcher {
-        self.responses.borrow_mut().insert(url.into(), response);
+        self.responses.lock().unwrap().insert(url.into(), response);
         self
     }
 
     /// The requests made so far, in order.
     pub fn calls(&self) -> Vec<HttpRequest> {
-        self.calls.borrow().clone()
+        self.calls.lock().unwrap().clone()
     }
 }
 
 impl HttpFetcher for FakeHttpFetcher {
     fn fetch(&self, request: &HttpRequest) -> Result<HttpResponse, PortError> {
-        self.calls.borrow_mut().push(request.clone());
+        self.calls.lock().unwrap().push(request.clone());
         self.responses
-            .borrow()
+            .lock()
+            .unwrap()
             .get(&request.url)
             .cloned()
             .ok_or_else(|| PortError::HttpRequest {

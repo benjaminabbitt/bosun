@@ -106,8 +106,9 @@ pub struct HttpResponse {
 
 /// Fetches over HTTP. The query side of a repo-bound backend (listing
 /// versions, downloading a release archive) goes through this; it can run
-/// anywhere, for any target (§4.7).
-pub trait HttpFetcher {
+/// anywhere, for any target (§4.7). `Send + Sync` so a backend holding one can
+/// sit behind a `Send + Sync` factory (§5.3).
+pub trait HttpFetcher: Send + Sync {
     /// Perform `request` and return the response. `Err` is reserved for
     /// transport failures; an error *status* is returned in [`HttpResponse`]
     /// for the caller to interpret.

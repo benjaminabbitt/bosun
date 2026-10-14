@@ -6,5 +6,7 @@
 //! `query_available` run directly through the `CommandRunner`.
 
 pub mod apt;
+pub mod cargo;
 
 pub use apt::AptFactory;
+pub use cargo::CargoFactory;
