@@ -72,14 +72,14 @@ becomes a *feature* here (see container-inject), so budget musl static builds ea
 
 ```
 manifest  ──►  resolver  ──►  lock  ──►  drivers
-(spec +        (ordering +    (resolved   (host-apply | container-inject | …)
- policy per    policy +       versions +
- entry)        availability)  deviations)
+(vers spec    (ordering +    (resolved   (host-apply | container-inject | …)
+ + purl per    availability:  versions,
+ entry)        highest in set) per target)
 ```
 
-- **manifest** — declarative; per-entry spec + resolution policy, per backend.
-- **resolver** — queries available versions, applies ordering + policy, selects.
-- **lock** — the resolved versions (and any deviations), the single source of truth both drivers
+- **manifest** — declarative; per-entry vers spec and per-backend install selectors (§5.6).
+- **resolver** — queries available versions, applies ordering, selects the highest in each spec's set.
+- **lock** — the resolved versions, the single source of truth both drivers
   consume. Deterministic/sorted output (good for diffing and Docker layer caching).
 - **drivers** — apply the lock to a target. "Apply to host" and "inject into a container build"
   are *peers* over the same lock, not special cases.
@@ -91,10 +91,10 @@ real to check later):
 
 | crate | role |
 |---|---|
-| `bosun-core` | domain: `Version`, `Segment` + `Ord`, `Spec`, `Policy`, `Entry`, `Resolution`, `Deviation`. Pure, no I/O. |
+| `bosun-core` | domain: `Version`, `Segment` + `Ord`, `Spec` (vers), `Purl`, `Entry`, `Resolution`. Pure, no I/O. |
 | `bosun-ports` | traits: `Index`, `Installer`, `Driver`, `StateStore` |
 | `bosun-backends` | adapters: apt, dnf, pacman, zypper, apk, snap, flatpak, brew, scoop, winget, cargo, go, npm, uv, pipx, gem, github-release (§12) |
-| `bosun-resolve` | manifest + `Index` queries → lock (ordering + policy) |
+| `bosun-resolve` | manifest + `Index` queries → lock (ordering; highest in set) |
 | `bosun-io` | manifest and user config (YAML via `annals-yaml`, comment-preserving edits) and lock/state (JSON) |
 | `bosun-apply` | drivers: host applier, container renderer |
 | `bosun-host` | probe OS/arch/distro family; run backend probes; build the registry of present backends (§5.3) |
@@ -109,7 +109,7 @@ real to check later):
 | `install [path] [--plan] [--scope system\|user] [--yes]` | plan → privilege check → confirm → apply: resolve each entry with the local package manager, install, record in the machine state (§4.8, §5.5). **Never uninstalls** (except the old name in a `formerly` migration, §5.4) |
 | `uninstall [path] [--plan] [--scope system\|user] [--yes]` | the inverse of `install` for one manifest: drop all of its claims, then uninstall each package bosun installed that no other manifest still claims; same plan → confirm → apply flow (§9) |
 | `prune [--plan] [--scope system\|user] [--yes]` | machine-wide cleanup: uninstall what bosun installed that no manifest claims any more, and drop claims whose manifest no longer exists (§9) |
-| `upgrade [pkg]` | re-resolve range/tolerant entries for this platform, rewrite its lockfile entries, show before/after |
+| `upgrade [pkg]` | re-resolve range entries for this platform, rewrite its lockfile entries, show before/after |
 | `export` | seed a manifest from the current machine |
 | `status` | what bosun manages on this machine and which manifests claim it (drift is `install --plan`'s job) |
 | `adopt <name>` | explicitly take ownership of an existing install: `accepted` → `installed` (§4.6) |
@@ -187,25 +187,21 @@ Target keys use Docker's platform syntax, so a build can look them up with Build
   "packages": [
     {
       "name": "bosun",
-      "spec": "0.3.0",
-      "policy": "exact",
+      "spec": "vers:semver/0.3.0",
       "targets": {
-        "darwin/arm64": { "backend": "brew",  "package": "bosun",     "resolved": "0.3.0" },
-        "linux/amd64":  { "backend": "github-release", "package": "<owner>/bosun",
+        "darwin/arm64": { "backend": "brew", "purl": "pkg:brew/bosun", "resolved": "0.3.0" },
+        "linux/amd64":  { "backend": "github-release", "purl": "pkg:github/<owner>/bosun",
                           "resolved": "0.3.0", "checksum": "sha256:…" }
       }
     },
     {
       "name": "jq",
-      "spec": "1.7.1-1",
-      "policy": "tolerant",
+      "spec": "vers:deb/>=1.7.1|<1.7.2~",
       "targets": {
         "linux/amd64": {
           "backend": "apt",
-          "package": "jq",
-          "source": "ubuntu-noble/universe",
+          "purl": "pkg:deb/ubuntu/jq?arch=amd64&distro=noble",
           "resolved": "1.7.1-3ubuntu0.1",
-          "deviation": "next-higher",
           "indexSnapshot": "2026-10-13T19:00:00Z"
         }
       }
@@ -219,10 +215,9 @@ Target keys use Docker's platform syntax, so a build can look them up with Build
 | `lockfileVersion` | format version; bosun refuses a newer major it cannot read and upgrades older ones |
 | `targets.<t>.manifestHash` | per target: hash of the *parsed* manifest (comments stripped) that target was resolved against, so editing a comment doesn't invalidate the lock; `install --frozen` errors when the current target's hash doesn't match (§4.7) |
 | `name` | bosun's logical name for the tool (§5.4); never has to match any backend's naming |
-| `spec` / `policy` | the intent, copied from the manifest so the lockfile reads on its own; a target may carry its own `spec` where that platform's version string differs |
+| `spec` | the intent in canonical vers form (§5.6), copied from the manifest so the lockfile reads on its own; a target may carry its own `spec` where that platform's version scheme differs |
 | `backend` / `purl` | which package manager, and the package's canonical purl (unversioned, with qualifiers such as `repository_url`, `arch`, `distro`) for that target (§5.6); replaces separate `package` / `source` fields |
 | `resolved` | the exact version selected for that target |
-| `deviation` | present only when `resolved` differs from an exact `spec` (e.g. `next-higher`); surfaced on apply |
 | `indexSnapshot` | for repo-bound backends: when the index it resolved against was fetched; pairs with base-image digest pinning for reproducible builds |
 | `checksum` | recorded when the backend reports one; informational only (integrity checking is the backend's job) |
 
@@ -265,8 +260,8 @@ Only the header and the per-target leaf fields differ:
 | | lockfile | machine state |
 |---|---|---|
 | header | `lockfileVersion`, per-target `manifestHash` | `stateVersion` |
-| package-level `spec` / `policy` | present (one manifest) | absent: each claim carries its own |
-| per-target leaf | `resolved`, `deviation`, `indexSnapshot`, `checksum` | `installed`, `origin`, `claimedBy` |
+| package-level `spec` | present (one manifest) | absent: each claim carries its own |
+| per-target leaf | `resolved`, `indexSnapshot`, `checksum` | `installed`, `origin`, `claimedBy` |
 | targets present | every declared target | only this machine's target |
 
 ```json
@@ -280,8 +275,8 @@ Only the header and the per-target leaf fields differ:
           "backend": "apt", "package": "jq",
           "installed": "1.7.1-3ubuntu0.1", "origin": "installed",
           "claimedBy": [
-            { "manifest": "/home/babbitt/workspace/verprop/bosun.yaml", "spec": "^1.7", "policy": "range" },
-            { "manifest": "/home/babbitt/.config/bosun/bosun.yaml",     "spec": "1.7.1-*", "policy": "tolerant" }
+            { "manifest": "/home/babbitt/workspace/verprop/bosun.yaml", "spec": "vers:deb/>=1.7|<2" },
+            { "manifest": "/home/babbitt/.config/bosun/bosun.yaml",     "spec": "vers:deb/>=1.7.1|<1.7.2~" }
           ]
         }
       }
@@ -293,7 +288,7 @@ Only the header and the per-target leaf fields differ:
           "backend": "apt", "package": "git",
           "installed": "2.43.0", "origin": "accepted",
           "claimedBy": [
-            { "manifest": "/home/babbitt/workspace/verprop/bosun.yaml", "spec": ">=2.40", "policy": "range" }
+            { "manifest": "/home/babbitt/workspace/verprop/bosun.yaml", "spec": "vers:deb/>=2.40" }
           ]
         }
       }
@@ -330,13 +325,13 @@ Only the header and the per-target leaf fields differ:
 **Conflicts across claimants.** One install scope holds one version, so `install` resolves against
 *all* claims for a package, not just the current project's:
 
-- Ranges and tolerant specs that overlap: pick a version satisfying every claim. This is the
+- Specs whose vers sets intersect: pick the highest available version in the intersection. This is the
   main reason to prefer ranges for widely shared tools.
-- Claims that can't all be satisfied (e.g. two different exact pins): **refuse (DECIDED)**,
+- Claims that can't all be satisfied (empty intersection, e.g. two different exact pins): **refuse (DECIDED)**,
   naming the manifests and specs that disagree. Never last-writer-wins, which would flip the
   installed version every time you switch projects.
 - **Lockfiles advise; specs decide (DECIDED).** Two projects' lockfiles can pin different exact
-  versions that both satisfy both projects' specs (e.g. `^1.7` locked to `1.7.1-3` in one,
+  versions that both satisfy both projects' specs (e.g. `>=1.7|<2` locked to `1.7.1-3` in one,
   `1.7.1-4` in the other). Plain `install` picks a version satisfying every claim's *spec*,
   preferring one some lockfile already chose (the current project's first), and reports any
   lockfile it doesn't match. Only `install --frozen` holds a claim to its lockfile's exact
@@ -561,7 +556,6 @@ targets: [linux/amd64, linux/arm64, darwin/arm64, windows/amd64]
 
 # reuse: most entries only need to state where they differ from these
 defaults:
-  policy: exact
   install:
     darwin: {backend: brew}
     windows: {backend: winget}
@@ -576,8 +570,7 @@ packages:
 
   # Debian-family and Fedora call it fd-find (Debian's binary is `fdfind`)
   - name: fd
-    spec: 10.2.0
-    policy: tolerant
+    spec: ">=10.2.0|<10.3"
     install:
       linux:debian: {backend: apt, package: fd-find, spec: 9.0.0-1}
       linux:fedora: {backend: dnf, package: fd-find}
@@ -599,7 +592,7 @@ Rules (draft syntax):
   `defaults.install`. No match = the entry doesn't apply on this platform (reported by
   `status`, not an error). Distro detection is below.
 - **Defaults keep it sparse:** `package` defaults to `name`; a per-platform `spec` overrides the
-  entry's `spec`; `defaults` supplies policy and backend choices, so entries only state
+  entry's `spec`; `defaults` supplies backend choices, so entries only state
   exceptions.
 - **`formerly`:** previous names (logical or backend package IDs). On `install`, if a package
   under a former name is present: bosun-installed → migrate (uninstall old, install new,
@@ -757,21 +750,18 @@ bosun does not invent a package-ID or version-range syntax. It uses the package-
 - The lockfile stores each spec in canonical vers form (`vers:<type>/…`), so a reader needs
   only the vers spec to know what a lock entry allowed.
 
-**Policy becomes a selection rule over the vers set** (§7):
+**One selection rule, no policies (DECIDED).** A spec is a vers set; bosun selects the
+**highest available version in the set**, or fails naming the spec and what was available.
+A bare version is a one-version set, so an exact pin needs no separate mode. There is no
+`policy` field in the manifest, lockfile or state, and no `deviation`: what was resolved is
+always inside what was written.
 
-| policy | spec | selects |
-|---|---|---|
-| exact | a bare version | that version, or fail |
-| range | vers constraints | the highest available version in the set |
-| tolerant | a bare version, or vers constraints | the *lowest available version at or above the anchor* that is in the set; the anchor is the bare version, or the range's lower bound. Never below the anchor. A deviation is recorded when the result isn't the anchor. |
-
-- Tolerant with a bare version is the open set `>=X`; tolerant with a range adds an upper
-  bound. So `vers:deb/>=1.7.1|<1.7.2~` means "1.7.1, else the next Debian revision of 1.7.1".
-  This is the "accept any point release in a range" case, and it needs no separate grammar.
-  "Closest above" also settles §11's tie-break question.
-- **Pre-releases:** they are *in* a vers set by plain ordering, but `range` and `tolerant`
-  never *select* one unless a constraint version is itself a pre-release (the SemVer
-  convention, §12 item 3). Exact pins can name one directly.
+- "Prefer 1.7.1, but accept a later revision" is a range: `vers:deb/>=1.7.1|<1.7.2~`.
+  Because selection takes the highest, write an upper bound to stay close to a version.
+- **Pre-releases:** they are *in* a vers set by plain ordering, but selection never picks
+  one unless some constraint version is itself a pre-release (the SemVer convention, §12
+  item 3), or the spec is a bare pre-release version.
+- Reproducibility comes from the lockfile and `install --frozen` (§7), not from a policy.
 
 **Conformance:** bosun's purl and vers code must pass the official JSON suites from both repos,
 vendored as test fixtures (MIT). Existing crates (`purl`, `vers-rs`, `unive_rs` on crates.io)
@@ -796,36 +786,26 @@ both (the grammars are small).
   - Go pseudo-versions (`v0.0.0-TIMESTAMP-hash`) validate the model — they order by the embedded
     timestamp chunk, no special-casing.
 
-## 7. Resolution policy (orthogonal to backend)
+## 7. Resolution (orthogonal to backend)
 
-Per-entry, with a global default + override. **Range syntax and the exact selection rule per
-policy are defined by vers in §5.6, which supersedes the examples below.**
-
-- **strict / exact** — must be exactly X or fail. Reproducible builds; frozen lock.
-- **range / auto-upgrade** — a constraint (`^1.2`, `>=1.2,<2`, `1.2.*`); resolve to the **highest
-  available satisfying it**; re-resolve each run to track upstream within bounds.
-- **tolerant / closest-to-spec** — prefer the pin; if unavailable, resolve to the
-  **next-higher-closest** available version (round *up* toward spec, **never below** — never
-  silently downgrade a system tool), and/or accept any point release in a range. Record the
-  deviation.
+Every spec is a vers set, and resolution selects the highest available version in it (§5.6).
+There are no per-entry policies: an exact pin is a one-version set and a range is a wider one.
 
 Consequences:
 
-- `closest` and `highest-in-range` are impossible without correct ordering (§6) — this is the
-  payoff for getting ordering right.
-- **tolerant mode is the answer to the "version unsatisfiable from configured sources" problem** —
-  it is what makes a pin-ish intent usable on rolling/repo-bound backends.
-- Auto-upgrade and tolerant **break reproducibility by design**, so bosun inherits uv/npm's
-  frozen-vs-update split:
+- `highest-in-set` is impossible without correct ordering (§6). That is the payoff for
+  getting ordering right.
+- A pin that the configured sources no longer carry is unsatisfiable. The remedy is to widen
+  the range (e.g. `>=1.7.1|<1.7.2~` for "any Debian revision of 1.7.1"), not a fallback mode.
+- Ranges **break reproducibility by design**, so bosun inherits uv/npm's frozen-vs-update split:
   - `bosun lock` — resolve and record versions for this platform (§4.7).
   - `bosun install --frozen` — apply the lock verbatim for this platform, no re-resolve, no
     lockfile write. **Container builds and CI must use this.**
   - `bosun upgrade` — re-resolve ranges, rewrite the lock, show a before/after diff.
   - plain `bosun install` — reads the lock as a preference across claims (§4.6), never writes
     it.
-- Tolerant/auto can install something other than what the author wrote, so bosun **records
-  "requested X → resolved/installed Y" in the lock and surfaces it** (the "show what changes
-  before applying" discipline).
+- The plan shows "spec → resolved" for every entry, so a range resolving somewhere new is
+  visible before applying.
 
 ## 8. Propagation drivers
 
@@ -885,8 +865,8 @@ RUN apt-get install -y "${FD_PACKAGE}=${FD_VERSION}"
   multi-platform build, so where versions or package IDs differ per platform the Dockerfile
   looks them up by `TARGETPLATFORM` instead. (The lockfile itself is also plain JSON that a
   Dockerfile can read with `jq`, §4.5.)
-- **Versions come from the lockfile:** a range/tolerant entry renders its locked version for
-  the requested target; an exact entry renders from the manifest. If the target isn't locked
+- **Versions come from the lockfile:** every entry renders its locked version for the
+  requested target. If the target isn't locked
   (or is stale), render errors and names the platform to run `bosun lock` on.
 
 Future driver: CI.
@@ -986,8 +966,8 @@ Future driver: CI.
   command-level rigor as the apt/dnf/uv/npm reference in §A. For snap: can a non-publisher
   install a specific `--revision`, or only a channel? For flatpak: how are past commits
   discovered and installed (`remote-info --log`, `update --commit`)?
-- Nail the manifest schema (`bosun.yaml`): top-level `targets`, `sources`, `defaults`
-  (policy); entry = {name, backend, spec, policy?, source?, per-target overrides?}.
+- Nail the manifest schema (`bosun.yaml`): top-level `targets`, `sources`, `defaults`;
+  entry = {name, backend, spec (vers), source?, per-target overrides?}.
 - Confirm the name. `bosun` is the working name. The `bosun` crate on crates.io is taken,
   which doesn't matter while bosun ships only as release binaries (§3.1).
 - annals-yaml's comment-preserving editor: confirm it covers every manifest edit `add`,
@@ -1001,7 +981,6 @@ Future driver: CI.
 - Lockfile merge conflicts in git: two branches re-locking different platforms touch different
   target keys, but both rewrite the same file. Confirm the sorted, per-target layout keeps
   these as clean textual merges, or provide a `bosun lock --merge` helper.
-- Decide the "closest" tie-breaks precisely (same major.minor preference within next-higher).
 - Dogfood (§12): confirm the `github-release` backend and its two exceptions to §9 (bosun
   verifies checksums; bosun picks a bin directory); decide how a family of entries shares one
   release version; find out how reprise ships.
@@ -1039,8 +1018,7 @@ What dogfooding forces into v1 (proposed):
      say so when it isn't on PATH.
 2. **Sources:** `ctxloom/tap` is a brew tap the §9 sources section must add before install.
 3. **Pre-release versions:** the family is at `0.7.0-pre1`; ordering (§6) must place it below
-   `0.7.0`, and range policy needs a rule for whether ranges admit pre-releases (SemVer: only
-   when the range names one).
+   `0.7.0`, and selection never picks a pre-release unless the spec names one (§5.6).
 4. **Families sharing one release:** four entries that must move together. Either the manifest
    gets a way to share one `spec` across entries, or `lock` warns when they diverge.
 5. **Shadowing installs:** this machine already has the family as local dev builds in
@@ -1078,9 +1056,10 @@ remote indexes. Traits stay ready; nothing is stubbed.
 - The dogfood `bosun.yaml` targets plain `linux:debian`, not a specific release.
 - ~~Range grammar is per version scheme (semver `VersionReq` / AND-ed comparators)~~ —
   superseded by vers (§5.6), slice 4b.
+- **No policies (user decision):** tolerant, exact/range modes and `deviation` are removed;
+  vers ranges cover them (§5.6, §7).
 - **purl + vers (user decision, §5.6):** package identity is purl; every spec is vers;
-  policy is a selection rule over the vers set. Tolerant-with-range is in M1, expressed as a
-  vers range. This supersedes the per-scheme range grammar recorded below (no `^`, `~`,
+  selection is "highest available in the vers set". This supersedes the per-scheme range grammar recorded below (no `^`, `~`,
   `1.2.*` in M1).
 - Error and log text lives in `errmsg` / `logmsg` constants; data-carrying thiserror
   variants use a named binding (`#[error("{kind}: {0}", kind = errmsg::X)]`).
@@ -1105,7 +1084,7 @@ remote indexes. Traits stay ready; nothing is stubbed.
 | 3 | bosun-core platform/backend/record value types (§4.5, §4.6, §5.4) | landed; 64 tests, mutation 18/18 viable caught |
 | 4 | bosun-ports traits (§5.1, §5.3, §5.5) + bosun-core Distro | landed; 71 tests, mutation 28/28 viable caught |
 | 2b | tolerant-with-range on the pre-vers wildcard grammar (child commit `3b2a989`) | **not landed**: built before the vers decision reached the child; superseded by 4b |
-| 4b | adopt purl + vers (§5.6): rework slice 2 range grammar and slice 3 PackageId; tolerant-with-range falls out of it | in progress |
+| 4b | adopt purl + vers (§5.6): rework slice 2 range grammar and slice 3 PackageId; remove Policy/Deviation/tolerant | in progress |
 | 5–13 | io, host, backends, resolve, apply, cli, acceptance, dogfood, quality | not started |
 
 **Active implementor:** `lame-wide-chant` (worktree branch `ctxloom/lame-wide-chant`), one
