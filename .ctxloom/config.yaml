@@ -23,7 +23,10 @@ agents:
       - developer
     runtime: container-rootless
   orchestrator:
-    llm: claude-code
+    llm: claude-opus-5-5
+    permissions:
+      claude-code:
+        mode: bypass
     profiles:
       - orchestrator
     runtime: host
@@ -31,7 +34,6 @@ auth: token
 config:
   use_distilled: true
 default_agent: orchestrator
-dirty_tree_handler: commit
 llm:
   configs:
     claude-code:
@@ -39,6 +41,9 @@ llm:
       type: claude-code
     claude-fast:
       model: claude-haiku-4-5-20251001
+      type: claude-code
+    claude-opus-5-5:
+      model: claude-opus-5-5
       type: claude-code
   defaults:
     fast: claude-fast
