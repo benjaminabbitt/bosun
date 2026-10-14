@@ -80,6 +80,9 @@ fn i_run(world: &mut BosunWorld, cmdline: String) {
     let output = Command::new(env!("CARGO_BIN_EXE_bosun"))
         .env("BOSUN_FIXTURE", p.join("fixture.json"))
         .env("BOSUN_STATE_DIR", p.join("state"))
+        // run from the project directory, so a relative path like
+        // `./bosun.yaml` names this project's manifest.
+        .current_dir(&p)
         .args(&args)
         .output()
         .expect("run bosun");
@@ -140,6 +143,29 @@ fn state_absent(world: &mut BosunWorld, needle: String) {
 fn lock_written(world: &mut BosunWorld) {
     let p = world.path();
     assert!(p.join("bosun.lock").exists(), "no bosun.lock");
+}
+
+#[then(expr = "the lockfile contains {string}")]
+fn lock_contains(world: &mut BosunWorld, needle: String) {
+    let p = world.path();
+    let lock = fs::read_to_string(p.join("bosun.lock")).expect("read bosun.lock");
+    assert!(lock.contains(&needle), "bosun.lock:\n{lock}");
+}
+
+#[then("the recorded claim names this project's manifest by its absolute path")]
+fn claim_is_absolute(world: &mut BosunWorld) {
+    let p = world.path();
+    let abs = fs::canonicalize(p.join("bosun.yaml")).unwrap();
+    let state = recorded_state(world);
+    let quoted = format!("\"{}\"", abs.display());
+    assert!(state.contains(&quoted), "want {quoted} in state:\n{state}");
+}
+
+#[then("stdout is a JSON document")]
+fn stdout_json(world: &mut BosunWorld) {
+    if let Err(e) = serde_json::from_str::<serde_json::Value>(&world.stdout) {
+        panic!("{e}; stdout:\n{}", world.stdout);
+    }
 }
 
 #[then("no lockfile is written")]
