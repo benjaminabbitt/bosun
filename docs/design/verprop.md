@@ -1150,7 +1150,7 @@ remote indexes. Traits stay ready; nothing is stubbed.
 | 4b-2 | purl identity: conformant purl module; PackageId → unversioned purl in lock/state | landed; 87 tests; purl conformance 65/65 required (spec, deb, cargo, github, generic), 98/107 other types best-effort; mutation 72/72 viable caught |
 | 5-1 | bosun-io: lockfile + state JSON, FileStateStore, user config | landed; golden + round-trip tests; mutation deferred to 13 |
 | 5-2 | bosun-io: manifest + manifestHash; transactional StateStore on std file locks | landed; 106 workspace tests; hash proven comment-insensitive |
-| 6 | bosun-host: LinuxMachine/FakeMachine, os-release, privilege, probe registry | in progress |
+| 6 | bosun-host: LinuxMachine/FakeMachine, os-release, privilege, probe registry | done on child branch (`6bb0264`), held: clippy `--all-targets` failure sent back for fix |
 | 7–13 | backends, resolve, apply, cli, acceptance, dogfood, quality | not started |
 
 **Active implementor:** `lame-wide-chant` (worktree branch `ctxloom/lame-wide-chant`), one
