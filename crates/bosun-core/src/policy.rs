@@ -47,9 +47,13 @@ pub enum Policy {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Deviation {
-    /// A tolerant pin was unavailable; bosun rounded up to the closest
+    /// A tolerant *pin* was unavailable; bosun rounded up to the closest
     /// higher available version (§7, never below).
     NextHigher,
+    /// A tolerant *wildcard* (a range of point releases, e.g. `1.7.1-*`)
+    /// resolved to a concrete version within its range — the written spec was
+    /// a pattern, not an exact version, so the choice is always surfaced.
+    WithinRange,
 }
 
 /// Why a spec string could not be understood.
@@ -169,6 +173,102 @@ fn parse_comparator(clause: &str, scheme: Scheme) -> Result<Comparator, SpecErro
     Ok(Comparator { op, bound })
 }
 
+/// Parse a tolerant spec: a plain pin when it has no `*`, otherwise a
+/// point-release wildcard in the per-scheme grammar (see [`Tolerance`]).
+fn parse_tolerance(raw: &str, scheme: Scheme) -> Result<Tolerance, SpecError> {
+    if !raw.contains('*') {
+        return Ok(Tolerance::Pin(Version::parse(raw, scheme)?));
+    }
+    match scheme {
+        Scheme::Semver => semver::VersionReq::parse(raw)
+            .map(Tolerance::SemverRange)
+            .map_err(|e| SpecError::InvalidRange(e.to_string())),
+        Scheme::Debian => {
+            // `<upstream>-*`: strip the revision wildcard, keep the upstream
+            // (epoch included). The upstream must be a non-empty version with
+            // no further `*`.
+            let upstream = raw
+                .strip_suffix("-*")
+                .filter(|u| !u.is_empty() && !u.contains('*'))
+                .ok_or_else(|| SpecError::InvalidRange(raw.to_string()))?;
+            Version::parse(upstream, Scheme::Debian)?;
+            Ok(Tolerance::DebianUpstream(upstream.to_string()))
+        }
+        Scheme::Generic => {
+            // `<prefix>.*`: the prefix must end in `.`, be more than just `.`,
+            // and carry no further `*`.
+            let prefix = raw
+                .strip_suffix('*')
+                .filter(|p| p.ends_with('.') && p.len() > 1 && !p.contains('*'))
+                .ok_or_else(|| SpecError::InvalidRange(raw.to_string()))?;
+            Ok(Tolerance::GenericPrefix(prefix.to_string()))
+        }
+    }
+}
+
+/// The Debian upstream portion of a version string: everything before the
+/// last `-` (the revision), with any epoch kept. `1.7.1-3ubuntu0.1` →
+/// `1.7.1`; `1:1.7.1-3` → `1:1.7.1`; `1.7.1` (no revision) → `1.7.1`.
+fn debian_upstream(v: &str) -> &str {
+    match v.rfind('-') {
+        Some(i) => &v[..i],
+        None => v,
+    }
+}
+
+/// A parsed tolerant spec (§7). Either a plain pin (round up to the closest
+/// available version at or above it), or a point-release wildcard (a bounded
+/// range of acceptable versions). In both cases resolution picks the smallest
+/// available version that satisfies it — the closest to what was asked,
+/// never below — and records a [`Deviation`] whenever that is not the exact
+/// written string.
+///
+/// Wildcard grammar is per scheme:
+/// - **Debian**: `<upstream>-*` — any revision of that upstream
+///   (`1.7.1-*` matches `1.7.1-1`, `1.7.1-3ubuntu0.1`; not `1.7.2-1`).
+/// - **SemVer**: `<partial>.*` — delegated to `semver::VersionReq`
+///   (`1.7.*` is `>=1.7.0, <1.8.0`, and excludes pre-releases).
+/// - **Generic**: `<prefix>.*` — a lexical family match on the version
+///   string (`1.7.*` matches `1.7.0`, `1.7.11`; not `1.70.0`), since generic
+///   versions have no numeric-increment semantics.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Tolerance {
+    /// A plain pin: the membership set is every version at or above it.
+    Pin(Version),
+    /// A SemVer point-release wildcard, as a `VersionReq`.
+    SemverRange(semver::VersionReq),
+    /// A Debian revision wildcard: every version whose upstream (epoch kept,
+    /// revision dropped) equals this string.
+    DebianUpstream(String),
+    /// A generic lexical wildcard: every version string starting with this
+    /// prefix (which ends in `.`).
+    GenericPrefix(String),
+}
+
+impl Tolerance {
+    /// Whether `v` is an acceptable version for this tolerant spec.
+    fn matches(&self, v: &Version) -> bool {
+        match self {
+            // Any version at or above the pin; resolution takes the closest.
+            Tolerance::Pin(pin) => v >= pin,
+            Tolerance::SemverRange(req) => v.as_semver().is_some_and(|sv| req.matches(sv)),
+            Tolerance::DebianUpstream(upstream) => debian_upstream(v.as_str()) == upstream,
+            Tolerance::GenericPrefix(prefix) => v.as_str().starts_with(prefix.as_str()),
+        }
+    }
+
+    /// The deviation kind to record when a resolved version is not the exact
+    /// written spec: a pin that rounded up is [`Deviation::NextHigher`]; a
+    /// wildcard that resolved to a concrete version is
+    /// [`Deviation::WithinRange`].
+    fn deviation_kind(&self) -> Deviation {
+        match self {
+            Tolerance::Pin(_) => Deviation::NextHigher,
+            _ => Deviation::WithinRange,
+        }
+    }
+}
+
 /// The interpreted spec: the exact kernel each policy resolves with. Keeping
 /// the policy and its parsed form in one enum makes an invalid pairing
 /// (e.g. `Range` with a lone pin) unrepresentable.
@@ -176,7 +276,7 @@ fn parse_comparator(clause: &str, scheme: Scheme) -> Result<Comparator, SpecErro
 enum Plan {
     Exact(Version),
     Range(Constraint),
-    Tolerant(Version),
+    Tolerant(Tolerance),
 }
 
 /// A version spec: the written string, the scheme it is read under, and the
@@ -196,7 +296,7 @@ impl Spec {
         let raw = raw.into();
         let plan = match policy {
             Policy::Exact => Plan::Exact(Version::parse(&raw, scheme)?),
-            Policy::Tolerant => Plan::Tolerant(Version::parse(&raw, scheme)?),
+            Policy::Tolerant => Plan::Tolerant(parse_tolerance(&raw, scheme)?),
             Policy::Range => Plan::Range(Constraint::parse(&raw, scheme)?),
         };
         Ok(Spec { raw, scheme, plan })
@@ -242,17 +342,22 @@ impl Spec {
                 .max()
                 .map(|v| Resolution::exact(v.clone()))
                 .ok_or_else(|| self.unsatisfiable()),
-            Plan::Tolerant(pin) => {
-                // The smallest available version at or above the pin, never
-                // below it (§7). When the pin itself is present it is that
-                // minimum (nothing smaller is `>= pin`), so it wins with no
-                // deviation; otherwise bosun rounds up to the closest higher.
-                match available.iter().filter(|v| *v >= pin).min() {
+            Plan::Tolerant(tol) => {
+                // The smallest available version satisfying the tolerant spec
+                // — the closest to what was asked, never below it (§7). A pin
+                // present, or a wildcard whose floor is present, is that
+                // minimum. The §11 tie-break ("prefer the same major.minor
+                // within next-higher") falls out for free: among candidates
+                // the minimum is the same-minor one when it exists.
+                match available.iter().filter(|v| tol.matches(v)).min() {
                     None => Err(self.unsatisfiable()),
-                    Some(v) if v == pin => Ok(Resolution::exact(v.clone())),
+                    // No deviation only when the resolved version is exactly
+                    // the written spec (a pin that was present); a wildcard is
+                    // a pattern, so it always records its concrete choice.
+                    Some(v) if v.as_str() == self.raw => Ok(Resolution::exact(v.clone())),
                     Some(v) => Ok(Resolution {
                         selected: v.clone(),
-                        deviation: Some(Deviation::NextHigher),
+                        deviation: Some(tol.deviation_kind()),
                     }),
                 }
             }
@@ -433,6 +538,118 @@ mod tests {
             spec.resolve(&available),
             Err(ResolveError::Unsatisfiable { .. })
         ));
+    }
+
+    // --- tolerant-with-range (§7) ------------------------------------------
+
+    #[test]
+    fn tolerant_debian_revision_wildcard_picks_closest_revision() {
+        let spec = Spec::new("1.7.1-*", Scheme::Debian, Policy::Tolerant).unwrap();
+        let available = vers(
+            Scheme::Debian,
+            &["1.7.0-1", "1.7.1-1", "1.7.1-3ubuntu0.1", "1.7.2-1"],
+        );
+        let r = spec.resolve(&available).unwrap();
+        // Any revision of upstream 1.7.1; the lowest such revision is closest.
+        assert_eq!(r.selected.as_str(), "1.7.1-1");
+        assert_eq!(r.deviation, Some(Deviation::WithinRange));
+    }
+
+    #[test]
+    fn tolerant_debian_wildcard_excludes_other_upstreams() {
+        let spec = Spec::new("1.7.1-*", Scheme::Debian, Policy::Tolerant).unwrap();
+        // Only a different upstream is available: nothing matches.
+        let available = vers(Scheme::Debian, &["1.7.0-9", "1.7.2-1"]);
+        assert!(matches!(
+            spec.resolve(&available),
+            Err(ResolveError::Unsatisfiable { .. })
+        ));
+    }
+
+    #[test]
+    fn tolerant_semver_point_release_wildcard_picks_lowest_patch() {
+        let spec = Spec::new("1.7.*", Scheme::Semver, Policy::Tolerant).unwrap();
+        let available = vers(Scheme::Semver, &["1.6.9", "1.7.0", "1.7.5", "1.8.0"]);
+        let r = spec.resolve(&available).unwrap();
+        assert_eq!(r.selected.as_str(), "1.7.0");
+        assert_eq!(r.deviation, Some(Deviation::WithinRange));
+    }
+
+    #[test]
+    fn tolerant_semver_wildcard_rounds_up_when_floor_absent() {
+        let spec = Spec::new("1.7.*", Scheme::Semver, Policy::Tolerant).unwrap();
+        let available = vers(Scheme::Semver, &["1.7.3", "1.7.5"]);
+        assert_eq!(spec.resolve(&available).unwrap().selected.as_str(), "1.7.3");
+    }
+
+    #[test]
+    fn tolerant_semver_wildcard_excludes_prerelease() {
+        let spec = Spec::new("1.7.*", Scheme::Semver, Policy::Tolerant).unwrap();
+        let available = vers(Scheme::Semver, &["1.7.0-rc1", "1.7.0"]);
+        assert_eq!(spec.resolve(&available).unwrap().selected.as_str(), "1.7.0");
+    }
+
+    #[test]
+    fn tolerant_generic_prefix_wildcard_matches_family() {
+        let spec = Spec::new("1.7.*", Scheme::Generic, Policy::Tolerant).unwrap();
+        let available = vers(Scheme::Generic, &["1.6.9", "1.7.0", "1.7.11", "1.70.0"]);
+        let r = spec.resolve(&available).unwrap();
+        // 1.70.0 is a sibling, not a point release of 1.7; lowest 1.7.x wins.
+        assert_eq!(r.selected.as_str(), "1.7.0");
+        assert_eq!(r.deviation, Some(Deviation::WithinRange));
+    }
+
+    #[test]
+    fn tolerant_pin_roundup_prefers_same_minor() {
+        // §11 tie-break: 10.2.5 (same minor) is closer than 10.3.0.
+        let spec = Spec::new("10.2.0", Scheme::Semver, Policy::Tolerant).unwrap();
+        let available = vers(Scheme::Semver, &["10.2.5", "10.3.0"]);
+        let r = spec.resolve(&available).unwrap();
+        assert_eq!(r.selected.as_str(), "10.2.5");
+        assert_eq!(r.deviation, Some(Deviation::NextHigher));
+    }
+
+    #[test]
+    fn tolerant_debian_rejects_malformed_wildcard() {
+        for raw in [
+            "1.7.*", // Debian wildcards are `upstream-*`, not `.*`
+            "*",     // no upstream
+            "-*",    // empty upstream
+            "1.*-*", // upstream itself contains a wildcard
+        ] {
+            assert!(
+                matches!(
+                    Spec::new(raw, Scheme::Debian, Policy::Tolerant),
+                    Err(SpecError::InvalidRange(_))
+                ),
+                "expected InvalidRange for {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tolerant_generic_rejects_malformed_wildcard() {
+        for raw in [
+            "1.7*", // no dot before the wildcard
+            "*",    // no prefix
+            ".*",   // prefix is only a dot
+        ] {
+            assert!(
+                matches!(
+                    Spec::new(raw, Scheme::Generic, Policy::Tolerant),
+                    Err(SpecError::InvalidRange(_))
+                ),
+                "expected InvalidRange for {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn deviation_within_range_serializes_kebab_case() {
+        assert_eq!(
+            serde_json::to_string(&Deviation::WithinRange).unwrap(),
+            "\"within-range\""
+        );
     }
 
     // --- spec parsing ------------------------------------------------------
