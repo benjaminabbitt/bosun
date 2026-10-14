@@ -1139,6 +1139,10 @@ remote indexes. Traits stay ready; nothing is stubbed.
   injected (the CLI supplies them from bosun-io). geteuid comes via `rustix`; no `unsafe`.
 - Every slice's gate is literally `cargo clippy --workspace --all-targets -- -D warnings`
   plus `cargo test --workspace`, re-run by the orchestrator before landing.
+- Steps: `Run { argv, env, scope }` (argv is `Vec<String>`; `Command` carries `env`, e.g.
+  `DEBIAN_FRONTEND=noninteractive`), `Fetch`, `Extract`. Mutating `Installer` methods return
+  `Steps`; the installed version is read back with `verify_installed` after execution, and
+  state is written only from that. The `StepExecutor` lives in bosun-host.
 - `Arch` is amd64/arm64 only; `Os` uses Docker's spelling (`darwin`).
 
 **Slice status:**
@@ -1156,7 +1160,8 @@ remote indexes. Traits stay ready; nothing is stubbed.
 | 5-1 | bosun-io: lockfile + state JSON, FileStateStore, user config | landed; golden + round-trip tests; mutation deferred to 13 |
 | 5-2 | bosun-io: manifest + manifestHash; transactional StateStore on std file locks | landed; 106 workspace tests; hash proven comment-insensitive |
 | 6 | bosun-host: LinuxMachine/FakeMachine, os-release, privilege, probe registry | landed; 115 workspace tests; mutation os_release+machine 21/22 (miss: host-I/O `detect()` wrapper) |
-| 7 | backends apt, cargo, github-release + step-list Installer contract (§5.1) | in progress |
+| 7-1 | step-list Installer contract, host StepExecutor, apt backend (§5.1) | landed; 136 tests; mutation apt+executor 33/33 viable caught |
+| 7-2 | cargo + github-release backends; executor hardening (atomic binary write, regular-file members) | in progress |
 | 8–13 | resolve, apply, cli, acceptance, dogfood, quality | not started |
 
 **Active implementor:** `lame-wide-chant` (worktree branch `ctxloom/lame-wide-chant`), one
