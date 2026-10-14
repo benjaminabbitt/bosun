@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 
 use crate::model::{BackendId, Checksum, Claim, Origin, PackageId, SourceId};
 use crate::platform::Target;
-use crate::policy::{Deviation, Spec};
+use crate::spec::Spec;
 use crate::version::Version;
 
 /// A package keyed by target, generic over its package-level meta `M` and its
@@ -58,8 +58,6 @@ pub struct LockLeaf {
     pub spec: Option<Spec>,
     /// The exact version selected for this target.
     pub resolved: Version,
-    /// Present only when `resolved` differs from an exact spec (§7).
-    pub deviation: Option<Deviation>,
     /// For repo-bound backends: when the index it resolved against was
     /// fetched (§4.5). Opaque timestamp text for M1.
     pub index_snapshot: Option<String>,
@@ -120,7 +118,6 @@ mod tests {
     use super::*;
     use crate::model::Scope;
     use crate::platform::{Arch, Os};
-    use crate::policy::Policy;
     use crate::version::Scheme;
     use std::path::PathBuf;
 
@@ -147,14 +144,13 @@ mod tests {
 
         let lock: LockPackage = Package {
             name: "jq".into(),
-            meta: Spec::new("1.7.1-3", Scheme::Debian, Policy::Tolerant).unwrap(),
+            meta: Spec::new(">=1.7.1|<1.7.2~", "deb").unwrap(),
             targets: BTreeMap::from([(
                 t,
                 LockLeaf {
                     placement: placement(),
                     spec: None,
                     resolved: ver("1.7.1-3ubuntu0.1", Scheme::Debian),
-                    deviation: Some(Deviation::NextHigher),
                     index_snapshot: Some("2026-10-13T19:00:00Z".into()),
                     checksum: None,
                 },
@@ -172,8 +168,7 @@ mod tests {
                     origin: Origin::Installed,
                     claimed_by: vec![Claim {
                         manifest: PathBuf::from("/w/verprop/bosun.yaml"),
-                        spec: "1.7.1-3".into(),
-                        policy: Policy::Tolerant,
+                        spec: ">=1.7.1|<1.7.2~".into(),
                         user: None,
                     }],
                 },
@@ -185,7 +180,7 @@ mod tests {
         assert_eq!(lock.name, state.name);
         assert_eq!(lock.targets[&t].placement, state.targets[&t].placement);
         assert_eq!(lock.targets[&t].resolved, state.targets[&t].installed);
-        assert_eq!(lock.meta.policy(), Policy::Tolerant);
+        assert_eq!(lock.meta.canonical(), "vers:deb/>=1.7.1|<1.7.2~");
     }
 
     #[test]

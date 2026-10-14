@@ -106,13 +106,14 @@ impl Version {
         self.scheme
     }
 
-    /// The parsed SemVer form, when this version is read under
-    /// [`Scheme::Semver`]. Used by the range engine to evaluate a
-    /// `semver::VersionReq`; `None` for every other scheme.
-    pub(crate) fn as_semver(&self) -> Option<&semver::Version> {
+    /// Whether this version is a pre-release of its final form: a SemVer
+    /// pre-release segment, or a Debian/generic `~` chunk (which sorts below
+    /// the release). Selection never picks one unless a spec names it (§5.6).
+    pub fn is_prerelease(&self) -> bool {
         match &self.parsed {
-            Parsed::Semver(v) => Some(v),
-            _ => None,
+            Parsed::Semver(v) => !v.pre.is_empty(),
+            Parsed::Debian => self.raw.contains('~'),
+            Parsed::Generic(segs) => segs.iter().any(|s| matches!(s, Segment::Tilde)),
         }
     }
 

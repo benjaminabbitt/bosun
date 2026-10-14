@@ -1,0 +1,133 @@
+{
+  "$schema": "https://packageurl.org/schemas/vers-test.schema-0.2.json",
+  "tests": [
+    {
+      "description": "Simple ASCII ordering (uppercase < lowercase)",
+      "test_group": "required",
+      "test_type": "comparison",
+      "input": {
+        "input_scheme": "lexicographic",
+        "versions": [
+          "A",
+          "a"
+        ]
+      },
+      "expected_output": [
+        "A",
+        "a"
+      ]
+    },
+    {
+      "description": "Prefix ordering: shorter prefix sorts first",
+      "test_group": "required",
+      "test_type": "comparison",
+      "input": {
+        "input_scheme": "lexicographic",
+        "versions": [
+          "aa",
+          "a"
+        ]
+      },
+      "expected_output": [
+        "a",
+        "aa"
+      ]
+    },
+    {
+      "description": "Composed vs decomposed (no normalisation): 'é' vs 'é' (e + combining acute)",
+      "test_group": "required",
+      "test_type": "comparison",
+      "input": {
+        "input_scheme": "lexicographic",
+        "versions": [
+          "é",
+          "e\u0301"
+        ]
+      },
+      "expected_output": [
+        "e\u0301",
+        "é"
+      ]
+    },
+    {
+      "description": "Composed vs decomposed: 'Å' vs 'Å' (A + combining ring)",
+      "test_group": "required",
+      "test_type": "comparison",
+      "input": {
+        "input_scheme": "lexicographic",
+        "versions": [
+          "Å",
+          "A\u030A"
+        ]
+      },
+      "expected_output": [
+        "A\u030A",
+        "Å"
+      ]
+    },
+    {
+      "description": "Multi-byte first-byte tie: 'ä' (U+00E4) vs 'é' (U+00E9) — same first UTF-8 byte, compare next byte",
+      "test_group": "required",
+      "test_type": "comparison",
+      "input": {
+        "input_scheme": "lexicographic",
+        "versions": [
+          "é",
+          "ä"
+        ]
+      },
+      "expected_output": [
+        "ä",
+        "é"
+      ]
+    },
+    {
+      "description": "Non-ASCII vs ASCII: emoji sorts after ASCII characters (first UTF-8 byte > ASCII)",
+      "test_group": "required",
+      "test_type": "comparison",
+      "input": {
+        "input_scheme": "lexicographic",
+        "versions": [
+          "z",
+          "😀"
+        ]
+      },
+      "expected_output": [
+        "z",
+        "😀"
+      ]
+    },
+    {
+      "description": "German sharp s vs 'ss' (no normalisation)",
+      "test_group": "required",
+      "test_type": "comparison",
+      "input": {
+        "input_scheme": "lexicographic",
+        "versions": [
+          "ß",
+          "ss"
+        ]
+      },
+      "expected_output": [
+        "ss",
+        "ß"
+      ]
+    },
+    {
+      "description": "Different multi-byte leading bytes: U+20AC (Euro) vs U+00E4 ('ä')",
+      "test_group": "required",
+      "test_type": "comparison",
+      "input": {
+        "input_scheme": "lexicographic",
+        "versions": [
+          "€",
+          "ä"
+        ]
+      },
+      "expected_output": [
+        "ä",
+        "€"
+      ]
+    }
+  ]
+}

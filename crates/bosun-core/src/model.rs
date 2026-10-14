@@ -7,7 +7,6 @@
 
 use std::path::PathBuf;
 
-use crate::policy::Policy;
 use crate::version::Version;
 
 /// A backend's stable identifier: `apt`, `cargo`, `github-release`, … (§5.3).
@@ -158,16 +157,14 @@ pub struct Installed {
 pub struct Checksum(pub String);
 
 /// One manifest's claim on a package (§4.6): where the manifest lives, the
-/// spec it asked for, its policy, and — in system-scope state — the OS user
-/// who claimed it.
+/// spec it asked for, and — in system-scope state — the OS user who claimed
+/// it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Claim {
     /// The manifest file that holds this claim.
     pub manifest: PathBuf,
-    /// The spec string the manifest asked for.
+    /// The spec string the manifest asked for (§5.6: a bare version or vers).
     pub spec: String,
-    /// The policy that spec is read under.
-    pub policy: Policy,
     /// The OS user who claimed it (system scope only; §4.6).
     pub user: Option<String>,
 }
