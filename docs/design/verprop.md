@@ -1018,6 +1018,13 @@ remote indexes. Traits stay ready; nothing is stubbed.
 - Error and log text lives in `errmsg` / `logmsg` constants; data-carrying thiserror
   variants use a named binding (`#[error("{kind}: {0}", kind = errmsg::X)]`).
 
+- **Lock and state share one generic type** (§4.6): `Package<Meta, Leaf>`, with
+  `LockPackage = Package<Spec, LockLeaf>` and `StatePackage = Package<(), StateLeaf>`; the
+  common backend/package/source sits in a `Placement` embedded in both leaves. `PackageId`
+  carries an optional opaque `kind` (brew cask, scoop bucket). The JSON wire format (field
+  renames, key order) is pinned in bosun-io, not in bosun-core.
+- `Arch` is amd64/arm64 only; `Os` uses Docker's spelling (`darwin`).
+
 **Slice status:**
 
 | slice | what | state |
@@ -1025,7 +1032,8 @@ remote indexes. Traits stay ready; nothing is stubbed.
 | 0 | workspace skeleton, justfile, bacon.toml, LICENSE | landed |
 | 1 | bosun-core version model (§6) | landed; 24 tests, mutation 25/25 viable caught |
 | 2 | bosun-core Spec/Policy, exact/range/tolerant (§7) | landed; 46 tests, mutation 17/17 viable caught |
-| 3–13 | domain, ports, io, host, backends, resolve, apply, cli, acceptance, dogfood, quality | not started |
+| 3 | bosun-core platform/backend/record value types (§4.5, §4.6, §5.4) | landed; 64 tests, mutation 18/18 viable caught |
+| 4–13 | ports, io, host, backends, resolve, apply, cli, acceptance, dogfood, quality | not started |
 
 **Active implementor:** `lame-wide-chant` (worktree branch `ctxloom/lame-wide-chant`), one
 slice per turn, reporting to the orchestrator after each. Previous: `hoary-quick-elm` (crashed
