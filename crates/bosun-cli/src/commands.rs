@@ -141,12 +141,20 @@ pub struct StatusOutput {
 struct PackageStatus {
     name: String,
     backend: String,
+    /// The installed version, if known: from bosun state when managed, else the
+    /// live version the backend reports (which may be unknown, e.g. github).
     installed: Option<String>,
+    /// Recorded in bosun state (bosun installed or accepted it).
+    managed: bool,
+    /// Installed on the machine at all (state or a live `verify_installed`).
+    present: bool,
     wanted: String,
     up_to_date: bool,
 }
 
-/// Report installed-vs-wanted for each applicable package.
+/// Report installed-vs-wanted for each applicable package. A package present on
+/// the machine but not in bosun state is shown as present-but-unmanaged (it
+/// would be accepted, §4.6), not "not installed".
 pub fn status(
     env: &Env,
     path: Option<PathBuf>,
@@ -169,23 +177,36 @@ pub fn status(
 
     let mut packages = Vec::new();
     let mut diagnostics = Vec::new();
-    for entry in resolution.outcomes {
-        match entry.outcome {
+    for entry in &resolution.outcomes {
+        match &entry.outcome {
             Outcome::Resolved {
-                backend, version, ..
+                target,
+                backend,
+                version,
             } => {
-                let installed = installed_version(&[&system, &user], &entry.name);
-                let up_to_date = installed.as_deref() == Some(version.as_str());
+                // bosun state is authoritative for what it manages; a package it
+                // does not record is checked live on the machine (§4.6 A).
+                let managed_version = installed_version(&[&system, &user], &entry.name);
+                let (installed, managed, present) = match managed_version {
+                    Some(v) => (Some(v), true, true),
+                    None => match live_presence(env, &resolution, &entry.name, target, backend) {
+                        Some(v) => (v, false, true),
+                        None => (None, false, false),
+                    },
+                };
+                let up_to_date = managed && installed.as_deref() == Some(version.as_str());
                 packages.push(PackageStatus {
-                    name: entry.name,
+                    name: entry.name.clone(),
                     backend: backend.as_str().to_string(),
                     installed,
+                    managed,
+                    present,
                     wanted: version.as_str().to_string(),
                     up_to_date,
                 });
             }
             Outcome::NotApplicable(na) => {
-                diagnostics.push(format!("{}: not applicable ({})", entry.name, na_text(&na)))
+                diagnostics.push(format!("{}: not applicable ({})", entry.name, na_text(na)))
             }
             Outcome::Unsatisfiable { spec, available } => diagnostics.push(format!(
                 "{}: unsatisfiable {spec} (available: {available})",
@@ -199,14 +220,49 @@ pub fn status(
     })
 }
 
+/// Whether a package absent from bosun state is nonetheless present on the
+/// machine, by asking the backend directly (§4.6 A). `Some(version)` is present
+/// (version `None` when the backend cannot read it, e.g. github); `None` is
+/// absent. A backend or lock entry we cannot find is treated as absent.
+fn live_presence(
+    env: &Env,
+    resolution: &Resolution,
+    name: &str,
+    target: &Target,
+    backend: &BackendId,
+) -> Option<Option<String>> {
+    let installer = env.installer_for(backend)?;
+    let purl = resolution
+        .lock
+        .packages
+        .iter()
+        .find(|p| p.name == name)
+        .and_then(|p| p.targets.get(target))
+        .map(|leaf| leaf.placement.purl.clone())?;
+    match installer.verify_installed(&Ref::new(purl)).ok()? {
+        Installed::Present { version } => Some(version.map(|v| v.as_str().to_string())),
+        Installed::Absent => None,
+    }
+}
+
 impl Render for StatusOutput {
     fn text(&self) -> String {
         let mut lines = Vec::new();
         for p in &self.packages {
-            let state = match &p.installed {
-                None => "not installed".to_string(),
-                Some(v) if p.up_to_date => format!("{v} (up to date)"),
-                Some(v) => format!("{v} → {} (outdated)", p.wanted),
+            let state = if !p.present {
+                "not installed".to_string()
+            } else if !p.managed {
+                // Present outside bosun: would be accepted, never reinstalled.
+                match &p.installed {
+                    Some(v) => format!("{v} present, not managed (would be accepted)"),
+                    None => "present, not managed (would be accepted)".to_string(),
+                }
+            } else {
+                match &p.installed {
+                    Some(v) if p.up_to_date => format!("{v} (up to date)"),
+                    Some(v) => format!("{v} → {} (outdated)", p.wanted),
+                    None => "present, version unknown".to_string(),
+                }
             };
             lines.push(format!("{:<16} {:<8} {}", p.name, p.backend, state));
         }
@@ -471,6 +527,10 @@ pub fn install_plan(env: &Env, opts: InstallOpts, pref: &[BackendId]) -> Result<
     // lock) root-owned system state it has no business reading.
     let mut state = ScopeCache::new(env);
 
+    // §4.6: a claim records the manifest by its canonical absolute path, so two
+    // projects' `./bosun.yaml` never collide and uninstall/prune can match it.
+    let claim_path = canonical_manifest(&file);
+
     let (managed, carried) = if opts.frozen {
         let lock_path = lock_path(&file);
         let lock = read_lock(&lock_path)?.ok_or_else(|| {
@@ -479,14 +539,11 @@ pub fn install_plan(env: &Env, opts: InstallOpts, pref: &[BackendId]) -> Result<
                 lock_path.display()
             ))
         })?;
-        (
-            managed_from_lock(env, &file, &lock, &mut state)?,
-            Vec::new(),
-        )
+        managed_from_lock(env, &claim_path, &lock, &mut state)?
     } else {
         let resolution = resolve(&manifest, &hash, &env.host(), &env.resolvables(), pref)
             .map_err(|e| CliError::Resolve(e.to_string()))?;
-        managed_from_resolution(env, &file, &resolution, &mut state)?
+        managed_from_resolution(env, &claim_path, &resolution, &mut state)?
     };
 
     build_install_plan(&managed, carried).map_err(|e| CliError::Resolve(e.to_string()))
@@ -616,8 +673,9 @@ fn managed_from_lock<'a>(
     manifest_path: &Path,
     lock: &LockDocument,
     state: &mut ScopeCache,
-) -> Result<Vec<Managed<'a>>, CliError> {
+) -> Result<(Vec<Managed<'a>>, Vec<Diagnostic>), CliError> {
     let mut managed = Vec::new();
+    let mut diagnostics = Vec::new();
     for pkg in &lock.packages {
         // The leaf for this machine's platform, or the platform-independent one.
         let leaf = match pkg
@@ -642,6 +700,23 @@ fn managed_from_lock<'a>(
             .map_err(|e| CliError::Resolve(e.to_string()))?;
         // §4.6 A: present outside bosun → accepted, not reinstalled.
         let current = current_for(doc, &pkg.name, installer, &purl)?;
+        // §4.6/§7 --frozen: a package bosun does not own, installed at a version
+        // other than the one the lock pins, is a conflict bosun will not resolve
+        // by changing it. Error and skip; the error blocks apply.
+        if let Current::Present {
+            version: Some(v),
+            origin: Origin::Accepted,
+        } = &current
+        {
+            if v.as_str() != leaf.resolved.as_str() {
+                diagnostics.push(Diagnostic::FrozenAcceptedConflict {
+                    name: pkg.name.clone(),
+                    installed: v.as_str().to_string(),
+                    locked: leaf.resolved.as_str().to_string(),
+                });
+                continue;
+            }
+        }
         managed.push(Managed {
             name: pkg.name.clone(),
             purl,
@@ -653,7 +728,7 @@ fn managed_from_lock<'a>(
             installer,
         });
     }
-    Ok(managed)
+    Ok((managed, diagnostics))
 }
 
 fn not_applicable_diagnostic(name: &str, na: &NotApplicable) -> Diagnostic {
@@ -763,10 +838,21 @@ fn lock_path(manifest_file: &Path) -> PathBuf {
 /// (uninstall works after the repo is gone, §9).
 fn claim_manifest_path(path: Option<PathBuf>) -> PathBuf {
     let base = path.unwrap_or_else(|| PathBuf::from("."));
-    match base.extension().and_then(|e| e.to_str()) {
+    let file = match base.extension().and_then(|e| e.to_str()) {
         Some("yaml") | Some("yml") => base,
         _ => base.join("bosun.yaml"),
-    }
+    };
+    canonical_manifest(&file)
+}
+
+/// The canonical absolute form of a manifest path for a claim (§4.6): resolve
+/// symlinks when the file exists, else make it absolute without resolving (the
+/// repo is gone — uninstall/prune then match the path bosun recorded while it
+/// still existed, or prune's "manifest no longer exists" check takes over, §9).
+fn canonical_manifest(file: &Path) -> PathBuf {
+    fs::canonicalize(file)
+        .or_else(|_| std::path::absolute(file))
+        .unwrap_or_else(|_| file.to_path_buf())
 }
 
 impl Render for Plan {

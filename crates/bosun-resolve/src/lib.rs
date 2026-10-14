@@ -288,6 +288,16 @@ fn resolve_entry(
         }
     };
 
+    // §12: record the backend's enforced checksum when it has one (github-release
+    // reads it from the release's checksums.txt; apt/cargo have none).
+    let checksum = chosen
+        .index
+        .checksum(&Ref::new(purl.clone()), &version, &target)
+        .map_err(|source| ResolveError::Query {
+            name: entry.name.clone(),
+            source,
+        })?;
+
     let package: LockPackage = Package {
         name: entry.name.clone(),
         meta: spec,
@@ -301,7 +311,7 @@ fn resolve_entry(
                 spec: None,
                 resolved: version.clone(),
                 index_snapshot: None,
-                checksum: None,
+                checksum,
             },
         )]),
     };

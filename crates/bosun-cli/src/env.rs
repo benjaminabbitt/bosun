@@ -355,7 +355,7 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
                 purl_type: b.purl_type,
                 vers_type: b.vers_type.clone(),
                 platform_independent: b.platform_independent,
-                index: Box::new(FixtureIndex::new(b.vers_type, b.available)),
+                index: Box::new(FixtureIndex::new(b.vers_type, b.available, b.checksums)),
                 installer: Box::new(installer),
             })
         })

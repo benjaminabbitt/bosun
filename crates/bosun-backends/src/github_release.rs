@@ -22,7 +22,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bosun_core::{
-    Arch, BackendId, Capabilities, Installed, Os, Ref, Scheme, Scope, Source, Target, Version,
+    Arch, BackendId, Capabilities, Checksum, Installed, Os, Ref, Scheme, Scope, Source, Target,
+    Version,
 };
 use bosun_ports::{
     Backend, BackendFactory, HostInfo, HttpFetcher, HttpRequest, HttpResponse, Index, Installer,
@@ -236,6 +237,45 @@ impl GithubReleaseBackend {
         })
     }
 
+    /// Resolve the plain archive for (binary, os, arch) at `version` and its
+    /// enforced sha256, read from the release's `checksums.txt` (§12). Returns
+    /// `(download_url, archive_name, sha256)`. Shared by `install_exact` (which
+    /// fetches and extracts it) and the query-side `checksum` (which records it).
+    fn archive_and_checksum(
+        &self,
+        pkg: &Ref,
+        version: &Version,
+    ) -> Result<(String, String, String), PortError> {
+        let repo = pkg.purl.native_id();
+        let binary = Self::binary_of(pkg);
+        let release = self.fetch_release(&repo, version)?;
+        let expected = self.expected_asset(pkg, &binary, version);
+        let archive = self.pick_archive(&expected, &release.assets)?;
+
+        // Enforce the checksum (§12): checksums.txt must exist and list it.
+        let sums = release
+            .assets
+            .iter()
+            .find(|a| a.name == "checksums.txt")
+            .ok_or_else(|| PortError::Backend {
+                detail: format!("no checksums.txt in {repo} release for {binary}"),
+            })?;
+        let resp = self.fetcher.fetch(&api_request(
+            &sums.browser_download_url,
+            self.token.as_deref(),
+        ))?;
+        check_status(&sums.browser_download_url, &resp)?;
+        let sha256 = Self::checksum_for(&String::from_utf8_lossy(&resp.body), &archive.name)
+            .ok_or_else(|| PortError::Backend {
+                detail: format!("{} not listed in checksums.txt", archive.name),
+            })?;
+        Ok((
+            archive.browser_download_url.clone(),
+            archive.name.clone(),
+            sha256,
+        ))
+    }
+
     fn fetch_release(&self, repo: &str, version: &Version) -> Result<Release, PortError> {
         // Try a `v`-prefixed tag first, then the bare version.
         for tag in [
@@ -291,6 +331,16 @@ impl Index for GithubReleaseBackend {
         }
         Ok(versions)
     }
+
+    fn checksum(
+        &self,
+        pkg: &Ref,
+        version: &Version,
+        _target: &Target,
+    ) -> Result<Option<Checksum>, PortError> {
+        let (_, _, sha256) = self.archive_and_checksum(pkg, version)?;
+        Ok(Some(Checksum(sha256)))
+    }
 }
 
 impl Installer for GithubReleaseBackend {
@@ -313,34 +363,12 @@ impl Installer for GithubReleaseBackend {
     }
 
     fn install_exact(&self, pkg: &Ref, version: &Version) -> Result<Steps, PortError> {
-        let repo = pkg.purl.native_id();
         let binary = Self::binary_of(pkg);
-        let release = self.fetch_release(&repo, version)?;
-        let expected = self.expected_asset(pkg, &binary, version);
-        let archive = self.pick_archive(&expected, &release.assets)?;
-
-        // Enforce the checksum (§12): checksums.txt must exist and list it.
-        let sums = release
-            .assets
-            .iter()
-            .find(|a| a.name == "checksums.txt")
-            .ok_or_else(|| PortError::Backend {
-                detail: format!("no checksums.txt in {repo} release for {binary}"),
-            })?;
-        let resp = self.fetcher.fetch(&api_request(
-            &sums.browser_download_url,
-            self.token.as_deref(),
-        ))?;
-        check_status(&sums.browser_download_url, &resp)?;
-        let sha256 = Self::checksum_for(&String::from_utf8_lossy(&resp.body), &archive.name)
-            .ok_or_else(|| PortError::Backend {
-                detail: format!("{} not listed in checksums.txt", archive.name),
-            })?;
-
-        let download = self.bin_dir.join(".bosun-cache").join(&archive.name);
+        let (url, archive_name, sha256) = self.archive_and_checksum(pkg, version)?;
+        let download = self.bin_dir.join(".bosun-cache").join(&archive_name);
         Ok(vec![
             Step::Fetch {
-                url: archive.browser_download_url.clone(),
+                url,
                 sha256,
                 dest: download.clone(),
             },
@@ -564,6 +592,42 @@ mod tests {
                     mode: 0o755,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn checksum_resolves_the_enforced_sha_from_the_release() {
+        // §12/slice 12-1: the query side surfaces the archive's checksum so
+        // `lock` records it; it is the same sha the Fetch step enforces.
+        let release = ctxloom_v064();
+        let sums_url = release
+            .assets
+            .iter()
+            .find(|a| a.name == "checksums.txt")
+            .unwrap()
+            .browser_download_url
+            .clone();
+        let fetcher = Arc::new(
+            FakeHttpFetcher::new()
+                .with_body(
+                    "https://api.github.com/repos/ctxloom/ctxloom/releases/tags/v0.6.4",
+                    serde_json::to_string(&json_of(&release)).unwrap(),
+                )
+                .with_body(&sums_url, CHECKSUMS),
+        );
+        let b = backend(fetcher, PathBuf::from("/b"));
+        let got = b
+            .checksum(
+                &gh("pkg:github/ctxloom/ctxloom"),
+                &sem("0.6.4"),
+                &"linux/amd64".parse().unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            got,
+            Some(Checksum(
+                "89a356c697c9458929ecf851bc85da3a9548d19aa978837b54c0b0b27100810f".to_string()
+            ))
         );
     }
 

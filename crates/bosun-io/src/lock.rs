@@ -8,7 +8,7 @@ use std::path::Path;
 
 use bosun_core::record::{LockDocument, LockLeaf, LockPackage, Package, Placement, TargetLock};
 use bosun_core::vers::scheme_for_type;
-use bosun_core::{BackendId, Checksum, Purl, Spec, Target, Version};
+use bosun_core::{BackendId, Checksum, Purl, Scheme, Spec, Target, Version};
 use serde::{Deserialize, Serialize};
 
 use crate::error::IoError;
@@ -117,10 +117,13 @@ impl LockDoc {
             .into_iter()
             .map(|p| {
                 let meta = spec(&p.spec)?;
+                // Versions compare under the spec's vers type (§6), which for
+                // github (purl type `github`) is semver — not the purl type.
+                let scheme = scheme_for_type(meta.range().ty());
                 let leaves = p
                     .targets
                     .into_iter()
-                    .map(|(t, e)| Ok((parse_target(&t)?, leaf(e)?)))
+                    .map(|(t, e)| Ok((parse_target(&t)?, leaf(e, scheme)?)))
                     .collect::<Result<_, IoError>>()?;
                 Ok(Package {
                     name: p.name,
@@ -137,11 +140,10 @@ impl LockDoc {
     }
 }
 
-fn leaf(e: LeafEntry) -> Result<LockLeaf, IoError> {
+fn leaf(e: LeafEntry, scheme: Scheme) -> Result<LockLeaf, IoError> {
     let purl: Purl = e.purl.parse().map_err(|err| IoError::Convert {
         detail: format!("purl {:?}: {err}", e.purl),
     })?;
-    let scheme = scheme_for_type(purl.ty());
     let resolved = Version::parse(&e.resolved, scheme).map_err(|err| IoError::Convert {
         detail: format!("version {:?}: {err}", e.resolved),
     })?;
@@ -271,5 +273,39 @@ mod tests {
             from_json(text, Path::new("bosun.lock")),
             Err(IoError::LockfileVersion { found: 2, max: 1 })
         ));
+    }
+
+    #[test]
+    fn resolved_version_reads_under_the_spec_vers_scheme_not_the_purl_type() {
+        // Regression (slice 12-1 dogfood): a github lock's purl type is `github`
+        // (Generic scheme) but its versions compare as semver. The resolved
+        // version must parse under the spec's vers type, or `--frozen` reports
+        // the locked version excluded by its own spec (cross-scheme `Version`
+        // comparison orders by scheme rank, never equal).
+        let text = r#"{
+  "lockfileVersion": 1,
+  "targets": { "linux/amd64": { "manifestHash": "sha256:abcd" } },
+  "packages": [
+    {
+      "name": "ctxloom",
+      "spec": "vers:semver/>=0.6.4|<0.7.0",
+      "targets": {
+        "linux/amd64": {
+          "backend": "github-release",
+          "purl": "pkg:github/ctxloom/ctxloom?binary=ctxloom",
+          "resolved": "0.6.4"
+        }
+      }
+    }
+  ]
+}"#;
+        let doc = from_json(text, Path::new("bosun.lock")).unwrap();
+        let pkg = &doc.packages[0];
+        let leaf = pkg.targets.values().next().unwrap();
+        assert_eq!(leaf.resolved.scheme(), Scheme::Semver);
+        assert!(
+            pkg.meta.range().contains(&leaf.resolved),
+            "the locked version must satisfy its own spec"
+        );
     }
 }

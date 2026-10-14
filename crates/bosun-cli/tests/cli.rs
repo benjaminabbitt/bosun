@@ -923,3 +923,138 @@ fn install_honours_an_explicit_scope() {
         "applied"
     );
 }
+
+// --- 12-1 dogfood regressions ---------------------------------------------
+
+#[test]
+fn install_records_claims_with_an_absolute_manifest_path() {
+    // Bug 2 (§4.6): a claim's manifest is the canonical absolute path. Run from
+    // the project dir with no path argument, so the manifest resolves to the
+    // relative "./bosun.yaml" the dogfood used — the recorded claim must still
+    // be absolute, or two projects' "./bosun.yaml" collide.
+    let dir = apply_project(USER_MANIFEST);
+    bosun(dir.path())
+        .current_dir(dir.path())
+        .args(["install", "--yes"])
+        .assert()
+        .success();
+    let state: Value =
+        serde_json::from_str(&fs::read_to_string(state_file(dir.path())).unwrap()).unwrap();
+    let rg = state["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "ripgrep")
+        .unwrap();
+    let manifest = rg["targets"]["linux/amd64"]["claimedBy"][0]["manifest"]
+        .as_str()
+        .expect("a claim is recorded");
+    assert!(
+        Path::new(manifest).is_absolute(),
+        "claim manifest is not absolute: {manifest}"
+    );
+    assert!(manifest.ends_with("bosun.yaml"), "{manifest}");
+}
+
+#[test]
+fn lock_records_the_github_release_checksum() {
+    // Bug 3 (§12): for github-release the checksum is enforced and recorded.
+    let fixture = r#"{"os":"linux","arch":"amd64","privilege":"unelevated","user":"t",
+      "backends":[{"id":"github-release","version":"1.0.0","purl_type":"github","vers_type":"semver","platform_independent":false,
+        "scope":"user",
+        "available":{"ctxloom/ctxloom":["0.6.4"]},
+        "checksums":{"ctxloom/ctxloom":"89a356c697c9458929ecf851bc85da3a9548d19aa978837b54c0b0b27100810f"}}]}"#;
+    let manifest = "version: 1\ntargets: [linux/amd64]\npackages:\n  - name: ctxloom\n    spec: \">=0.6.4|<0.7.0\"\n    install:\n      linux: {backend: github-release, package: ctxloom/ctxloom}\n";
+    let dir = write_project(fixture, manifest);
+    bosun(dir.path())
+        .args(["lock"])
+        .arg(dir.path())
+        .assert()
+        .success();
+    let lock = fs::read_to_string(dir.path().join("bosun.lock")).unwrap();
+    assert!(
+        lock.contains("89a356c697c9458929ecf851bc85da3a9548d19aa978837b54c0b0b27100810f"),
+        "lock records the checksum: {lock}"
+    );
+    assert!(
+        lock.contains("\"checksum\""),
+        "checksum field present: {lock}"
+    );
+}
+
+#[test]
+fn status_shows_a_package_present_but_not_managed() {
+    // Bug 4: a package installed on the machine but absent from bosun state was
+    // reported "not installed"; it must show as present-but-unmanaged.
+    let fixture = r#"{"os":"linux","arch":"amd64","distro":{"id":"debian","codename":"trixie"},
+      "privilege":"unelevated","user":"ben",
+      "backends":[{"id":"apt","version":"2.6.1","purl_type":"deb","vers_type":"deb","platform_independent":false,
+        "scope":"system","supports_hold":true,
+        "available":{"jq":["1.7.1-6+deb13u1"]},"installed":{"jq":"1.7.1-6+deb13u1"}}]}"#;
+    let manifest = "version: 1\ntargets: [linux/amd64]\npackages:\n  - name: jq\n    spec: \">=1.6\"\n    install:\n      linux:debian: {backend: apt}\n";
+    let dir = write_project(fixture, manifest);
+    let text = bosun(dir.path())
+        .args(["--format", "text", "status"])
+        .arg(dir.path())
+        .assert()
+        .success();
+    let out = String::from_utf8_lossy(&text.get_output().stdout).to_string();
+    assert!(out.contains("present, not managed"), "status text: {out}");
+    assert!(
+        out.contains("1.7.1-6+deb13u1"),
+        "shows the live version: {out}"
+    );
+    let json_a = bosun(dir.path())
+        .args(["--format", "json", "status"])
+        .arg(dir.path())
+        .assert()
+        .success();
+    let json = stdout_json(&json_a.get_output().stdout);
+    let jq = json["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "jq")
+        .unwrap();
+    assert_eq!(jq["present"], true);
+    assert_eq!(jq["managed"], false);
+    assert_eq!(jq["installed"], "1.7.1-6+deb13u1");
+}
+
+#[test]
+fn frozen_refuses_an_accepted_package_at_a_different_version_than_the_lock() {
+    // Bug 5 (§7): --frozen with jq accepted (not bosun-owned) at u1 while the
+    // lock pins u2 is an error naming both versions; bosun will not change a
+    // package it does not own, and makes no change.
+    let fixture = r#"{"os":"linux","arch":"amd64","distro":{"id":"debian","codename":"trixie"},
+      "privilege":"unelevated","user":"ben",
+      "backends":[{"id":"apt","version":"2.6.1","purl_type":"deb","vers_type":"deb","platform_independent":false,
+        "scope":"system","supports_hold":true,
+        "available":{"jq":["1.7.1-6+deb13u1","1.7.1-6+deb13u2"]},"installed":{"jq":"1.7.1-6+deb13u1"}}]}"#;
+    let manifest = "version: 1\ntargets: [linux/amd64]\npackages:\n  - name: jq\n    spec: \">=1.6\"\n    install:\n      linux:debian: {backend: apt}\n";
+    let dir = write_project(fixture, manifest);
+    let lock = r#"{"lockfileVersion":1,"targets":{"linux/amd64":{"manifestHash":"sha256:x"}},
+      "packages":[{"name":"jq","spec":"vers:deb/>=1.6","targets":{"linux/amd64":{
+        "backend":"apt","purl":"pkg:deb/debian/jq?arch=amd64&distro=trixie","resolved":"1.7.1-6+deb13u2"}}}]}"#;
+    fs::write(dir.path().join("bosun.lock"), lock).unwrap();
+    let assert = bosun(dir.path())
+        .args(["--format", "json", "install"])
+        .arg(dir.path())
+        .args(["--plan", "--frozen"])
+        .assert()
+        .code(1);
+    let json = stdout_json(&assert.get_output().stdout);
+    let diags = json["diagnostics"].to_string();
+    assert!(
+        diags.contains("1.7.1-6+deb13u1") && diags.contains("1.7.1-6+deb13u2"),
+        "diagnostic names both versions: {json}"
+    );
+    assert!(
+        json["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|a| a["action"] != "install" && a["action"] != "upgrade"),
+        "no change to an unowned package: {json}"
+    );
+}

@@ -175,6 +175,15 @@ fn diag_view(d: &Diagnostic) -> DiagView<'_> {
             name.as_str(),
             Some(backend.as_str().to_string()),
         ),
+        Diagnostic::FrozenAcceptedConflict {
+            name,
+            installed,
+            locked,
+        } => (
+            "frozen-accepted-conflict",
+            name.as_str(),
+            Some(format!("installed {installed}, lock pins {locked}")),
+        ),
     };
     DiagView {
         diagnostic,

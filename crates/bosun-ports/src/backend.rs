@@ -6,7 +6,9 @@
 //! other than the current machine (§4.7): [`Index`] (query side) may run
 //! anywhere; [`Installer`] (mutation side) runs only on a matching host.
 
-use bosun_core::{BackendId, Capabilities, Distro, Installed, Ref, Scope, Source, Target, Version};
+use bosun_core::{
+    BackendId, Capabilities, Checksum, Distro, Installed, Ref, Scope, Source, Target, Version,
+};
 
 use crate::error::PortError;
 use crate::exec::CommandRunner;
@@ -20,6 +22,19 @@ pub trait Index {
     /// The versions available for `pkg` on `target`, newest-unspecified
     /// (callers order with bosun-core's `Version`).
     fn query_available(&self, pkg: &Ref, target: &Target) -> Result<Vec<Version>, PortError>;
+
+    /// The checksum to record for `pkg` at `version` on `target`, when the
+    /// backend enforces one (§12). github-release reads it from the release's
+    /// `checksums.txt`; backends with nothing to record (apt, cargo) keep the
+    /// default `None`, so the lockfile carries a checksum only where §12 asks.
+    fn checksum(
+        &self,
+        _pkg: &Ref,
+        _version: &Version,
+        _target: &Target,
+    ) -> Result<Option<Checksum>, PortError> {
+        Ok(None)
+    }
 }
 
 /// Mutation side: install, verify, hold, downgrade, uninstall (§5.1). Runs on

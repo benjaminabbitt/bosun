@@ -187,6 +187,17 @@ pub enum Diagnostic {
         /// The backend that cannot downgrade.
         backend: BackendId,
     },
+    /// Under `--frozen`, a package present but not bosun-owned (`accepted`) is
+    /// installed at a different version than the lock pins (§4.6, §7). An error;
+    /// bosun will not change a package it does not own.
+    FrozenAcceptedConflict {
+        /// The entry's name.
+        name: String,
+        /// The version actually installed, not owned by bosun.
+        installed: String,
+        /// The version the lockfile pins.
+        locked: String,
+    },
 }
 
 impl Diagnostic {
@@ -195,7 +206,8 @@ impl Diagnostic {
         match self {
             Diagnostic::Unsatisfiable { .. }
             | Diagnostic::EmptyIntersection { .. }
-            | Diagnostic::UnsupportedDowngrade { .. } => Severity::Error,
+            | Diagnostic::UnsupportedDowngrade { .. }
+            | Diagnostic::FrozenAcceptedConflict { .. } => Severity::Error,
             Diagnostic::NotApplicable { .. }
             | Diagnostic::MissingBackend { .. }
             | Diagnostic::AcceptedUnsatisfied { .. }
@@ -250,6 +262,15 @@ impl std::fmt::Display for Diagnostic {
                 "{name}: {} ({})",
                 errmsg::UNSUPPORTED_DOWNGRADE,
                 backend.as_str()
+            ),
+            Diagnostic::FrozenAcceptedConflict {
+                name,
+                installed,
+                locked,
+            } => write!(
+                f,
+                "{name}: installed {installed}, lock pins {locked}: {}",
+                errmsg::FROZEN_ACCEPTED_CONFLICT
             ),
         }
     }

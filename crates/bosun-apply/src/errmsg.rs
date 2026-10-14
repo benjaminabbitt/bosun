@@ -37,3 +37,9 @@ pub const UNSUPPORTED_HOLD: &str = "backend cannot hold; version not pinned";
 /// A backend cannot move a package down to the resolved version (§5.2): an
 /// error for that package; apply is blocked.
 pub const UNSUPPORTED_DOWNGRADE: &str = "backend cannot downgrade to the resolved version";
+
+/// Under `--frozen`, a package present but not bosun-owned (`accepted`) sits at
+/// a different version than the lock pins (§4.6, §7): an error; bosun will not
+/// change a package it does not own.
+pub const FROZEN_ACCEPTED_CONFLICT: &str =
+    "installed outside bosun at a different version than the lock; bosun will not change it";

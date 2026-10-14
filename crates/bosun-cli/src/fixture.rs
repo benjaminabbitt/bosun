@@ -8,7 +8,9 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use bosun_core::vers::scheme_for_type;
-use bosun_core::{Capabilities, HoldSupport, Installed, Ref, Scope, Source, Target, Version};
+use bosun_core::{
+    Capabilities, Checksum, HoldSupport, Installed, Ref, Scope, Source, Target, Version,
+};
 use bosun_ports::backend::{Index, Installer};
 use bosun_ports::step::{Step, StepRunner, Steps};
 use bosun_ports::PortError;
@@ -75,6 +77,10 @@ pub struct FixtureBackend {
     /// Available versions per native id.
     #[serde(default)]
     pub available: BTreeMap<String, Vec<String>>,
+    /// The checksum the index reports per native id (§12), for backends that
+    /// enforce one (github-release). Absent for apt/cargo.
+    #[serde(default)]
+    pub checksums: BTreeMap<String, String>,
     /// The install scope (`system` or `user`, default `user`).
     #[serde(default)]
     pub scope: Option<String>,
@@ -94,14 +100,21 @@ pub struct FixtureBackend {
 pub struct FixtureIndex {
     vers_type: String,
     available: BTreeMap<String, Vec<String>>,
+    checksums: BTreeMap<String, String>,
 }
 
 impl FixtureIndex {
-    /// Build from a backend's vers type and its available map.
-    pub fn new(vers_type: String, available: BTreeMap<String, Vec<String>>) -> FixtureIndex {
+    /// Build from a backend's vers type, its available map, and its per-native-id
+    /// checksum map (empty for backends that enforce none).
+    pub fn new(
+        vers_type: String,
+        available: BTreeMap<String, Vec<String>>,
+        checksums: BTreeMap<String, String>,
+    ) -> FixtureIndex {
         FixtureIndex {
             vers_type,
             available,
+            checksums,
         }
     }
 }
@@ -120,6 +133,18 @@ impl Index for FixtureIndex {
             .iter()
             .map(|v| Version::parse(v, scheme).map_err(PortError::from))
             .collect()
+    }
+
+    fn checksum(
+        &self,
+        pkg: &Ref,
+        _version: &Version,
+        _target: &Target,
+    ) -> Result<Option<Checksum>, PortError> {
+        Ok(self
+            .checksums
+            .get(&pkg.purl.native_id())
+            .map(|s| Checksum(s.clone())))
     }
 }
 
