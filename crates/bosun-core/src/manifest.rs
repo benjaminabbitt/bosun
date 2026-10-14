@@ -40,8 +40,11 @@ pub struct ManifestEntry {
 /// from `defaults.install`; the package id defaults to the logical name.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct InstallBlock {
-    /// The backend to use (e.g. `apt`, `cargo`).
-    pub backend: Option<String>,
+    /// Candidate backends in preference order (§5.3). The resolver picks the
+    /// first that is registered; an explicit flag/env/config choice still wins
+    /// over this list, and a single named backend is never overridden. Written
+    /// as a scalar or a sequence in the manifest; empty means "inherit/any".
+    pub backends: Vec<String>,
     /// The backend-native package id, where it differs from the name.
     pub package: Option<String>,
     /// A per-selector spec override.

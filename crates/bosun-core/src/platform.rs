@@ -225,6 +225,9 @@ pub struct Distro {
     pub id_like: Vec<String>,
     /// The `VERSION_ID` field, when present (absent on rolling distros).
     pub version_id: Option<String>,
+    /// The `VERSION_CODENAME` field (e.g. `bookworm`, `noble`), used as the
+    /// deb purl `distro` qualifier (§5.6). Absent on distros without one.
+    pub version_codename: Option<String>,
 }
 
 impl Distro {
@@ -349,6 +352,7 @@ mod tests {
             id: "ubuntu".into(),
             id_like: vec!["debian".into()],
             version_id: Some("24.04".into()),
+            version_codename: Some("noble".into()),
         };
         assert!(ubuntu.satisfies_family("ubuntu")); // by ID
         assert!(ubuntu.satisfies_family("debian")); // by ID_LIKE

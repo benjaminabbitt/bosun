@@ -73,6 +73,7 @@ pub fn distro_from(text: &str) -> Distro {
             .map(|s| s.split_whitespace().map(String::from).collect())
             .unwrap_or_default(),
         version_id: map.get("VERSION_ID").cloned(),
+        version_codename: map.get("VERSION_CODENAME").cloned(),
     }
 }
 
@@ -102,7 +103,17 @@ mod tests {
             id: id.to_string(),
             id_like: like.iter().map(|s| s.to_string()).collect(),
             version_id: ver.map(String::from),
+            version_codename: None,
         }
+    }
+
+    #[test]
+    fn parses_version_codename() {
+        assert_eq!(
+            distro_from("ID=debian\nVERSION_CODENAME=bookworm\n").version_codename,
+            Some("bookworm".to_string())
+        );
+        assert_eq!(distro_from("ID=arch\n").version_codename, None);
     }
 
     #[test]

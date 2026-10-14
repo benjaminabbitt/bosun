@@ -130,12 +130,29 @@ fn string_seq(v: &Value, context: &str) -> Result2<Vec<String>> {
         .collect()
 }
 
+/// A field that may be written as a scalar (one element) or a sequence.
+fn string_or_seq(v: &Value, context: &str) -> Result2<Vec<String>> {
+    match v.as_str() {
+        Some(s) => Ok(vec![s.to_string()]),
+        None => string_seq(v, context),
+    }
+}
+
 fn install_block(v: &Value) -> Result2<InstallBlock> {
     let entries = as_map(v, "an install block")?;
-    check_keys(entries, "an install block", &["backend", "package", "spec"])?;
+    check_keys(
+        entries,
+        "an install block",
+        &["backend", "backends", "package", "spec"],
+    )?;
+    // `backends:` (preferred, a list) or `backend:` (one), scalar or sequence.
+    let backends = match v.get("backends").or_else(|| v.get("backend")) {
+        Some(b) => string_or_seq(b, "backends")?,
+        None => Vec::new(),
+    };
     let field = |k| v.get(k).and_then(Value::as_str).map(str::to_string);
     Ok(InstallBlock {
-        backend: field("backend"),
+        backends,
         package: field("package"),
         spec: field("spec"),
     })
@@ -272,14 +289,14 @@ struct CanonEntry {
 
 #[derive(Serialize)]
 struct CanonBlock {
-    backend: Option<String>,
+    backends: Vec<String>,
     package: Option<String>,
     spec: Option<String>,
 }
 
 fn canon_block(b: &InstallBlock) -> CanonBlock {
     CanonBlock {
-        backend: b.backend.clone(),
+        backends: b.backends.clone(),
         package: b.package.clone(),
         spec: b.spec.clone(),
     }
@@ -359,9 +376,30 @@ packages:
         assert_eq!(fd.spec.as_deref(), Some("10.2.0"));
         assert_eq!(fd.formerly, vec!["fdfind"]);
         let deb = &fd.install[&"linux:debian".parse::<Selector>().unwrap()];
-        assert_eq!(deb.backend.as_deref(), Some("apt"));
+        assert_eq!(deb.backends, vec!["apt"]);
         assert_eq!(deb.package.as_deref(), Some("fd-find"));
         assert_eq!(deb.spec.as_deref(), Some(">=9|<10"));
+    }
+
+    #[test]
+    fn backends_accepts_scalar_or_sequence() {
+        let one =
+            "version: 1\npackages:\n  - name: x\n    install:\n      linux: {backend: cargo}\n";
+        let seq = "version: 1\npackages:\n  - name: x\n    install:\n      linux: {backends: [cargo, apt]}\n";
+        let sel = "linux".parse::<Selector>().unwrap();
+        assert_eq!(load(one).packages[0].install[&sel].backends, vec!["cargo"]);
+        assert_eq!(
+            load(seq).packages[0].install[&sel].backends,
+            vec!["cargo", "apt"]
+        );
+    }
+
+    #[test]
+    fn backends_order_changes_the_hash() {
+        // Preference order is semantic: a different order is a different manifest.
+        let ab = "version: 1\npackages:\n  - name: x\n    install:\n      linux: {backends: [cargo, apt]}\n";
+        let ba = "version: 1\npackages:\n  - name: x\n    install:\n      linux: {backends: [apt, cargo]}\n";
+        assert_ne!(manifest_hash(&load(ab)), manifest_hash(&load(ba)));
     }
 
     #[test]

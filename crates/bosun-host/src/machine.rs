@@ -194,6 +194,7 @@ mod tests {
                 id: "debian".into(),
                 id_like: vec![],
                 version_id: Some("12".into()),
+                version_codename: Some("bookworm".into()),
             }),
             ..Default::default()
         };
@@ -212,6 +213,7 @@ mod tests {
                 id: "ubuntu".into(),
                 id_like: vec!["debian".into()],
                 version_id: Some("24.04".into()),
+                version_codename: Some("noble".into()),
             }),
             PathBuf::from("/var/lib/bosun/state.json"),
             PathBuf::from("/home/x/.local/state/bosun/state.json"),
