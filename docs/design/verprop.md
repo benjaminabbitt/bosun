@@ -1184,6 +1184,12 @@ remote indexes. Traits stay ready; nothing is stubbed.
 - Hold support is three-valued (§5.2): apt `Supported` (hold action), cargo and github-release
   `NotNeeded` (silent: cargo re-asserts each run; bosun owns github-release binaries),
   `Unsupported` warns.
+- **A version's scheme comes from the backend's declared vers type** (`BackendFactory`
+  metadata), never from the purl type: github-release's purl type is `github`, but its tags
+  compare as SemVer. That applies to lock `resolved`, state `installed` and every spec.
+  Crossing schemes was dogfood bug 1.
+- `Index::checksum` (defaulted to none) lets the lock record a backend-reported checksum;
+  github-release returns the `checksums.txt` sha256, the same value its Fetch step enforces.
 - `Arch` is amd64/arm64 only; `Os` uses Docker's spelling (`darwin`).
 
 **Slice status:**
@@ -1216,7 +1222,8 @@ remote indexes. Traits stay ready; nothing is stubbed.
 | 11-2 | acceptance real-backend tier in a disposable container (`just acceptance-real`; guarded by `BOSUN_ACCEPTANCE_REAL=1` + a container marker) | landed; real run 2/2 scenarios (apt hello install → hold → prune; github-release ctxloom 0.6.4 checksum-verified); found 2 bugs (below) |
 | 13 | quality: hermetic regressions for the 11-2 bugs, workspace mutation run, coverage ≥ 90% | landed; 284 tests; coverage 90.60% lines / 90.32% regions (re-measured by orchestrator); every mutation target met, survivors justified |
 | 13b | mutation for bosun-io / bosun-ports | landed; 290 tests; io 31/31 and ports 11/11 viable caught (6 survivors killed with new tests) |
-| 12-1 | fixes for the 5 dogfood bugs (below) | in progress (`finer-urban-brunt`) |
+| 12-1 | fixes for the 5 dogfood bugs (below) | landed; 296 tests; host re-run clean; `bosun.lock` committed (ctxloom checksum recorded) |
+| 12-2 | installed-version scheme from backend metadata (state + lock); idempotency scenario per backend | in progress (`finer-urban-brunt`) |
 | 12 | dogfood: `bosun.yaml` (just, jq, ctxloom) committed; plan-only host run (user decision) | manifest committed; host run found 5 bugs (below) → 12-1 |
 
 **First real-host smoke run (2026-10-14, release build, Debian 13, read-only `--plan` and
