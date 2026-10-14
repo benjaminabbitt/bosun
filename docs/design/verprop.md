@@ -1207,8 +1207,20 @@ remote indexes. Traits stay ready; nothing is stubbed.
 | 9-1 | bosun-apply: plan builder (§4.8) + privilege check (§5.5); JSON via one-way DTO views | landed; 216 tests; mutation 48/48 viable caught |
 | 9-2 | Driver + host applier (one transaction, per-backend isolation, verify-before-record); exit code and capability fixes | landed; 226 tests; mutation 64/64 viable caught |
 | 10-1 | per-action state checkpoints + ApplyReport JSON; real adapters (std::process, ureq/rustls); wiring; `backends` / `status` / `lock [--check]`; `--format` | landed; 245 tests |
-| 10-2 | `install` / `uninstall` / `prune` + confirmation; backend metadata on the factory; fixture-seam guard | in progress |
+| 10-2 | `install` / `uninstall` / `prune` + confirmation; backend metadata on the factory; fixture-seam guard | landed; 258 tests |
+| 10-3 | blockers from the first real-host smoke run (below) + cross-claim selection in `install` | in progress |
 | 11–13 | cli, acceptance, dogfood, quality | not started |
+
+**First real-host smoke run (2026-10-14, release build, Debian 13, read-only `--plan` and
+`lock` in a scratch dir).** `backends` found apt 3.0.3, cargo 1.96.1 and github-release; jq
+resolved to `pkg:deb/debian/jq?arch=amd64&distro=trixie`. Found three blockers, all invisible
+to the fake-backed tests:
+
+1. A package already on the machine but not in bosun state was planned as `install` + `hold`
+   (it would have upgraded and held the user's jq) instead of `accept` (§4.6).
+2. A constraint version invalid in its scheme (`>=0.6` for SemVer) silently matched nothing
+   instead of failing at parse.
+3. `lock` exited 0 and wrote a partial lock with an unsatisfiable entry.
 
 **Active implementor:** `lame-wide-chant` (worktree branch `ctxloom/lame-wide-chant`), one
 slice per turn, reporting to the orchestrator after each. Previous: `hoary-quick-elm` (crashed
