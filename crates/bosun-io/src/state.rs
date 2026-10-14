@@ -1,18 +1,18 @@
-//! Machine-state JSON (§4.6) and the `StateStore` port. Same package shape as
-//! the lockfile. Writes are atomic (temp file in the same dir, fsync, rename)
-//! and serialized by an advisory lock, so two bosun runs never interleave or
-//! leave a torn file.
+//! Machine-state JSON (§4.6) and the transactional `StateStore` port. Same
+//! package shape as the lockfile. A transaction holds an exclusive advisory
+//! lock across read-modify-write, so two bosun runs never interleave; the
+//! commit writes atomically (temp file in the same dir, fsync, rename) so a
+//! reader never sees a torn file. Locking uses std `File::lock` (Rust 1.89+).
 
 use std::collections::BTreeMap;
-use std::fs::{self, File};
+use std::fs::{self, File, TryLockError};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use bosun_core::record::{Package, Placement, StateDocument, StateLeaf, StatePackage};
 use bosun_core::vers::scheme_for_type;
 use bosun_core::{BackendId, Claim, Origin, Purl, Scope, Version};
-use bosun_ports::{PortError, StateStore};
-use fs2::FileExt;
+use bosun_ports::{PortError, StateStore, StateTransaction};
 use serde::{Deserialize, Serialize};
 
 use crate::error::IoError;
@@ -209,53 +209,118 @@ impl FileStateStore {
     }
 }
 
+impl FileStateStore {
+    /// Create the parent dir and open (creating) the sibling lock file.
+    fn open_lock(&self, scope: Scope) -> Result<(PathBuf, File), IoError> {
+        let path = self.path(scope).to_path_buf();
+        let dir = path.parent().unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(dir).map_err(|source| IoError::Write {
+            path: dir.to_path_buf(),
+            source,
+        })?;
+        let lock_path = path.with_extension("lock");
+        let lock = File::create(&lock_path).map_err(|source| IoError::Lock {
+            path: lock_path,
+            source,
+        })?;
+        Ok((path, lock))
+    }
+}
+
 impl StateStore for FileStateStore {
-    fn load(&self, scope: Scope) -> Result<StateDocument, PortError> {
-        let path = self.path(scope);
-        match fs::read_to_string(path) {
-            Ok(text) => Ok(from_json(&text, path)?),
-            // A machine with nothing recorded yet is an empty document.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(StateDocument {
-                state_version: STATE_VERSION,
-                packages: Vec::new(),
-            }),
-            Err(source) => Err(IoError::Read {
-                path: path.to_path_buf(),
+    type Transaction = FileStateTxn;
+
+    fn begin(&self, scope: Scope) -> Result<FileStateTxn, PortError> {
+        let (path, lock) = self.open_lock(scope)?;
+        lock.lock().map_err(|source| IoError::Lock {
+            path: path.with_extension("lock"),
+            source,
+        })?;
+        let state = read_or_empty(&path)?;
+        Ok(FileStateTxn { path, lock, state })
+    }
+
+    fn try_begin(&self, scope: Scope) -> Result<Option<FileStateTxn>, PortError> {
+        let (path, lock) = self.open_lock(scope)?;
+        match lock.try_lock() {
+            Ok(()) => {
+                let state = read_or_empty(&path)?;
+                Ok(Some(FileStateTxn { path, lock, state }))
+            }
+            Err(TryLockError::WouldBlock) => Ok(None),
+            Err(TryLockError::Error(source)) => Err(IoError::Lock {
+                path: path.with_extension("lock"),
                 source,
             }
             .into()),
         }
     }
 
-    fn save(&self, scope: Scope, state: &StateDocument) -> Result<(), PortError> {
-        let path = self.path(scope).to_path_buf();
-        save_atomic(&path, to_json(state).as_bytes())?;
+    fn read(&self, scope: Scope) -> Result<StateDocument, PortError> {
+        let path = self.path(scope);
+        if !path.exists() {
+            return Ok(empty_state());
+        }
+        let lock_path = path.with_extension("lock");
+        let lock = File::create(&lock_path).map_err(|source| IoError::Lock {
+            path: lock_path.clone(),
+            source,
+        })?;
+        lock.lock_shared().map_err(|source| IoError::Lock {
+            path: lock_path,
+            source,
+        })?;
+        Ok(read_or_empty(path)?)
+    }
+}
+
+/// A held read-modify-write transaction (§4.6): the exclusive lock, the path,
+/// and the state loaded when it began.
+pub struct FileStateTxn {
+    path: PathBuf,
+    lock: File,
+    state: StateDocument,
+}
+
+impl StateTransaction for FileStateTxn {
+    fn state(&self) -> &StateDocument {
+        &self.state
+    }
+
+    fn commit(self, state: StateDocument) -> Result<(), PortError> {
+        let FileStateTxn {
+            path,
+            lock,
+            state: _,
+        } = self;
+        // The lock is still held across the atomic write; released below.
+        save_atomic(&path, to_json(&state).as_bytes())?;
+        drop(lock);
         Ok(())
     }
 }
 
-/// Write `bytes` to `path` atomically, under an exclusive advisory lock so
-/// concurrent bosun runs serialize rather than interleave.
+fn empty_state() -> StateDocument {
+    StateDocument {
+        state_version: STATE_VERSION,
+        packages: Vec::new(),
+    }
+}
+
+fn read_or_empty(path: &Path) -> Result<StateDocument, IoError> {
+    match fs::read_to_string(path) {
+        Ok(text) => from_json(&text, path),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(empty_state()),
+        Err(source) => Err(IoError::Read {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+/// Atomically replace `path`: temp file in the same dir, fsync, rename. The
+/// caller holds the exclusive lock, so the temp name cannot collide.
 fn save_atomic(path: &Path, bytes: &[u8]) -> Result<(), IoError> {
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(dir).map_err(|source| IoError::Write {
-        path: dir.to_path_buf(),
-        source,
-    })?;
-
-    // Hold an exclusive lock on a sibling file for the whole write. fs2's
-    // advisory lock releases when the file closes (process exit included), so
-    // there is no stale lock to clean up.
-    let lock_path = path.with_extension("lock");
-    let lockf = File::create(&lock_path).map_err(|source| IoError::Lock {
-        path: lock_path.clone(),
-        source,
-    })?;
-    lockf.lock_exclusive().map_err(|source| IoError::Lock {
-        path: lock_path.clone(),
-        source,
-    })?;
-
     let write = |p: &Path, src| IoError::Write {
         path: p.to_path_buf(),
         source: src,
@@ -335,24 +400,42 @@ mod tests {
         assert_eq!(back, sample());
     }
 
-    #[test]
-    fn store_save_then_load_roundtrips_and_creates_dirs() {
-        let tmp = tempfile::tempdir().unwrap();
-        let store = FileStateStore::new(
+    fn store(tmp: &tempfile::TempDir) -> FileStateStore {
+        FileStateStore::new(
             tmp.path().join("sys/state.json"),
             tmp.path().join("user/state.json"),
-        );
-        store.save(Scope::User, &sample()).unwrap();
-        assert_eq!(store.load(Scope::User).unwrap(), sample());
+        )
     }
 
     #[test]
-    fn load_missing_is_empty_document() {
+    fn begin_commit_then_read_roundtrips_and_creates_dirs() {
         let tmp = tempfile::tempdir().unwrap();
-        let store =
-            FileStateStore::new(tmp.path().join("sys.json"), tmp.path().join("absent.json"));
-        let doc = store.load(Scope::User).unwrap();
+        let store = store(&tmp);
+        let txn = store.begin(Scope::User).unwrap();
+        assert!(txn.state().packages.is_empty()); // nothing recorded yet
+        txn.commit(sample()).unwrap();
+        assert_eq!(store.read(Scope::User).unwrap(), sample());
+    }
+
+    #[test]
+    fn read_missing_is_empty_document() {
+        let tmp = tempfile::tempdir().unwrap();
+        let doc = store(&tmp).read(Scope::User).unwrap();
         assert_eq!(doc.state_version, STATE_VERSION);
         assert!(doc.packages.is_empty());
+    }
+
+    #[test]
+    fn a_second_transaction_cannot_begin_while_the_first_is_held() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = store(&tmp);
+        let txn1 = store.begin(Scope::User).unwrap();
+        // While txn1 holds the exclusive lock, a non-blocking begin backs off.
+        assert!(store.try_begin(Scope::User).unwrap().is_none());
+        // Committing releases the lock; the next transaction can begin and
+        // sees txn1's write (no lost claim).
+        txn1.commit(sample()).unwrap();
+        let txn2 = store.try_begin(Scope::User).unwrap().expect("lock is free");
+        assert_eq!(txn2.state(), &sample());
     }
 }

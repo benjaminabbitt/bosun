@@ -10,9 +10,11 @@ pub mod config;
 pub mod errmsg;
 pub mod error;
 pub mod lock;
+pub mod manifest;
 pub mod paths;
 pub mod state;
 
 pub use config::UserConfig;
 pub use error::IoError;
+pub use manifest::{load_manifest, manifest_hash, ManifestError};
 pub use state::FileStateStore;

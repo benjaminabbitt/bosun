@@ -3,6 +3,7 @@
 //! types (§4.5, §4.6). Pure — no I/O, no process calls.
 
 pub mod errmsg;
+pub mod manifest;
 pub mod model;
 pub mod platform;
 pub mod purl;
@@ -11,6 +12,7 @@ pub mod spec;
 pub mod vers;
 pub mod version;
 
+pub use manifest::{InstallBlock, Manifest, ManifestEntry};
 pub use model::{
     BackendId, Capabilities, Checksum, Claim, Installed, Origin, PackageId, Ref, Scope, Source,
     SourceId,

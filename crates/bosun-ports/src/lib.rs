@@ -26,4 +26,4 @@ pub use backend::{Backend, BackendFactory, HostInfo, Index, Installer, Probe};
 pub use error::PortError;
 pub use exec::{Command, CommandRunner, HttpFetcher, HttpRequest, HttpResponse, Output};
 pub use machine::{Elevation, Machine, Privilege, User};
-pub use state::StateStore;
+pub use state::{StateStore, StateTransaction};
