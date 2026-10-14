@@ -1,0 +1,23 @@
+# bosun's own toolbelt (§12). M1 dogfood: Debian first.
+# ltk, taskloom and harp are not published as release assets yet, so they are left out.
+version: 1
+targets: [linux/amd64]
+
+packages:
+  # Any Debian revision of upstream 1.40.
+  - name: just
+    spec: ">=1.40|<1.41~"
+    install:
+      linux:debian: {backend: apt}
+
+  # Any Debian revision of upstream 1.7.1 (security updates land as deb13uN revisions).
+  - name: jq
+    spec: ">=1.7.1|<1.7.2~"
+    install:
+      linux:debian: {backend: apt}
+
+  # The ctxloom release line; only `ctxloom` itself is a release asset.
+  - name: ctxloom
+    spec: ">=0.6.4|<0.7.0"
+    install:
+      linux: {backend: github-release, package: ctxloom/ctxloom}
