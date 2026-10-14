@@ -11,21 +11,32 @@
 use crate::error::PortError;
 
 /// A command to run: a logical program name plus its arguments.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Command {
     /// The logical program name (resolved by the runner, incl. Windows shims).
     pub program: String,
     /// The arguments, already split (never a shell string).
     pub args: Vec<String>,
+    /// Environment variables to set for this command (e.g.
+    /// `DEBIAN_FRONTEND=noninteractive`), as `(name, value)` pairs.
+    pub env: Vec<(String, String)>,
 }
 
 impl Command {
-    /// Build a command from a program name and an iterator of arguments.
+    /// Build a command from a program name and an iterator of arguments, with
+    /// no extra environment.
     pub fn new(program: impl Into<String>, args: impl IntoIterator<Item = String>) -> Command {
         Command {
             program: program.into(),
             args: args.into_iter().collect(),
+            env: Vec::new(),
         }
+    }
+
+    /// Set the environment for this command.
+    pub fn with_env(mut self, env: Vec<(String, String)>) -> Command {
+        self.env = env;
+        self
     }
 }
 

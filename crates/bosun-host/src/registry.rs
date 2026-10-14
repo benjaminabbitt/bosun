@@ -142,9 +142,9 @@ pub fn build_registry(factories: Vec<Box<dyn BackendFactory>>, host: &HostInfo) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bosun_core::{Arch, Capabilities, Installed, Os, Ref, Scheme, Source, Target};
+    use bosun_core::{Arch, Capabilities, Os, Ref, Scheme, Scope, Source, Target};
     use bosun_ports::testing::FakeCommandRunner;
-    use bosun_ports::{Index, Installer, PortError};
+    use bosun_ports::{Index, Installer, PortError, Steps};
 
     /// A no-op backend; the registry test registers it but never drives it.
     struct Noop;
@@ -164,27 +164,26 @@ mod tests {
                 supports_downgrade: false,
             }
         }
-        fn ensure_source(&self, _: &Source) -> Result<(), PortError> {
-            Ok(())
+        fn scope(&self) -> Scope {
+            Scope::User
         }
-        fn install_exact(&self, _: &Ref, _: &Version) -> Result<Installed, PortError> {
-            Err(PortError::Unsupported {
-                capability: "install".into(),
-            })
+        fn ensure_source(&self, _: &Source) -> Result<Steps, PortError> {
+            Ok(vec![])
+        }
+        fn install_exact(&self, _: &Ref, _: &Version) -> Result<Steps, PortError> {
+            Ok(vec![])
         }
         fn verify_installed(&self, _: &Ref) -> Result<Option<Version>, PortError> {
             Ok(None)
         }
-        fn hold(&self, _: &Ref, _: &Version) -> Result<(), PortError> {
-            Ok(())
+        fn hold(&self, _: &Ref, _: &Version) -> Result<Steps, PortError> {
+            Ok(vec![])
         }
-        fn downgrade(&self, _: &Ref, _: &Version) -> Result<Installed, PortError> {
-            Err(PortError::Unsupported {
-                capability: "downgrade".into(),
-            })
+        fn downgrade(&self, _: &Ref, _: &Version) -> Result<Steps, PortError> {
+            Ok(vec![])
         }
-        fn uninstall(&self, _: &Ref) -> Result<(), PortError> {
-            Ok(())
+        fn uninstall(&self, _: &Ref) -> Result<Steps, PortError> {
+            Ok(vec![])
         }
     }
 

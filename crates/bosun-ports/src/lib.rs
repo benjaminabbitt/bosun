@@ -20,6 +20,7 @@ pub mod error;
 pub mod exec;
 pub mod machine;
 pub mod state;
+pub mod step;
 pub mod testing;
 
 pub use backend::{Backend, BackendFactory, HostInfo, Index, Installer, Probe};
@@ -27,3 +28,4 @@ pub use error::PortError;
 pub use exec::{Command, CommandRunner, HttpFetcher, HttpRequest, HttpResponse, Output};
 pub use machine::{Elevation, Machine, Privilege, User};
 pub use state::{StateStore, StateTransaction};
+pub use step::{Step, Steps};

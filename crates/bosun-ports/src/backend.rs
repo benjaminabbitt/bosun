@@ -6,10 +6,11 @@
 //! other than the current machine (§4.7): [`Index`] (query side) may run
 //! anywhere; [`Installer`] (mutation side) runs only on a matching host.
 
-use bosun_core::{BackendId, Capabilities, Distro, Installed, Ref, Source, Target, Version};
+use bosun_core::{BackendId, Capabilities, Distro, Ref, Scope, Source, Target, Version};
 
 use crate::error::PortError;
 use crate::exec::CommandRunner;
+use crate::step::Steps;
 
 /// Query side: "which versions exist for this target" (§5.1). Reads whatever
 /// index is current; refresh is explicit (§9).
@@ -22,26 +23,35 @@ pub trait Index {
 }
 
 /// Mutation side: install, verify, hold, downgrade, uninstall (§5.1). Runs on
-/// the local machine only. [`Installed`] carries the scope the install landed
-/// in (§4.6), which drives the privilege check and the choice of state file.
+/// the local machine only.
+///
+/// The mutating methods **describe** their work as a [`Steps`] list; a host
+/// executor (or the container renderer) carries it out (§5.1). They do not act
+/// directly, so the plan can show the exact commands and one description drives
+/// every driver. Queries (`capabilities`, `verify_installed`) run directly.
 pub trait Installer {
     /// What this backend can honour (§5.2), derived from its probed version.
     fn capabilities(&self) -> Capabilities;
-    /// Ensure a source (PPA/tap/bucket/registry) is present before install
-    /// (§9).
-    fn ensure_source(&self, source: &Source) -> Result<(), PortError>;
-    /// Install exactly `version` of `pkg`, returning what landed and where.
-    fn install_exact(&self, pkg: &Ref, version: &Version) -> Result<Installed, PortError>;
-    /// The installed version of `pkg`, or `None` if it is not installed.
-    /// Verification is by package id through the manager, never by binary
-    /// name (§5.4).
+    /// The install scope this backend lands in (§4.6), which drives the
+    /// privilege check and the choice of state file. Fixed per backend in M1
+    /// (apt → system, cargo/github-release → user).
+    fn scope(&self) -> Scope;
+    /// Steps to ensure a source (PPA/tap/bucket/registry) is present (§9).
+    fn ensure_source(&self, source: &Source) -> Result<Steps, PortError>;
+    /// Steps to install exactly `version` of `pkg`. The version that actually
+    /// landed is read back with `verify_installed` after the steps run
+    /// (Appendix B #229/#130).
+    fn install_exact(&self, pkg: &Ref, version: &Version) -> Result<Steps, PortError>;
+    /// The installed version of `pkg`, or `None` if it is not installed. A
+    /// direct read, by package id through the manager, never by binary name
+    /// (§5.4).
     fn verify_installed(&self, pkg: &Ref) -> Result<Option<Version>, PortError>;
-    /// Durably hold `pkg` at `version` (`apt-mark hold`, …).
-    fn hold(&self, pkg: &Ref, version: &Version) -> Result<(), PortError>;
-    /// Move `pkg` down to `version` (explicit; some backends refuse).
-    fn downgrade(&self, pkg: &Ref, version: &Version) -> Result<Installed, PortError>;
-    /// Uninstall `pkg`. Only ever called for the managed set (§9).
-    fn uninstall(&self, pkg: &Ref) -> Result<(), PortError>;
+    /// Steps to durably hold `pkg` at `version` (`apt-mark hold`, …).
+    fn hold(&self, pkg: &Ref, version: &Version) -> Result<Steps, PortError>;
+    /// Steps to move `pkg` down to `version` (explicit; some backends refuse).
+    fn downgrade(&self, pkg: &Ref, version: &Version) -> Result<Steps, PortError>;
+    /// Steps to uninstall `pkg`. Only ever called for the managed set (§9).
+    fn uninstall(&self, pkg: &Ref) -> Result<Steps, PortError>;
 }
 
 /// What a backend learned about itself when it probed (§5.3): its own version,

@@ -6,11 +6,13 @@
 
 pub mod errmsg;
 pub mod error;
+pub mod executor;
 pub mod logmsg;
 pub mod machine;
 pub mod os_release;
 pub mod registry;
 
 pub use error::HostError;
+pub use executor::StepExecutor;
 pub use machine::{detect_arch, FakeMachine, LinuxMachine};
 pub use registry::{build_registry, RegisteredBackend, Registry, SkipReason, SkippedBackend};
