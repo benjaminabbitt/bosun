@@ -17,3 +17,14 @@ pub const BAD_GITHUB_ID: &str = "github package id must be owner/repo";
 
 /// Querying a backend index for available versions failed.
 pub const QUERY_FAILED: &str = "index query failed";
+
+/// A claim's spec string could not be parsed as a vers set.
+pub const BAD_CLAIM_SPEC: &str = "invalid claim spec";
+
+/// No available version satisfies every claim on a package (§4.6): the specs
+/// disagree and bosun refuses rather than flip-flop the installed version.
+pub const EMPTY_INTERSECTION: &str = "claims cannot be jointly satisfied";
+
+/// A lockfile's pinned version is excluded by another claim's spec, so
+/// `--frozen` cannot honour the lock without breaking that claim (§7).
+pub const FROZEN_CLASH: &str = "locked version clashes with another claim";
