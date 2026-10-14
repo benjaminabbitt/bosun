@@ -465,6 +465,25 @@ Backends declare **capabilities** (`supports_exact_version`, `supports_hold`,
 `supports_downgrade`), because they are wildly unequal (see spectrum below). bosun
 degrades-with-a-warning when a backend can't honor a pin.
 
+**Mutations are described, then executed (DECIDED).** The mutating `Installer` methods
+(`ensure_source`, `install_exact`, `hold`, `downgrade`, `uninstall`) don't act directly. Each
+returns a **step list**, a typed value saying what to do, and a separate executor carries it
+out. One description drives every driver (§8): the host driver executes the steps, and the
+container renderer prints them as Dockerfile instructions. The plan (§4.8) can show the exact
+commands too.
+
+| step | host executor | container renderer |
+|---|---|---|
+| `Run { argv, env, scope }` | `CommandRunner` (privilege per scope, §5.5) | `RUN` with shell-quoted argv |
+| `Fetch { url, sha256, dest }` | bosun downloads and verifies the checksum | `ADD --checksum=sha256:… <url> <dest>` |
+| `Extract { archive, member, dest, mode }` | bosun extracts | `RUN tar …` / `unzip …` |
+
+- `Fetch` and `Extract` exist because for `github-release` bosun *is* the installer (§12).
+- Queries (`verify_installed`, `query_available`) run directly; they're reads, not part of
+  any rendered output.
+- Per-architecture steps (different URLs and checksums) are rendered under a `TARGETARCH`
+  switch, or as one file per platform.
+
 ### 5.2 Three families and the capability spectrum
 
 | Family | install-exact | hold/pin | version availability |
@@ -819,7 +838,7 @@ managers (they can cascade package erasures) before applying.
 Feed pinned versions into an image build. **The primary near-term consumer is dev container
 builds** — a `.devcontainer` / reproducible dev-environment image that gets exactly the
 manifest's pinned toolchain so every developer (and CI) shares one versioned toolset. Production
-image builds are the same mechanism. Three shapes:
+image builds are the same mechanism. Both of the first two shapes are supported (DECIDED):
 
 - **build-args / env** — the Dockerfile takes versions as `ARG`s (or `ENV`) and bosun supplies
   them with `bosun render` (§8.3). Simplest; stable build args give clean layer-cache
@@ -828,7 +847,23 @@ image builds are the same mechanism. Three shapes:
   `RUN bosun install --frozen --yes`. Single source of truth; needs the
   bosun binary in the build stage — this is where the **static musl binary pays off**
   (`COPY --from` into scratch/distroless, no runtime deps).
-- **generated fragment** — render a `.dockerfile.inc` / build stage from the lock.
+- **generated bosun layer (`Containerfile.bosun`)** — bosun renders a whole file it owns,
+  which layers the tools onto the user's image:
+  `ARG BASE` / `FROM ${BASE}`, then each package's step list (§5.1) as `RUN` / `ADD
+  --checksum` instructions, with names and versions as literals. The user's Dockerfile is never
+  edited. Chain it with `docker build --build-arg BASE=<image>` or a bake file that uses the
+  base as a named build context. A tool bump rebuilds only the tool layer, not the base.
+  Rendering needs the base image's distro (for selectors and purl namespace): declared per
+  target (`--distro debian@12`), or read once from the image's `/etc/os-release`. A `--check`
+  mode fails when the file is out of date with the lockfile (a CI gate).
+- **in-build execution inside that layer** is the alternative when the distro can't be known
+  ahead of time: the generated layer `COPY`s the static bosun binary and runs
+  `bosun install --frozen --yes`, which reads the real base's os-release. For dev containers
+  the same thing can ship as a **Dev Container Feature** (the standard way to layer installs
+  onto any base image declared in `devcontainer.json`).
+- Standard Dockerfiles have no `INCLUDE` directive (third-party BuildKit frontends add one),
+  so "include a bosun fragment into the main Dockerfile" is done by layering with `FROM`
+  instead.
 
 **Hazard — repo drift makes the container case *harder*, not easier.** `RUN apt-get install -y
 pkg=1.24.0-2ubuntu7.3` rots: base-image repos rotate and drop old versions, so a pin that built
@@ -1084,6 +1119,11 @@ remote indexes. Traits stay ready; nothing is stubbed.
 - **State locking:** a mutating run holds an exclusive lock on the state file from load to
   save (the lock spans the plan and apply), using `std::fs::File::lock`; writes are atomic
   (temp file, fsync, rename). A save-only lock would lose claims when two runs interleave.
+- **Backends describe, executors act (user decision, §5.1):** mutating `Installer` methods
+  return step lists (`Run` / `Fetch` / `Extract`). The host executor runs them, and the
+  container renderer turns them into `Containerfile.bosun` (§8.2). **Binding on slice 7**; the
+  ports trait change goes in with it. Rendering itself (`render`, `Containerfile.bosun`) stays
+  after M1; render args/env and the bosun layer are both supported shapes.
 - `Arch` is amd64/arm64 only; `Os` uses Docker's spelling (`darwin`).
 
 **Slice status:**
