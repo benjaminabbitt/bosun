@@ -19,3 +19,12 @@ pub const SPEC_INVALID_COMPARATOR: &str = "invalid version comparator";
 pub const RESOLVE_NO_AVAILABLE: &str = "no versions available to resolve against";
 /// No available version satisfies the spec under its policy.
 pub const RESOLVE_UNSATISFIABLE: &str = "no available version satisfies the spec";
+
+/// A string that is not one of bosun's known operating systems.
+pub const PLATFORM_UNKNOWN_OS: &str = "unknown operating system";
+/// A string that is not one of bosun's known architectures.
+pub const PLATFORM_UNKNOWN_ARCH: &str = "unknown architecture";
+/// A target string not of the form `os/arch` (or the literal `any`).
+pub const PLATFORM_INVALID_TARGET: &str = "invalid target (expected os/arch or any)";
+/// A selector string not of the form `os` or `os:distro`.
+pub const PLATFORM_INVALID_SELECTOR: &str = "invalid selector (expected os or os:distro)";

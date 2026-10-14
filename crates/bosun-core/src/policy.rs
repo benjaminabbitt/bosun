@@ -93,7 +93,7 @@ enum Op {
 }
 
 /// One `op version` clause of a non-SemVer range.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Comparator {
     op: Op,
     bound: Version,
@@ -116,7 +116,7 @@ impl Comparator {
 }
 
 /// A parsed range constraint, scheme-aware (see module docs).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Constraint {
     /// SemVer grammar, via the `semver` crate.
     Semver(semver::VersionReq),
@@ -172,7 +172,7 @@ fn parse_comparator(clause: &str, scheme: Scheme) -> Result<Comparator, SpecErro
 /// The interpreted spec: the exact kernel each policy resolves with. Keeping
 /// the policy and its parsed form in one enum makes an invalid pairing
 /// (e.g. `Range` with a lone pin) unrepresentable.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Plan {
     Exact(Version),
     Range(Constraint),
@@ -181,7 +181,7 @@ enum Plan {
 
 /// A version spec: the written string, the scheme it is read under, and the
 /// policy that governs how it selects from available versions.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Spec {
     raw: String,
     scheme: Scheme,
@@ -288,7 +288,7 @@ impl Resolution {
 
 /// A manifest entry's resolvable intent: a logical name (§5.4) and its spec.
 /// Per-target backend/package selection is layered on in later slices.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
     /// bosun's own logical name for the tool.
     pub name: String,
