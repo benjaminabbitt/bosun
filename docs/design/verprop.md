@@ -220,7 +220,7 @@ Target keys use Docker's platform syntax, so a build can look them up with Build
 | `targets.<t>.manifestHash` | per target: hash of the *parsed* manifest (comments stripped) that target was resolved against, so editing a comment doesn't invalidate the lock; `install --frozen` errors when the current target's hash doesn't match (§4.7) |
 | `name` | bosun's logical name for the tool (§5.4); never has to match any backend's naming |
 | `spec` / `policy` | the intent, copied from the manifest so the lockfile reads on its own; a target may carry its own `spec` where that platform's version string differs |
-| `backend` / `package` / `source` | which package manager, under which package ID, from which source, for that target |
+| `backend` / `purl` | which package manager, and the package's canonical purl (unversioned, with qualifiers such as `repository_url`, `arch`, `distro`) for that target (§5.6); replaces separate `package` / `source` fields |
 | `resolved` | the exact version selected for that target |
 | `deviation` | present only when `resolved` differs from an exact `spec` (e.g. `next-higher`); surfaced on apply |
 | `indexSnapshot` | for repo-bound backends: when the index it resolved against was fetched; pairs with base-image digest pinning for reproducible builds |
@@ -798,7 +798,8 @@ both (the grammars are small).
 
 ## 7. Resolution policy (orthogonal to backend)
 
-Per-entry, with a global default + override:
+Per-entry, with a global default + override. **Range syntax and the exact selection rule per
+policy are defined by vers in §5.6, which supersedes the examples below.**
 
 - **strict / exact** — must be exactly X or fail. Reproducible builds; frozen lock.
 - **range / auto-upgrade** — a constraint (`^1.2`, `>=1.2,<2`, `1.2.*`); resolve to the **highest
@@ -1075,13 +1076,12 @@ remote indexes. Traits stay ready; nothing is stubbed.
 - Mutation testing inside agent containers runs `--in-place` on a disposable copy of the tree
   with `TMPDIR` off `/tmp`: the shared `.git` is read-only there, so `git worktree add` fails.
 - The dogfood `bosun.yaml` targets plain `linux:debian`, not a specific release.
-- **Range grammar is per version scheme:** SemVer entries use `semver::VersionReq` (`^`, `~`,
-  `*`, and SemVer's rule that a range admits a pre-release only when it names one, §12);
-  Debian/generic entries use AND-ed comparators (`>=`, `>`, `<=`, `<`, `=`, bare).
-  `1.2.*` and `^` are SemVer-only.
-- **Tolerant covers both forms in M1** (user decision): pin round-up (next-higher, never
-  below) and "accept any point release in a range" (§7, e.g. `1.7.1-*`). The range form is
-  slice 2b, done after slice 4.
+- ~~Range grammar is per version scheme (semver `VersionReq` / AND-ed comparators)~~ —
+  superseded by vers (§5.6), slice 4b.
+- **purl + vers (user decision, §5.6):** package identity is purl; every spec is vers;
+  policy is a selection rule over the vers set. Tolerant-with-range is in M1, expressed as a
+  vers range. This supersedes the per-scheme range grammar recorded below (no `^`, `~`,
+  `1.2.*` in M1).
 - Error and log text lives in `errmsg` / `logmsg` constants; data-carrying thiserror
   variants use a named binding (`#[error("{kind}: {0}", kind = errmsg::X)]`).
 
@@ -1090,6 +1090,9 @@ remote indexes. Traits stay ready; nothing is stubbed.
   common backend/package/source sits in a `Placement` embedded in both leaves. `PackageId`
   carries an optional opaque `kind` (brew cask, scoop bucket). The JSON wire format (field
   renames, key order) is pinned in bosun-io, not in bosun-core.
+- `Driver` is defined in slice 9 with the plan type; `BackendFactory::build` returns both
+  halves (`Backend { index, installer }`) because resolve needs the query side too. Process
+  and HTTP ports (with fakes) live in bosun-ports; a non-zero exit is data, not an error.
 - `Arch` is amd64/arm64 only; `Os` uses Docker's spelling (`darwin`).
 
 **Slice status:**
@@ -1100,8 +1103,9 @@ remote indexes. Traits stay ready; nothing is stubbed.
 | 1 | bosun-core version model (§6) | landed; 24 tests, mutation 25/25 viable caught |
 | 2 | bosun-core Spec/Policy, exact/range/tolerant (§7) | landed; 46 tests, mutation 17/17 viable caught |
 | 3 | bosun-core platform/backend/record value types (§4.5, §4.6, §5.4) | landed; 64 tests, mutation 18/18 viable caught |
-| 2b | tolerant-with-range (§7) | not started; queued after slice 4 |
-| 4–13 | ports, io, host, backends, resolve, apply, cli, acceptance, dogfood, quality | not started |
+| 4 | bosun-ports traits (§5.1, §5.3, §5.5) + bosun-core Distro | landed; 71 tests, mutation 28/28 viable caught |
+| 4b | adopt purl + vers (§5.6): rework slice 2 range grammar and slice 3 PackageId; tolerant-with-range falls out of it | in progress |
+| 5–13 | io, host, backends, resolve, apply, cli, acceptance, dogfood, quality | not started |
 
 **Active implementor:** `lame-wide-chant` (worktree branch `ctxloom/lame-wide-chant`), one
 slice per turn, reporting to the orchestrator after each. Previous: `hoary-quick-elm` (crashed
