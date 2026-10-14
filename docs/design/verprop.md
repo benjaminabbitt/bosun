@@ -1015,6 +1015,10 @@ remote indexes. Traits stay ready; nothing is stubbed.
 | 1 | bosun-core version model (§6) | WIP on main, unverified (run interrupted mid mutation test) |
 | 2–13 | policy, domain, ports, io, host, backends, resolve, apply, cli, acceptance, dogfood, quality | not started |
 
+**Active implementor:** `lame-wide-chant` (worktree branch `ctxloom/lame-wide-chant`), one
+slice per turn, reporting to the orchestrator after each. Previous: `hoary-quick-elm` (crashed
+during slice 1; its scaffold and WIP were cherry-picked onto main).
+
 **Resume procedure:** dispatch a new `implementor` agent (worktree) with a brief pointing at
 this section; it continues from the first slice not marked landed, and the orchestrator updates
 this table as each slice lands.
