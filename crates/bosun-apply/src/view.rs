@@ -165,6 +165,16 @@ fn diag_view(d: &Diagnostic) -> DiagView<'_> {
             name.as_str(),
             Some(format!("{installed} does not satisfy {spec}")),
         ),
+        Diagnostic::UnsupportedHold { name, backend } => (
+            "unsupported-hold",
+            name.as_str(),
+            Some(backend.as_str().to_string()),
+        ),
+        Diagnostic::UnsupportedDowngrade { name, backend } => (
+            "unsupported-downgrade",
+            name.as_str(),
+            Some(backend.as_str().to_string()),
+        ),
     };
     DiagView {
         diagnostic,

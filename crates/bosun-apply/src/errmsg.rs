@@ -29,3 +29,11 @@ pub const EMPTY_INTERSECTION: &str = "claims cannot be jointly satisfied";
 /// A package present outside bosun no longer satisfies its spec (§4.6): a
 /// warning; bosun changes nothing and tells the user to upgrade it themselves.
 pub const ACCEPTED_UNSATISFIED: &str = "installed outside bosun and no longer satisfies its spec";
+
+/// A backend cannot durably hold the version it installed (§5.2): a warning;
+/// the install still happens, just unpinned.
+pub const UNSUPPORTED_HOLD: &str = "backend cannot hold; version not pinned";
+
+/// A backend cannot move a package down to the resolved version (§5.2): an
+/// error for that package; apply is blocked.
+pub const UNSUPPORTED_DOWNGRADE: &str = "backend cannot downgrade to the resolved version";

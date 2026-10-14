@@ -17,8 +17,11 @@
 //! this owns the plan's). Serialisation is one-way — apply runs the in-memory
 //! value, so there is no `Deserialize` (and no version-scheme to reconstruct).
 
+mod applier;
 mod errmsg;
 mod view;
+
+pub use applier::{ActionOutcome, ApplyReport, ApplyResult, Driver, HostApplier};
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -168,18 +171,35 @@ pub enum Diagnostic {
         /// The spec it no longer satisfies.
         spec: String,
     },
+    /// The backend cannot durably hold the version it installed (§5.2): a
+    /// warning; the install still happens, just unpinned.
+    UnsupportedHold {
+        /// The entry's name.
+        name: String,
+        /// The backend that cannot hold.
+        backend: BackendId,
+    },
+    /// The backend cannot move a package down to the resolved (lower) version
+    /// (§5.2): an error for that package; apply is blocked.
+    UnsupportedDowngrade {
+        /// The entry's name.
+        name: String,
+        /// The backend that cannot downgrade.
+        backend: BackendId,
+    },
 }
 
 impl Diagnostic {
     /// Whether this diagnostic blocks apply (§4.8).
     pub fn severity(&self) -> Severity {
         match self {
-            Diagnostic::Unsatisfiable { .. } | Diagnostic::EmptyIntersection { .. } => {
-                Severity::Error
-            }
+            Diagnostic::Unsatisfiable { .. }
+            | Diagnostic::EmptyIntersection { .. }
+            | Diagnostic::UnsupportedDowngrade { .. } => Severity::Error,
             Diagnostic::NotApplicable { .. }
             | Diagnostic::MissingBackend { .. }
-            | Diagnostic::AcceptedUnsatisfied { .. } => Severity::Warning,
+            | Diagnostic::AcceptedUnsatisfied { .. }
+            | Diagnostic::UnsupportedHold { .. } => Severity::Warning,
         }
     }
 }
@@ -217,6 +237,20 @@ impl std::fmt::Display for Diagnostic {
                 "{name}: {installed} {} ({spec})",
                 errmsg::ACCEPTED_UNSATISFIED
             ),
+            Diagnostic::UnsupportedHold { name, backend } => {
+                write!(
+                    f,
+                    "{name}: {} ({})",
+                    errmsg::UNSUPPORTED_HOLD,
+                    backend.as_str()
+                )
+            }
+            Diagnostic::UnsupportedDowngrade { name, backend } => write!(
+                f,
+                "{name}: {} ({})",
+                errmsg::UNSUPPORTED_DOWNGRADE,
+                backend.as_str()
+            ),
         }
     }
 }
@@ -240,14 +274,17 @@ impl Plan {
     }
 
     /// The `terraform plan -detailed-exitcode` style code (§4.8): `1` if any
-    /// diagnostic is an error, else `2` if there are actions to apply, else `0`.
+    /// diagnostic is an error, else `2` if any action changes a package
+    /// (install/upgrade/downgrade/hold/remove), else `0`. Pure `accept` and
+    /// `drop-claim` are shown and applied but do not count, so a drift check on
+    /// a machine whose tools are already present exits `0`.
     pub fn exit_code(&self) -> i32 {
         if self.has_errors() {
             1
-        } else if self.actions.is_empty() {
-            0
-        } else {
+        } else if self.actions.iter().any(|a| a.kind.changes_machine()) {
             2
+        } else {
+            0
         }
     }
 }
@@ -370,6 +407,18 @@ pub fn build_install_plan(
         };
 
         let Some((kind, from)) = change else { continue };
+        let caps = m.installer.capabilities();
+
+        // A needed downgrade the backend can't do is an error for this package,
+        // not a whole-plan failure (§5.2): skip it and record the diagnostic.
+        if kind == ActionKind::Downgrade && !caps.supports_downgrade {
+            diagnostics.push(Diagnostic::UnsupportedDowngrade {
+                name: m.name.clone(),
+                backend: m.backend.clone(),
+            });
+            continue;
+        }
+
         let steps = if kind == ActionKind::Downgrade {
             m.installer.downgrade(&pkg, &m.resolved)?
         } else {
@@ -392,8 +441,9 @@ pub fn build_install_plan(
             ActionKind::Downgrade => downgrades.push(action),
             _ => unreachable!("change is only install/upgrade/downgrade"),
         }
-        // Pin the version we chose, on backends that can hold (§5.2).
-        if m.installer.capabilities().supports_hold {
+        // Pin the version we chose. A backend that can't hold degrades to a
+        // warning and is skipped (§5.2) — the install still stands, unpinned.
+        if caps.supports_hold {
             holds.push(Action {
                 kind: ActionKind::Hold,
                 name: m.name.clone(),
@@ -404,6 +454,11 @@ pub fn build_install_plan(
                 to: Some(m.resolved.clone()),
                 claims: m.claims.clone(),
                 steps: m.installer.hold(&pkg, &m.resolved)?,
+            });
+        } else {
+            diagnostics.push(Diagnostic::UnsupportedHold {
+                name: m.name.clone(),
+                backend: m.backend.clone(),
             });
         }
     }

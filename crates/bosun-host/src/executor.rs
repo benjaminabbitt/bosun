@@ -169,6 +169,13 @@ fn io_err(path: &Path, e: std::io::Error) -> PortError {
     }
 }
 
+impl bosun_ports::StepRunner for StepExecutor<'_> {
+    fn execute(&self, steps: &[Step]) -> Result<(), PortError> {
+        // Delegate to the inherent method (unambiguous by type path).
+        StepExecutor::execute(self, steps)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

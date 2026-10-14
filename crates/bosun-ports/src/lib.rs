@@ -28,4 +28,4 @@ pub use error::PortError;
 pub use exec::{Command, CommandRunner, HttpFetcher, HttpRequest, HttpResponse, Output};
 pub use machine::{Elevation, Machine, Privilege, User};
 pub use state::{StateStore, StateTransaction};
-pub use step::{Step, Steps};
+pub use step::{Step, StepRunner, Steps};

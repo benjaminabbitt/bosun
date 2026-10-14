@@ -21,11 +21,12 @@ fn deb(raw: &str) -> Version {
 }
 
 /// A configurable fake backend installer: deterministic steps, chosen scope,
-/// and capability flags.
+/// capability flags, and what `verify_installed` reports after apply.
 struct FakeInstaller {
     scope: Scope,
     supports_hold: bool,
     downgradable: bool,
+    verify: Installed,
 }
 
 impl FakeInstaller {
@@ -60,7 +61,7 @@ impl Installer for FakeInstaller {
         Ok(self.run("install", pkg, Some(version)))
     }
     fn verify_installed(&self, _pkg: &Ref) -> Result<Installed, PortError> {
-        Ok(Installed::Absent)
+        Ok(self.verify.clone())
     }
     fn hold(&self, pkg: &Ref, version: &Version) -> Result<Steps, PortError> {
         Ok(self.run("hold", pkg, Some(version)))
@@ -84,6 +85,7 @@ fn apt() -> FakeInstaller {
         scope: Scope::System,
         supports_hold: true,
         downgradable: true,
+        verify: Installed::Absent,
     }
 }
 
@@ -92,6 +94,7 @@ fn cargo() -> FakeInstaller {
         scope: Scope::User,
         supports_hold: false,
         downgradable: false,
+        verify: Installed::Absent,
     }
 }
 
@@ -221,6 +224,8 @@ fn install_plan_accepts_a_present_satisfying_accepted_package() {
         !accept.needs_elevation(),
         "accept needs no root even in system scope"
     );
+    // An accept-only plan changes no package, so the drift check exits 0.
+    assert_eq!(plan.exit_code(), 0);
 }
 
 #[test]
@@ -321,7 +326,7 @@ fn install_plan_orders_installs_then_upgrades_then_holds() {
 }
 
 #[test]
-fn a_backend_that_cannot_hold_emits_no_hold() {
+fn a_backend_that_cannot_hold_warns_and_skips_the_hold() {
     let cargo = cargo();
     let m = Managed {
         name: "ripgrep".to_string(),
@@ -334,7 +339,50 @@ fn a_backend_that_cannot_hold_emits_no_hold() {
         installer: &cargo,
     };
     let plan = build_install_plan(&[m], vec![]).unwrap();
+    // The install still stands; the hold degrades to a warning (§5.2).
     assert_eq!(kinds(&plan), vec![ActionKind::Install]);
+    assert_eq!(plan.diagnostics.len(), 1);
+    assert_eq!(plan.diagnostics[0].severity(), Severity::Warning);
+    assert!(matches!(
+        &plan.diagnostics[0],
+        Diagnostic::UnsupportedHold { name, backend } if name == "ripgrep" && *backend == BackendId::new("cargo")
+    ));
+    // A warning does not block: the install still makes this exit "2 pending".
+    assert_eq!(plan.exit_code(), 2);
+}
+
+#[test]
+fn an_unsupported_downgrade_is_an_error_that_skips_the_action() {
+    // A backend that can't downgrade, asked to move a package down.
+    let frozen = FakeInstaller {
+        scope: Scope::User,
+        supports_hold: false,
+        downgradable: false,
+        verify: Installed::Absent,
+    };
+    let m = Managed {
+        name: "ripgrep".to_string(),
+        purl: "pkg:cargo/ripgrep".parse().unwrap(),
+        backend: BackendId::new("cargo"),
+        resolved: Version::parse("1.0.0", Scheme::Semver).unwrap(),
+        vers_type: "cargo".to_string(),
+        claims: vec![],
+        current: Current::Present {
+            version: Some(Version::parse("2.0.0", Scheme::Semver).unwrap()),
+            origin: Origin::Installed,
+        },
+        installer: &frozen,
+    };
+    let plan = build_install_plan(&[m], vec![]).unwrap();
+
+    // No action emitted; an error diagnostic naming the package and backend.
+    assert!(plan.actions.is_empty());
+    assert!(plan.has_errors());
+    assert!(matches!(
+        &plan.diagnostics[0],
+        Diagnostic::UnsupportedDowngrade { name, backend } if name == "ripgrep" && *backend == BackendId::new("cargo")
+    ));
+    assert_eq!(plan.exit_code(), 1);
 }
 
 // --- privilege check -------------------------------------------------------
@@ -554,6 +602,8 @@ fn uninstall_only_drops_the_claim_when_another_manifest_still_wants_it() {
 
     assert_eq!(kinds(&plan), vec![ActionKind::DropClaim]);
     assert_eq!(plan.actions[0].claims, vec![claim("/w/a", ">=1.7")]);
+    // A bare claim drop changes no package: exit 0.
+    assert_eq!(plan.exit_code(), 0);
 }
 
 #[test]
@@ -698,4 +748,495 @@ fn plan_serializes_to_the_json_wire_format() {
     assert_eq!(actions[0]["needs_elevation"], true);
     assert_eq!(actions[0]["steps"][0]["step"], "run");
     assert_eq!(actions[1]["action"], "hold");
+}
+
+// --- the host applier (9-2, §4.8/§4.6) -------------------------------------
+
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use bosun_ports::{StateStore, StateTransaction, StepRunner};
+
+/// A step runner that records what it ran and optionally fails on a marker arg.
+struct FakeStepRunner {
+    fail_on: Option<String>,
+    executed: RefCell<Vec<Vec<String>>>,
+}
+
+impl FakeStepRunner {
+    fn ok() -> FakeStepRunner {
+        FakeStepRunner {
+            fail_on: None,
+            executed: RefCell::new(Vec::new()),
+        }
+    }
+    fn failing(marker: &str) -> FakeStepRunner {
+        FakeStepRunner {
+            fail_on: Some(marker.to_string()),
+            executed: RefCell::new(Vec::new()),
+        }
+    }
+    fn ran(&self) -> Vec<Vec<String>> {
+        self.executed.borrow().clone()
+    }
+}
+
+impl StepRunner for FakeStepRunner {
+    fn execute(&self, steps: &[Step]) -> Result<(), PortError> {
+        for step in steps {
+            if let Step::Run { argv, .. } = step {
+                self.executed.borrow_mut().push(argv.clone());
+                if let Some(marker) = &self.fail_on {
+                    if argv.iter().any(|a| a == marker) {
+                        return Err(PortError::CommandFailed {
+                            program: argv.first().cloned().unwrap_or_default(),
+                            code: Some(1),
+                            stderr: "boom".to_string(),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// An in-memory state store; the transaction writes back on commit.
+struct FakeStateStore {
+    doc: Rc<RefCell<StateDocument>>,
+}
+
+struct FakeTxn {
+    doc: Rc<RefCell<StateDocument>>,
+    snapshot: StateDocument,
+}
+
+impl FakeStateStore {
+    fn empty() -> FakeStateStore {
+        FakeStateStore {
+            doc: Rc::new(RefCell::new(StateDocument {
+                state_version: 1,
+                packages: Vec::new(),
+            })),
+        }
+    }
+    fn with(doc: StateDocument) -> FakeStateStore {
+        FakeStateStore {
+            doc: Rc::new(RefCell::new(doc)),
+        }
+    }
+    fn snapshot(&self) -> StateDocument {
+        self.doc.borrow().clone()
+    }
+}
+
+impl StateStore for FakeStateStore {
+    type Transaction = FakeTxn;
+    fn begin(&self, _scope: Scope) -> Result<FakeTxn, PortError> {
+        Ok(FakeTxn {
+            doc: self.doc.clone(),
+            snapshot: self.doc.borrow().clone(),
+        })
+    }
+    fn try_begin(&self, scope: Scope) -> Result<Option<FakeTxn>, PortError> {
+        Ok(Some(self.begin(scope)?))
+    }
+    fn read(&self, _scope: Scope) -> Result<StateDocument, PortError> {
+        Ok(self.doc.borrow().clone())
+    }
+}
+
+impl StateTransaction for FakeTxn {
+    fn state(&self) -> &StateDocument {
+        &self.snapshot
+    }
+    fn commit(self, state: StateDocument) -> Result<(), PortError> {
+        *self.doc.borrow_mut() = state;
+        Ok(())
+    }
+}
+
+fn present(raw: &str) -> Installed {
+    Installed::Present {
+        version: Some(deb(raw)),
+    }
+}
+
+fn verifying(scope: Scope, hold: bool, down: bool, verify: Installed) -> FakeInstaller {
+    FakeInstaller {
+        scope,
+        supports_hold: hold,
+        downgradable: down,
+        verify,
+    }
+}
+
+fn results(report: &ApplyReport) -> Vec<(ActionKind, ApplyResult)> {
+    report
+        .outcomes
+        .iter()
+        .map(|o| (o.kind, o.result.clone()))
+        .collect()
+}
+
+#[test]
+fn apply_runs_steps_verifies_and_records_state() {
+    let apt = verifying(Scope::System, true, true, present("1.7.1-3"));
+    let plan = build_install_plan(
+        &[managed(
+            "jq",
+            "1.7.1-3",
+            Current::Absent,
+            &apt,
+            vec![claim("/w/a", "1.7.1-3")],
+        )],
+        vec![],
+    )
+    .unwrap();
+
+    let exec = FakeStepRunner::ok();
+    let insts: BTreeMap<BackendId, &dyn Installer> =
+        BTreeMap::from([(BackendId::new("apt"), &apt as &dyn Installer)]);
+    let store = FakeStateStore::empty();
+    let applier = HostApplier::new(
+        Scope::System,
+        AMD64,
+        Some("babbitt".to_string()),
+        &exec,
+        &insts,
+        &store,
+    );
+
+    let report = applier.apply(&plan).unwrap();
+
+    assert_eq!(
+        results(&report),
+        vec![
+            (ActionKind::Install, ApplyResult::Applied),
+            (ActionKind::Hold, ApplyResult::Applied),
+        ]
+    );
+    // State written: one package, verified version, origin installed, claim
+    // stamped with the invoking user (system scope).
+    let doc = store.snapshot();
+    assert_eq!(doc.packages.len(), 1);
+    let leaf = &doc.packages[0].targets[&AMD64];
+    assert_eq!(leaf.installed.as_str(), "1.7.1-3");
+    assert_eq!(leaf.origin, Origin::Installed);
+    assert_eq!(leaf.claimed_by[0].user.as_deref(), Some("babbitt"));
+    // The install and the hold both ran.
+    assert_eq!(exec.ran().len(), 2);
+    assert_eq!(exec.ran()[0][0], "install");
+    assert_eq!(exec.ran()[1][0], "hold");
+}
+
+#[test]
+fn apply_records_the_resolved_version_when_verify_has_none() {
+    // github-release: present but no readable version → record the resolved one.
+    let gh = verifying(
+        Scope::User,
+        false,
+        false,
+        Installed::Present { version: None },
+    );
+    let m = Managed {
+        name: "ctxloom".to_string(),
+        purl: "pkg:github/ctxloom/ctxloom?binary=ctxloom".parse().unwrap(),
+        backend: BackendId::new("github-release"),
+        resolved: Version::parse("0.6.4", Scheme::Semver).unwrap(),
+        vers_type: "semver".to_string(),
+        claims: vec![claim("/w/a", ">=0.6")],
+        current: Current::Absent,
+        installer: &gh,
+    };
+    let plan = build_install_plan(&[m], vec![]).unwrap();
+
+    let exec = FakeStepRunner::ok();
+    let insts: BTreeMap<BackendId, &dyn Installer> =
+        BTreeMap::from([(BackendId::new("github-release"), &gh as &dyn Installer)]);
+    let store = FakeStateStore::empty();
+    let applier = HostApplier::new(Scope::User, AMD64, None, &exec, &insts, &store);
+
+    let report = applier.apply(&plan).unwrap();
+    assert!(report
+        .outcomes
+        .iter()
+        .all(|o| o.result == ApplyResult::Applied));
+    assert_eq!(
+        store.snapshot().packages[0].targets[&AMD64]
+            .installed
+            .as_str(),
+        "0.6.4"
+    );
+}
+
+#[test]
+fn apply_fails_an_install_that_does_not_verify() {
+    // Steps "succeed" but the package is not present afterwards.
+    let apt = verifying(Scope::System, true, true, Installed::Absent);
+    let plan = build_install_plan(
+        &[managed(
+            "jq",
+            "1.7.1-3",
+            Current::Absent,
+            &apt,
+            vec![claim("/w/a", "1.7.1-3")],
+        )],
+        vec![],
+    )
+    .unwrap();
+
+    let exec = FakeStepRunner::ok();
+    let insts: BTreeMap<BackendId, &dyn Installer> =
+        BTreeMap::from([(BackendId::new("apt"), &apt as &dyn Installer)]);
+    let store = FakeStateStore::empty();
+    let applier = HostApplier::new(Scope::System, AMD64, None, &exec, &insts, &store);
+
+    let report = applier.apply(&plan).unwrap();
+    assert!(matches!(
+        report.outcomes[0].result,
+        ApplyResult::Failed { .. }
+    ));
+    // Nothing recorded: the install did not verify (Appendix B).
+    assert!(store.snapshot().packages.is_empty());
+}
+
+#[test]
+fn apply_isolates_a_failed_backend_and_continues_others() {
+    let apt = verifying(Scope::User, true, true, present("1.0.0"));
+    let cargo = verifying(Scope::User, false, false, present("1.0.0"));
+    // "boom" installs via apt (the runner fails on it); ripgrep via cargo is fine.
+    let boom = Managed {
+        name: "boom".to_string(),
+        purl: "pkg:deb/debian/boom".parse().unwrap(),
+        backend: BackendId::new("apt"),
+        resolved: deb("1.0.0"),
+        vers_type: "deb".to_string(),
+        claims: vec![],
+        current: Current::Absent,
+        installer: &apt,
+    };
+    let ripgrep = Managed {
+        name: "ripgrep".to_string(),
+        purl: "pkg:deb/debian/ripgrep".parse().unwrap(),
+        backend: BackendId::new("cargo"),
+        resolved: deb("1.0.0"),
+        vers_type: "deb".to_string(),
+        claims: vec![],
+        current: Current::Absent,
+        installer: &cargo,
+    };
+    let plan = build_install_plan(&[boom, ripgrep], vec![]).unwrap();
+
+    let exec = FakeStepRunner::failing("boom");
+    let insts: BTreeMap<BackendId, &dyn Installer> = BTreeMap::from([
+        (BackendId::new("apt"), &apt as &dyn Installer),
+        (BackendId::new("cargo"), &cargo as &dyn Installer),
+    ]);
+    let store = FakeStateStore::empty();
+    let applier = HostApplier::new(Scope::User, AMD64, None, &exec, &insts, &store);
+
+    let report = applier.apply(&plan).unwrap();
+
+    // boom's install fails; its later hold is skipped; cargo's install still runs.
+    let r = results(&report);
+    assert_eq!(r.len(), 3);
+    assert!(matches!(
+        r[0],
+        (ActionKind::Install, ApplyResult::Failed { .. })
+    ));
+    assert_eq!(r[1], (ActionKind::Install, ApplyResult::Applied));
+    assert_eq!(r[2], (ActionKind::Hold, ApplyResult::Skipped));
+    // Only ripgrep landed in state.
+    let doc = store.snapshot();
+    assert_eq!(doc.packages.len(), 1);
+    assert_eq!(doc.packages[0].name, "ripgrep");
+}
+
+#[test]
+fn apply_accept_records_a_claim_without_running_steps() {
+    let apt = verifying(Scope::System, true, true, Installed::Absent);
+    let current = Current::Present {
+        version: Some(deb("2.43.0")),
+        origin: Origin::Accepted,
+    };
+    let plan = build_install_plan(
+        &[managed(
+            "git",
+            "2.43.0",
+            current,
+            &apt,
+            vec![claim("/w/a", ">=2.40")],
+        )],
+        vec![],
+    )
+    .unwrap();
+
+    let exec = FakeStepRunner::ok();
+    let insts: BTreeMap<BackendId, &dyn Installer> =
+        BTreeMap::from([(BackendId::new("apt"), &apt as &dyn Installer)]);
+    let store = FakeStateStore::empty();
+    let applier = HostApplier::new(
+        Scope::System,
+        AMD64,
+        Some("babbitt".to_string()),
+        &exec,
+        &insts,
+        &store,
+    );
+
+    let report = applier.apply(&plan).unwrap();
+    assert_eq!(
+        results(&report),
+        vec![(ActionKind::Accept, ApplyResult::Applied)]
+    );
+    assert!(exec.ran().is_empty(), "accept runs no steps");
+    let leaf = &store.snapshot().packages[0].targets[&AMD64];
+    assert_eq!(leaf.origin, Origin::Accepted);
+    assert_eq!(leaf.installed.as_str(), "2.43.0");
+}
+
+fn prestate(name: &str, installed: &str, origin: Origin, claims: Vec<Claim>) -> StateDocument {
+    StateDocument {
+        state_version: 1,
+        packages: vec![Package {
+            name: name.to_string(),
+            meta: (),
+            targets: BTreeMap::from([(
+                AMD64,
+                StateLeaf {
+                    placement: Placement {
+                        backend: BackendId::new("apt"),
+                        purl: format!("pkg:deb/debian/{name}").parse().unwrap(),
+                    },
+                    installed: deb(installed),
+                    origin,
+                    claimed_by: claims,
+                },
+            )]),
+        }],
+    }
+}
+
+#[test]
+fn apply_remove_runs_uninstall_and_drops_the_package() {
+    let apt = verifying(Scope::System, true, true, Installed::Absent);
+    let insts: BTreeMap<BackendId, &dyn Installer> =
+        BTreeMap::from([(BackendId::new("apt"), &apt as &dyn Installer)]);
+    let store = FakeStateStore::with(prestate(
+        "jq",
+        "1.7.1-3",
+        Origin::Installed,
+        vec![claim("/w/a", ">=1.7")],
+    ));
+    let plan = build_uninstall_plan(Path::new("/w/a"), &store.snapshot(), &insts).unwrap();
+
+    let exec = FakeStepRunner::ok();
+    let applier = HostApplier::new(Scope::System, AMD64, None, &exec, &insts, &store);
+    let report = applier.apply(&plan).unwrap();
+
+    assert_eq!(
+        results(&report),
+        vec![(ActionKind::Remove, ApplyResult::Applied)]
+    );
+    assert_eq!(exec.ran()[0][0], "remove");
+    assert!(store.snapshot().packages.is_empty());
+}
+
+#[test]
+fn apply_drop_claim_keeps_the_package_and_removes_only_that_claim() {
+    let apt = verifying(Scope::System, true, true, Installed::Absent);
+    let insts: BTreeMap<BackendId, &dyn Installer> =
+        BTreeMap::from([(BackendId::new("apt"), &apt as &dyn Installer)]);
+    let store = FakeStateStore::with(prestate(
+        "jq",
+        "1.7.1-3",
+        Origin::Installed,
+        vec![claim("/w/a", ">=1.7"), claim("/w/b", ">=1.7")],
+    ));
+    let plan = build_uninstall_plan(Path::new("/w/a"), &store.snapshot(), &insts).unwrap();
+
+    let exec = FakeStepRunner::ok();
+    let applier = HostApplier::new(Scope::System, AMD64, None, &exec, &insts, &store);
+    let report = applier.apply(&plan).unwrap();
+
+    assert_eq!(
+        results(&report),
+        vec![(ActionKind::DropClaim, ApplyResult::Applied)]
+    );
+    assert!(exec.ran().is_empty(), "dropping a claim runs no steps");
+    let leaf = &store.snapshot().packages[0].targets[&AMD64];
+    assert_eq!(leaf.claimed_by, vec![claim("/w/b", ">=1.7")]);
+}
+
+#[test]
+fn apply_records_a_new_package_without_touching_an_existing_one() {
+    // A different package already in state must not be overwritten by a new
+    // install (guards the name match in `record`).
+    let apt = verifying(Scope::System, true, true, present("1.7.1-3"));
+    let store = FakeStateStore::with(prestate(
+        "git",
+        "2.43.0",
+        Origin::Installed,
+        vec![claim("/w/x", ">=2")],
+    ));
+    let plan = build_install_plan(
+        &[managed(
+            "jq",
+            "1.7.1-3",
+            Current::Absent,
+            &apt,
+            vec![claim("/w/a", "1.7.1-3")],
+        )],
+        vec![],
+    )
+    .unwrap();
+
+    let exec = FakeStepRunner::ok();
+    let insts: BTreeMap<BackendId, &dyn Installer> =
+        BTreeMap::from([(BackendId::new("apt"), &apt as &dyn Installer)]);
+    let applier = HostApplier::new(Scope::System, AMD64, None, &exec, &insts, &store);
+    applier.apply(&plan).unwrap();
+
+    let doc = store.snapshot();
+    assert_eq!(doc.packages.len(), 2);
+    let git = doc.packages.iter().find(|p| p.name == "git").unwrap();
+    assert_eq!(git.targets[&AMD64].installed.as_str(), "2.43.0");
+    let jq = doc.packages.iter().find(|p| p.name == "jq").unwrap();
+    assert_eq!(jq.targets[&AMD64].installed.as_str(), "1.7.1-3");
+}
+
+#[test]
+fn user_scope_apply_leaves_claims_unstamped() {
+    // The invoking user is stamped only in system scope (§4.6); a user-scope
+    // apply must leave a claim's user as it was, even with a user provided.
+    let inst = verifying(Scope::User, false, true, present("1.0.0"));
+    let plan = build_install_plan(
+        &[managed(
+            "ripgrep",
+            "1.0.0",
+            Current::Absent,
+            &inst,
+            vec![claim("/w/a", ">=1.0")],
+        )],
+        vec![],
+    )
+    .unwrap();
+
+    let exec = FakeStepRunner::ok();
+    let insts: BTreeMap<BackendId, &dyn Installer> =
+        BTreeMap::from([(BackendId::new("apt"), &inst as &dyn Installer)]);
+    let store = FakeStateStore::empty();
+    let applier = HostApplier::new(
+        Scope::User,
+        AMD64,
+        Some("root".to_string()),
+        &exec,
+        &insts,
+        &store,
+    );
+    applier.apply(&plan).unwrap();
+
+    let leaf = &store.snapshot().packages[0].targets[&AMD64];
+    assert_eq!(leaf.claimed_by[0].user, None);
 }

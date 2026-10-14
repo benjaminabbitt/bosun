@@ -8,6 +8,18 @@ use std::path::PathBuf;
 
 use bosun_core::Scope;
 
+use crate::error::PortError;
+
+/// Carries out a [`Steps`] list on the host (§5.1): runs each command, fetches
+/// and checksum-verifies each download, extracts each archive member. The
+/// adapter lives in bosun-host; the applier (bosun-apply) drives it through
+/// this port so it never depends on the host crate, and a container renderer
+/// can be a peer driver (§8).
+pub trait StepRunner {
+    /// Carry out `steps` in order, stopping at the first failure.
+    fn execute(&self, steps: &[Step]) -> Result<(), PortError>;
+}
+
 /// One mutation step.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Step {
