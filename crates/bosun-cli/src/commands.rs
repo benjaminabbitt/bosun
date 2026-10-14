@@ -467,8 +467,9 @@ pub fn install_plan(env: &Env, opts: InstallOpts, pref: &[BackendId]) -> Result<
     let file = manifest_file(opts.path)?;
     let manifest = load(&file)?;
     let hash = manifest_hash(&manifest);
-    let sys = read_state(env, Scope::System)?;
-    let usr = read_state(env, Scope::User)?;
+    // Read state lazily per scope: a user-scope install must not touch (and
+    // lock) root-owned system state it has no business reading.
+    let mut state = ScopeCache::new(env);
 
     let (managed, carried) = if opts.frozen {
         let lock_path = lock_path(&file);
@@ -479,16 +480,44 @@ pub fn install_plan(env: &Env, opts: InstallOpts, pref: &[BackendId]) -> Result<
             ))
         })?;
         (
-            managed_from_lock(env, &file, &lock, &sys, &usr)?,
+            managed_from_lock(env, &file, &lock, &mut state)?,
             Vec::new(),
         )
     } else {
         let resolution = resolve(&manifest, &hash, &env.host(), &env.resolvables(), pref)
             .map_err(|e| CliError::Resolve(e.to_string()))?;
-        managed_from_resolution(env, &file, &resolution, &sys, &usr)?
+        managed_from_resolution(env, &file, &resolution, &mut state)?
     };
 
     build_install_plan(&managed, carried).map_err(|e| CliError::Resolve(e.to_string()))
+}
+
+/// State read lazily, one scope at a time (§4.6): the system file is opened
+/// only when a system-scope package needs it.
+struct ScopeCache<'a> {
+    env: &'a Env,
+    sys: Option<StateDocument>,
+    usr: Option<StateDocument>,
+}
+
+impl<'a> ScopeCache<'a> {
+    fn new(env: &'a Env) -> ScopeCache<'a> {
+        ScopeCache {
+            env,
+            sys: None,
+            usr: None,
+        }
+    }
+    fn get(&mut self, scope: Scope) -> Result<&StateDocument, CliError> {
+        let slot = match scope {
+            Scope::System => &mut self.sys,
+            Scope::User => &mut self.usr,
+        };
+        if slot.is_none() {
+            *slot = Some(read_state(self.env, scope)?);
+        }
+        Ok(slot.as_ref().expect("just populated"))
+    }
 }
 
 /// Build the `uninstall` plan for one manifest (§9), from state, so it works
@@ -513,8 +542,7 @@ fn managed_from_resolution<'a>(
     env: &'a Env,
     manifest_path: &Path,
     resolution: &bosun_resolve::Resolution,
-    sys: &StateDocument,
-    usr: &StateDocument,
+    state: &mut ScopeCache,
 ) -> Result<(Vec<Managed<'a>>, Vec<Diagnostic>), CliError> {
     let mut managed = Vec::new();
     let mut carried = Vec::new();
@@ -541,7 +569,7 @@ fn managed_from_resolution<'a>(
                 let vers_type = env.vers_type(backend).unwrap_or("generic").to_string();
                 let purl = leaf.placement.purl.clone();
                 let scope = installer.scope();
-                let doc = scope_state(scope, sys, usr);
+                let doc = state.get(scope)?;
                 let claims = claims_for(manifest_path, &entry.name, &pkg.meta.canonical(), doc);
                 // §4.6 A: a package not in bosun state is checked on the machine
                 // (accepted if present), so one installed outside bosun is never
@@ -587,8 +615,7 @@ fn managed_from_lock<'a>(
     env: &'a Env,
     manifest_path: &Path,
     lock: &LockDocument,
-    sys: &StateDocument,
-    usr: &StateDocument,
+    state: &mut ScopeCache,
 ) -> Result<Vec<Managed<'a>>, CliError> {
     let mut managed = Vec::new();
     for pkg in &lock.packages {
@@ -607,7 +634,7 @@ fn managed_from_lock<'a>(
         })?;
         let vers_type = env.vers_type(backend).unwrap_or("generic").to_string();
         let scope = installer.scope();
-        let doc = scope_state(scope, sys, usr);
+        let doc = state.get(scope)?;
         let purl = leaf.placement.purl.clone();
         let claims = claims_for(manifest_path, &pkg.name, &pkg.meta.canonical(), doc);
         // §7 --frozen: refuse if another claim's spec excludes the locked version.
@@ -638,17 +665,6 @@ fn not_applicable_diagnostic(name: &str, na: &NotApplicable) -> Diagnostic {
         NotApplicable::NoSelector | NotApplicable::NoBackend => Diagnostic::NotApplicable {
             name: name.to_string(),
         },
-    }
-}
-
-fn scope_state<'a>(
-    scope: Scope,
-    sys: &'a StateDocument,
-    usr: &'a StateDocument,
-) -> &'a StateDocument {
-    match scope {
-        Scope::System => sys,
-        Scope::User => usr,
     }
 }
 

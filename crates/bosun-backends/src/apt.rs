@@ -235,11 +235,21 @@ impl Installer for AptBackend {
     }
 
     fn uninstall(&self, pkg: &Ref) -> Result<Steps, PortError> {
-        Ok(vec![Step::Run {
-            argv: argv(&["apt-get", "remove", "-y", &pkg.purl.native_id()]),
-            env: noninteractive(),
-            scope: Scope::System,
-        }])
+        let id = pkg.purl.native_id();
+        // Release the hold first, so a package bosun installed and held leaves
+        // no lingering hold once removed (§9).
+        Ok(vec![
+            Step::Run {
+                argv: argv(&["apt-mark", "unhold", &id]),
+                env: noninteractive(),
+                scope: Scope::System,
+            },
+            Step::Run {
+                argv: argv(&["apt-get", "remove", "-y", &id]),
+                env: noninteractive(),
+                scope: Scope::System,
+            },
+        ])
     }
 }
 
@@ -310,7 +320,10 @@ mod tests {
         );
         assert_eq!(
             b.uninstall(&reff("jq")).unwrap(),
-            vec![run_step(&["apt-get", "remove", "-y", "jq"])]
+            vec![
+                run_step(&["apt-mark", "unhold", "jq"]),
+                run_step(&["apt-get", "remove", "-y", "jq"]),
+            ]
         );
     }
 

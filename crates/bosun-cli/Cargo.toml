@@ -38,5 +38,9 @@ futures.workspace = true
 name = "acceptance"
 harness = false
 
+[[test]]
+name = "acceptance_real"
+harness = false
+
 [lints]
 workspace = true
