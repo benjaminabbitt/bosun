@@ -471,9 +471,32 @@ mod tests {
     fn extract_matches_across_a_dot_slash_prefix() {
         let dir = tempfile::tempdir().unwrap();
         let archive = dir.path().join("r.tar.gz");
-        targz(&archive, &[("./bin/jq", b"X")]); // stored with a leading ./
+        // A decoy first entry whose name differs only once normalisation is
+        // applied: a `norm` that collapses every name to a constant would
+        // wrongly match this one, so the extracted bytes pin that `norm`
+        // actually strips `./` on both sides rather than returning a constant.
+        targz(&archive, &[("README", b"DECOY"), ("./bin/jq", b"X")]);
         let dest = dir.path().join("jq");
         extract(&archive, "bin/jq", &dest).unwrap(); // requested without ./
         assert_eq!(std::fs::read(&dest).unwrap(), b"X");
+    }
+
+    #[test]
+    fn execute_through_the_steprunner_trait_drives_the_runner() {
+        // The inherent `execute` is covered above; this pins the trait-object
+        // dispatch (the port the applier actually calls) delegates to it.
+        let runner = FakeCommandRunner::new().with_stdout("");
+        let fetcher = FakeHttpFetcher::new();
+        let exec = StepExecutor::new(&runner, &fetcher);
+        let runner_port: &dyn bosun_ports::StepRunner = &exec;
+        runner_port
+            .execute(&[Step::Run {
+                argv: vec!["apt-get".into(), "update".into()],
+                env: vec![],
+                scope: Scope::System,
+            }])
+            .unwrap();
+        assert_eq!(runner.calls().len(), 1);
+        assert_eq!(runner.calls()[0].program, "apt-get");
     }
 }

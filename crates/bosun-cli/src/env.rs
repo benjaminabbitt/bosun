@@ -385,3 +385,55 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
         ))),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture_env(dir: &std::path::Path, json: &str) -> Env {
+        let fx = dir.join("fixture.json");
+        std::fs::write(&fx, json).unwrap();
+        from_fixture(fx.to_str().unwrap(), dir.join("state").to_str().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn vers_type_returns_the_named_backends_type_and_none_for_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = fixture_env(
+            dir.path(),
+            r#"{"os":"linux","arch":"amd64","backends":[
+                {"id":"apt","version":"2.0","purl_type":"deb","vers_type":"deb"},
+                {"id":"cargo","version":"1.0","purl_type":"cargo","vers_type":"semver"}]}"#,
+        );
+        assert_eq!(env.vers_type(&BackendId::new("apt")), Some("deb"));
+        assert_eq!(env.vers_type(&BackendId::new("cargo")), Some("semver"));
+        assert_eq!(env.vers_type(&BackendId::new("nope")), None);
+    }
+
+    #[test]
+    fn from_fixture_reads_the_privilege() {
+        let dir = tempfile::tempdir().unwrap();
+        let elevated = fixture_env(
+            dir.path(),
+            r#"{"os":"linux","arch":"amd64","privilege":"elevated","backends":[]}"#,
+        );
+        assert_eq!(elevated.machine.privilege(), Privilege::Elevated);
+
+        let dir2 = tempfile::tempdir().unwrap();
+        let plain = fixture_env(
+            dir2.path(),
+            r#"{"os":"linux","arch":"amd64","backends":[]}"#,
+        );
+        assert_eq!(plain.machine.privilege(), Privilege::Unelevated);
+    }
+
+    #[test]
+    fn reason_text_names_each_skip_reason() {
+        assert_eq!(reason_text(&SkipReason::NotPresent), "not present");
+        assert_eq!(
+            reason_text(&SkipReason::ProbeFailed("boom".into())),
+            "probe failed: boom"
+        );
+        assert_eq!(reason_text(&SkipReason::Panicked), "probe panicked");
+    }
+}

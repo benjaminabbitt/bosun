@@ -818,3 +818,20 @@ impl Render for ApplyReport {
             .join("\n")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preference_dedups_and_drops_empty_flag_entries() {
+        // The dedup guard is `!empty && !already-present`: a repeated id
+        // appears once, an empty string never. (Robust to any BOSUN_INSTALLER
+        // or config entries the host might contribute: those add neither a
+        // duplicate "apt" nor an empty id.)
+        let order = preference(&["apt".to_string(), String::new(), "apt".to_string()]);
+        let ids: Vec<&str> = order.iter().map(BackendId::as_str).collect();
+        assert_eq!(ids.iter().filter(|id| **id == "apt").count(), 1);
+        assert!(!ids.iter().any(|id| id.is_empty()));
+    }
+}

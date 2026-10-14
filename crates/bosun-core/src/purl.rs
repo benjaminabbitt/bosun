@@ -370,6 +370,14 @@ mod tests {
     }
 
     #[test]
+    fn display_joins_subpath_segments_with_single_slashes() {
+        // Exercises the Display join at every boundary: no leading slash
+        // before the first segment, exactly one between the rest.
+        let p = parse("pkg:github/o/r@1#a/b/c");
+        assert_eq!(p.to_string(), "pkg:github/o/r@1#a/b/c");
+    }
+
+    #[test]
     fn unregistered_type_is_allowed() {
         // winget/scoop/snap/flatpak have no registered purl type (§5.6).
         let p = parse("pkg:winget/sharkdp.fd");

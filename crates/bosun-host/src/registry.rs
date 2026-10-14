@@ -268,7 +268,11 @@ mod tests {
         let mut present: Vec<&str> = reg.backends().iter().map(|b| b.id.as_str()).collect();
         present.sort();
         assert_eq!(present, vec!["apt", "cargo"]);
-        assert_eq!(reg.get("apt").unwrap().version.as_str(), "1.0.0");
+        let got = reg.get("apt").unwrap();
+        // Assert on the id, not the version: both present backends carry
+        // "1.0.0", so a version check cannot tell them apart.
+        assert_eq!(got.id.as_str(), "apt");
+        assert_eq!(got.version.as_str(), "1.0.0");
 
         let skip = |id: &str| {
             reg.skipped()
@@ -279,5 +283,11 @@ mod tests {
         assert_eq!(skip("dnf"), Some(&SkipReason::NotPresent));
         assert!(matches!(skip("brew"), Some(SkipReason::ProbeFailed(_))));
         assert_eq!(skip("snap"), Some(&SkipReason::Panicked));
+
+        let (backends, skipped) = reg.into_parts();
+        let mut ids: Vec<&str> = backends.iter().map(|b| b.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["apt", "cargo"]);
+        assert_eq!(skipped.len(), 3);
     }
 }
