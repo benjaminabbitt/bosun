@@ -1172,6 +1172,10 @@ remote indexes. Traits stay ready; nothing is stubbed.
   the whole plan.
 - Holds are change-driven: emitted only when the package changes this run, so a fully-applied
   manifest plans to nothing.
+- **State is written after every confirmed action**, not only at the end of the run, with the
+  lock held throughout; a crash mid-apply never leaves a bosun-installed package unrecorded
+  (it would otherwise look `accepted` and never be pruned). The applier depends on a
+  `StepRunner` port, implemented by bosun-host's `StepExecutor`.
 - `Arch` is amd64/arm64 only; `Os` uses Docker's spelling (`darwin`).
 
 **Slice status:**
@@ -1196,8 +1200,9 @@ remote indexes. Traits stay ready; nothing is stubbed.
 | 8-1 | bosun-resolve: single-manifest resolve (selectors, installer preference, purl building, highest-in-set, `any` target) | landed; 182 tests; mutation 14/14 viable caught |
 | 8-2 | multi-claim intersection, lock merge per target, `--frozen`, `lock --check` (pure functions) | landed; 193 tests; mutation 31/31 viable caught |
 | 9-1 | bosun-apply: plan builder (§4.8) + privilege check (§5.5); JSON via one-way DTO views | landed; 216 tests; mutation 48/48 viable caught |
-| 9-2 | Driver + host applier; exit code counts package changes only; unsupported capability → diagnostic | in progress |
-| 10–13 | cli, acceptance, dogfood, quality | not started |
+| 9-2 | Driver + host applier (one transaction, per-backend isolation, verify-before-record); exit code and capability fixes | landed; 226 tests; mutation 64/64 viable caught |
+| 10 | bosun-cli: wiring, commands, `--format`, confirmation; per-action durable state writes; ApplyReport JSON | in progress |
+| 11–13 | cli, acceptance, dogfood, quality | not started |
 
 **Active implementor:** `lame-wide-chant` (worktree branch `ctxloom/lame-wide-chant`), one
 slice per turn, reporting to the orchestrator after each. Previous: `hoary-quick-elm` (crashed
