@@ -989,6 +989,36 @@ into `$GITHUB_ENV` by workflows, used by a Windows CI job and a host install, an
 drift tests. Replacing it with `bosun.yaml` + `bosun.lock` + `bosun render` exercises the
 container driver (§8), multi-arch checksums, and CI consumers on a real project.
 
+## 13. Implementation status (recovery log)
+
+Kept current by the orchestrating session so a crashed run can be resumed. The M1 slice plan
+lives in the implementing agent's plan file (`bosun-m1.plan.md`, slices 0–13); this section is
+the authoritative record of what has landed on `main` and what was decided along the way.
+
+**Goal (M1):** enough of bosun to dogfood on a Debian host (§12): apt, cargo and
+github-release backends; `backends`, `install`, `uninstall`, `prune`, `status`, `lock`.
+Out of M1: other backends, `render`, `export`, `upgrade`, `adopt`, macOS/Windows machines,
+remote indexes. Traits stay ready; nothing is stubbed.
+
+**Decisions made during implementation:**
+
+- annals is pinned by git rev `3c5fbac`. `annals_yaml::edit` is not published yet, so `add`
+  and `remove` are **left out of the CLI entirely** (no "unavailable" stub) until it lands.
+- `rust-toolchain.toml` pins **1.96.1**, matching the host and the agent image.
+- The dogfood `bosun.yaml` targets plain `linux:debian`, not a specific release.
+
+**Slice status:**
+
+| slice | what | state |
+|---|---|---|
+| 0 | workspace skeleton, justfile, bacon.toml, LICENSE | landed |
+| 1 | bosun-core version model (§6) | WIP on main, unverified (run interrupted mid mutation test) |
+| 2–13 | policy, domain, ports, io, host, backends, resolve, apply, cli, acceptance, dogfood, quality | not started |
+
+**Resume procedure:** dispatch a new `implementor` agent (worktree) with a brief pointing at
+this section; it continues from the first slice not marked landed, and the orchestrator updates
+this table as each slice lands.
+
 ## Appendix A — PM version-pinning mechanics (verified 2026-10-13)
 
 Command-level reference for the four researched backends. (apt, dnf, uv, npm.)
