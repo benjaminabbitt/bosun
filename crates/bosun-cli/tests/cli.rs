@@ -42,7 +42,10 @@ fn project() -> TempDir {
 }
 
 fn bosun(dir: &Path) -> Command {
-    let mut cmd = Command::cargo_bin("bosun").unwrap();
+    // env!("CARGO_BIN_EXE_bosun") is the binary cargo built for this test run —
+    // under cargo-llvm-cov that is the instrumented one, so subprocess coverage
+    // is captured (cargo_bin's own resolution would miss it).
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_bosun"));
     cmd.env("BOSUN_FIXTURE", dir.join("fixture.json"))
         .env("BOSUN_STATE_DIR", dir.join("state"));
     cmd
@@ -54,8 +57,7 @@ fn stdout_json(output: &[u8]) -> Value {
 
 #[test]
 fn version_is_reported() {
-    let out = Command::cargo_bin("bosun")
-        .unwrap()
+    let out = Command::new(env!("CARGO_BIN_EXE_bosun"))
         .arg("--version")
         .assert()
         .success();
@@ -295,8 +297,7 @@ fn a_non_applicable_entry_is_reported_with_its_reason() {
 fn the_fixture_seam_requires_both_env_vars() {
     let dir = project();
     // BOSUN_FIXTURE alone (no state dir) → structured environment error, exit 1.
-    let only_fixture = Command::cargo_bin("bosun")
-        .unwrap()
+    let only_fixture = Command::new(env!("CARGO_BIN_EXE_bosun"))
         .env("BOSUN_FIXTURE", dir.path().join("fixture.json"))
         .env_remove("BOSUN_STATE_DIR")
         .args(["--format", "json", "backends"])
@@ -308,8 +309,7 @@ fn the_fixture_seam_requires_both_env_vars() {
     );
 
     // BOSUN_STATE_DIR alone (no fixture) → the same error, never a real probe.
-    let only_state = Command::cargo_bin("bosun")
-        .unwrap()
+    let only_state = Command::new(env!("CARGO_BIN_EXE_bosun"))
         .env("BOSUN_STATE_DIR", dir.path().join("state"))
         .env_remove("BOSUN_FIXTURE")
         .args(["--format", "json", "backends"])
@@ -809,5 +809,117 @@ fn a_user_scope_install_never_opens_system_state() {
     assert!(
         !system.join("state.lock").exists(),
         "system state must not be opened by a user-scope install"
+    );
+}
+
+#[test]
+fn yaml_format_renders_yaml() {
+    let dir = project();
+    let out = bosun(dir.path())
+        .args(["--format", "yaml", "backends"])
+        .assert()
+        .success();
+    let text = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+    assert!(text.contains("registered:"), "yaml: {text}");
+    assert!(text.contains("id: apt"), "yaml: {text}");
+}
+
+#[test]
+fn status_reports_a_not_applicable_entry() {
+    let dir = project_with(
+        "version: 1\ntargets: [linux/amd64]\npackages:\n  - name: mac-only\n    spec: \">=1.0.0|<2.0.0\"\n    install:\n      darwin: {backend: cargo}\n",
+    );
+    let out = bosun(dir.path())
+        .args(["--format", "json", "status"])
+        .arg(dir.path())
+        .assert()
+        .success();
+    let json = stdout_json(&out.get_output().stdout);
+    let diags = json["diagnostics"].as_array().unwrap();
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.as_str().unwrap().contains("not applicable")),
+        "diagnostics: {diags:?}"
+    );
+}
+
+#[test]
+fn lock_check_reports_a_stale_target() {
+    let dir = project();
+    bosun(dir.path())
+        .args(["lock"])
+        .arg(dir.path())
+        .assert()
+        .success();
+    // Change the manifest (a new spec → a new hash) so the lock is stale.
+    fs::write(
+        dir.path().join("bosun.yaml"),
+        "version: 1\ntargets: [linux/amd64]\npackages:\n  - name: jq\n    spec: \">=1.7.1\"\n    install:\n      linux:debian: {backend: apt}\n",
+    )
+    .unwrap();
+    let out = bosun(dir.path())
+        .args(["--format", "json", "lock"])
+        .arg(dir.path())
+        .arg("--check")
+        .assert()
+        .code(2);
+    assert_eq!(
+        stdout_json(&out.get_output().stdout)["targets"][0]["freshness"],
+        "stale"
+    );
+}
+
+#[test]
+fn a_text_format_error_is_human_readable() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("fixture.json"), FIXTURE).unwrap();
+    // No manifest → a structured error, rendered as text.
+    let out = bosun(dir.path())
+        .args(["--format", "text", "lock"])
+        .arg(dir.path())
+        .assert()
+        .code(1);
+    let text = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+    assert!(text.contains("error:"), "text error: {text}");
+    assert!(
+        text.contains("bosun.cli.manifest_not_found"),
+        "text error: {text}"
+    );
+}
+
+#[test]
+fn a_text_format_privilege_error_shows_the_remedy() {
+    let fixture = r#"{"os":"linux","arch":"amd64","distro":{"id":"debian","codename":"trixie"},
+      "privilege":"unelevated","user":"ben",
+      "backends":[{"id":"apt","version":"2.6.1","purl_type":"deb","vers_type":"deb","platform_independent":false,
+        "scope":"system","supports_hold":true,"available":{"jq":["1.7.1-6+deb13u2"]}}]}"#;
+    let manifest = "version: 1\ntargets: [linux/amd64]\npackages:\n  - name: jq\n    spec: \">=1.6\"\n    install:\n      linux:debian: {backend: apt}\n";
+    let dir = write_project(fixture, manifest);
+    let out = bosun(dir.path())
+        .args(["--format", "text", "install"])
+        .arg(dir.path())
+        .arg("--yes")
+        .assert()
+        .code(1);
+    let text = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+    assert!(text.contains("error:"), "{text}");
+    assert!(text.contains("sudo bosun install --scope system"), "{text}");
+}
+
+#[test]
+fn install_honours_an_explicit_scope() {
+    // --scope user restricts the run to user actions (exercises the ScopeArg
+    // conversion and the scope-restricted apply path).
+    let dir = apply_project(USER_MANIFEST);
+    let out = bosun(dir.path())
+        .args(["--format", "json", "install"])
+        .arg(dir.path())
+        .args(["--scope", "user", "--yes"])
+        .assert()
+        .code(0);
+    assert_eq!(
+        stdout_json(&out.get_output().stdout)["outcomes"][0]["result"],
+        "applied"
     );
 }

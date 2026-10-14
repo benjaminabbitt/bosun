@@ -63,3 +63,18 @@ impl From<IoError> for bosun_ports::PortError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_to_a_port_error_carrying_its_message() {
+        let e = IoError::Convert {
+            detail: "origin \"bogus\"".to_string(),
+        };
+        let message = e.to_string();
+        let port: bosun_ports::PortError = e.into();
+        assert!(matches!(port, bosun_ports::PortError::StateIo { detail } if detail == message));
+    }
+}

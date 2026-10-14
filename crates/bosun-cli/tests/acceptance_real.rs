@@ -91,7 +91,7 @@ fn make_user(w: &mut RealWorld) {
 #[when(expr = "I run {string} as a non-root user")]
 fn i_run_as_user(w: &mut RealWorld, cmdline: String) {
     let home = w.home();
-    let bosun = assert_cmd::cargo::cargo_bin("bosun");
+    let bosun = std::path::PathBuf::from(env!("CARGO_BIN_EXE_bosun"));
     let mut args: Vec<String> = [
         "-u",
         "bosuntest",
@@ -140,7 +140,7 @@ fn i_run(w: &mut RealWorld, cmdline: String) {
             }
         })
         .collect();
-    let out = Command::new(assert_cmd::cargo::cargo_bin("bosun"))
+    let out = Command::new(env!("CARGO_BIN_EXE_bosun"))
         .current_dir(&home)
         .env("HOME", &home)
         // Keep XDG from redirecting user state away from HOME.

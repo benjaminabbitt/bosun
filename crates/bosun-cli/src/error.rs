@@ -65,3 +65,30 @@ impl Diagnostic for CliError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_variant_has_a_message_a_stable_code_and_args() {
+        let cases = [
+            CliError::ManifestNotFound(PathBuf::from("/x/bosun.yaml")),
+            CliError::Io {
+                path: PathBuf::from("/y"),
+                detail: "disk full".to_string(),
+            },
+            CliError::Parse {
+                what: "manifest".to_string(),
+                detail: "bad key".to_string(),
+            },
+            CliError::Resolve("unsatisfiable".to_string()),
+            CliError::Environment("no fixture".to_string()),
+        ];
+        for case in &cases {
+            assert!(!case.to_string().is_empty(), "{case:?}");
+            assert!(case.code().starts_with("bosun.cli."), "{}", case.code());
+            assert!(!case.args().is_empty(), "{case:?}");
+        }
+    }
+}

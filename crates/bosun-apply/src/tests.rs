@@ -1368,3 +1368,169 @@ fn apply_report_serializes_to_json() {
     assert_eq!(outcomes[0]["name"], "jq");
     assert_eq!(outcomes[1]["action"], "hold");
 }
+
+#[test]
+fn plan_json_renders_every_diagnostic_and_step_kind() {
+    use std::path::PathBuf;
+    // An action whose steps include Fetch and Extract (github-release shape).
+    let action = Action {
+        kind: ActionKind::Install,
+        name: "ctxloom".to_string(),
+        scope: Scope::User,
+        backend: BackendId::new("github-release"),
+        purl: "pkg:github/ctxloom/ctxloom".parse().unwrap(),
+        from: None,
+        to: Some(Version::parse("0.6.4", Scheme::Semver).unwrap()),
+        claims: vec![Claim {
+            manifest: PathBuf::from("/w/bosun.yaml"),
+            spec: "vers:semver/>=0.6.0".to_string(),
+            user: Some("ben".to_string()),
+        }],
+        steps: vec![
+            Step::Fetch {
+                url: "https://example/a.tar.gz".to_string(),
+                sha256: "abc".to_string(),
+                dest: PathBuf::from("/tmp/a.tar.gz"),
+            },
+            Step::Extract {
+                archive: PathBuf::from("/tmp/a.tar.gz"),
+                member: "ctxloom".to_string(),
+                dest: PathBuf::from("/home/ben/.local/bin/ctxloom"),
+                mode: 0o755,
+            },
+        ],
+    };
+    let plan = Plan {
+        actions: vec![action],
+        diagnostics: vec![
+            Diagnostic::NotApplicable { name: "a".into() },
+            Diagnostic::MissingBackend {
+                name: "b".into(),
+                candidates: vec![BackendId::new("brew")],
+            },
+            Diagnostic::Unsatisfiable {
+                name: "c".into(),
+                spec: "vers:semver/>=9".into(),
+                available: "1.0.0".into(),
+            },
+            Diagnostic::EmptyIntersection {
+                name: "d".into(),
+                claims: "x=>=1, y=<1".into(),
+            },
+            Diagnostic::AcceptedUnsatisfied {
+                name: "e".into(),
+                installed: "1.0".into(),
+                spec: ">=2".into(),
+            },
+            Diagnostic::UnsupportedHold {
+                name: "f".into(),
+                backend: BackendId::new("brew"),
+            },
+            Diagnostic::UnsupportedDowngrade {
+                name: "g".into(),
+                backend: BackendId::new("brew"),
+            },
+        ],
+    };
+    let json = serde_json::to_value(&plan).unwrap();
+    let steps = &json["actions"][0]["steps"];
+    assert_eq!(steps[0]["step"], "fetch");
+    assert_eq!(steps[1]["step"], "extract");
+    assert_eq!(json["actions"][0]["claims"][0]["user"], "ben");
+    let kinds: Vec<&str> = json["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["diagnostic"].as_str().unwrap())
+        .collect();
+    assert!(kinds.contains(&"not-applicable"));
+    assert!(kinds.contains(&"missing-backend"));
+    assert!(kinds.contains(&"unsatisfiable"));
+    assert!(kinds.contains(&"empty-intersection"));
+    assert!(kinds.contains(&"accepted-unsatisfied"));
+    assert!(kinds.contains(&"unsupported-hold"));
+    assert!(kinds.contains(&"unsupported-downgrade"));
+    // Error diagnostics make it an error plan.
+    assert_eq!(json["exit_code"], 1);
+}
+
+#[test]
+fn apply_report_json_renders_applied_failed_and_skipped() {
+    let report = ApplyReport {
+        outcomes: vec![
+            ActionOutcome {
+                name: "a".into(),
+                kind: ActionKind::Install,
+                result: ApplyResult::Applied,
+            },
+            ActionOutcome {
+                name: "b".into(),
+                kind: ActionKind::Hold,
+                result: ApplyResult::Failed {
+                    error: "boom".into(),
+                },
+            },
+            ActionOutcome {
+                name: "c".into(),
+                kind: ActionKind::Hold,
+                result: ApplyResult::Skipped,
+            },
+        ],
+    };
+    let json = serde_json::to_value(&report).unwrap();
+    let os = json["outcomes"].as_array().unwrap();
+    assert_eq!(os[0]["result"], "applied");
+    assert_eq!(os[1]["result"], "failed");
+    assert_eq!(os[1]["error"], "boom");
+    assert_eq!(os[2]["result"], "skipped");
+}
+
+#[test]
+fn diagnostics_and_privilege_errors_have_text() {
+    // Exercise the Display arms (human/text rendering).
+    assert!(Diagnostic::NotApplicable { name: "a".into() }
+        .to_string()
+        .contains("a"));
+    assert!(Diagnostic::MissingBackend {
+        name: "b".into(),
+        candidates: vec![BackendId::new("brew")]
+    }
+    .to_string()
+    .contains("brew"));
+    assert!(Diagnostic::EmptyIntersection {
+        name: "d".into(),
+        claims: "x".into()
+    }
+    .to_string()
+    .contains("x"));
+    assert!(Diagnostic::UnsupportedHold {
+        name: "f".into(),
+        backend: BackendId::new("brew")
+    }
+    .to_string()
+    .contains("brew"));
+    assert!(Diagnostic::UnsupportedDowngrade {
+        name: "g".into(),
+        backend: BackendId::new("cargo")
+    }
+    .to_string()
+    .contains("cargo"));
+    let err = PrivilegeError::MustNotBeElevated {
+        packages: vec![PackageRef {
+            name: "rg".into(),
+            backend: BackendId::new("cargo"),
+        }],
+    };
+    assert!(err.to_string().contains("rg"));
+    let mixed = PrivilegeError::MixedScope {
+        system: vec![PackageRef {
+            name: "jq".into(),
+            backend: BackendId::new("apt"),
+        }],
+        user: vec![PackageRef {
+            name: "rg".into(),
+            backend: BackendId::new("cargo"),
+        }],
+    };
+    assert!(mixed.to_string().contains("jq") && mixed.to_string().contains("rg"));
+}

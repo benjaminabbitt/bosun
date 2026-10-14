@@ -77,7 +77,7 @@ fn i_run(world: &mut BosunWorld, cmdline: String) {
             }
         })
         .collect();
-    let output = Command::new(assert_cmd::cargo::cargo_bin("bosun"))
+    let output = Command::new(env!("CARGO_BIN_EXE_bosun"))
         .env("BOSUN_FIXTURE", p.join("fixture.json"))
         .env("BOSUN_STATE_DIR", p.join("state"))
         .args(&args)
