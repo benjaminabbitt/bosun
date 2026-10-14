@@ -785,3 +785,29 @@ fn an_accepted_package_with_a_conflicting_claim_warns_not_refuses() {
         "reports the mismatch: {json}"
     );
 }
+
+#[test]
+fn a_user_scope_install_never_opens_system_state() {
+    // Regression for the 11-2 fix: a user-scope (cargo) install must read only
+    // user state, never the system file. Make the system state path unreadable
+    // (a directory where a file is expected) — an eager read would error; the
+    // lazy per-scope read leaves it untouched. No system lock is ever created.
+    let dir = apply_project(USER_MANIFEST); // ripgrep via cargo (user scope)
+    let system = dir.path().join("state").join("system");
+    fs::create_dir_all(&system).unwrap();
+    fs::create_dir(system.join("state.json")).unwrap(); // reading this as a file would fail
+
+    bosun(dir.path())
+        .args(["install"])
+        .arg(dir.path())
+        .arg("--yes")
+        .assert()
+        .code(0);
+
+    // The user install landed, and system state was never opened (no lock).
+    assert!(state_file(dir.path()).exists(), "user state written");
+    assert!(
+        !system.join("state.lock").exists(),
+        "system state must not be opened by a user-scope install"
+    );
+}
