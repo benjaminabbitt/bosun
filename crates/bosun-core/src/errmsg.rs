@@ -19,6 +19,9 @@ pub const VERS_BAD_PERCENT: &str = "invalid percent-encoding in vers version";
 /// No available version satisfies a spec's vers set.
 pub const SELECT_UNSATISFIABLE: &str = "no available version satisfies the spec";
 
+/// A spec's constraint version does not parse in the spec's scheme (§6).
+pub const SPEC_BAD_VERSION: &str = "constraint version is not valid for its scheme";
+
 /// A purl string missing the literal `pkg:` scheme.
 pub const PURL_NO_SCHEME: &str = "purl must start with pkg:";
 /// A purl type that is empty or has an invalid character.

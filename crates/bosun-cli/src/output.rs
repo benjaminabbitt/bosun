@@ -86,6 +86,7 @@ struct ErrorValue {
 pub fn render_privilege_error(
     err: &bosun_apply::PrivilegeError,
     elevation: bosun_ports::Elevation,
+    command: &str,
     format: Format,
     out: &mut impl Write,
 ) -> i32 {
@@ -98,7 +99,7 @@ pub fn render_privilege_error(
     let value = PrivilegeErrorValue {
         error: code,
         message: err.to_string(),
-        remedy: remedy_text(err, elevation),
+        remedy: remedy_text(err, elevation, command),
         packages: packages
             .iter()
             .map(|p| PackageRefValue {
@@ -115,27 +116,29 @@ pub fn render_privilege_error(
     1
 }
 
-fn remedy_text(err: &bosun_apply::PrivilegeError, elevation: bosun_ports::Elevation) -> String {
+fn remedy_text(
+    err: &bosun_apply::PrivilegeError,
+    elevation: bosun_ports::Elevation,
+    command: &str,
+) -> String {
     use bosun_apply::PrivilegeError as P;
     use bosun_ports::Elevation as E;
     match (err, elevation) {
         (P::ElevationRequired { .. }, E::Sudo) => {
-            "re-run as root: sudo bosun install --scope system".to_string()
+            format!("re-run as root: sudo bosun {command} --scope system")
         }
         (P::ElevationRequired { .. }, E::AdministratorTerminal) => {
-            "open a terminal as Administrator and re-run: bosun install --scope system".to_string()
+            format!("open a terminal as Administrator and re-run: bosun {command} --scope system")
         }
         (P::MustNotBeElevated { .. }, _) => {
-            "re-run without elevation: bosun install --scope user".to_string()
+            format!("re-run without elevation: bosun {command} --scope user")
         }
-        (P::MixedScope { .. }, E::Sudo) => {
-            "run each scope: `sudo bosun install --scope system`, then `bosun install --scope user`"
-                .to_string()
-        }
-        (P::MixedScope { .. }, E::AdministratorTerminal) => {
-            "run each scope: `bosun install --scope system` as Administrator, then `bosun install --scope user`"
-                .to_string()
-        }
+        (P::MixedScope { .. }, E::Sudo) => format!(
+            "run each scope: `sudo bosun {command} --scope system`, then `bosun {command} --scope user`"
+        ),
+        (P::MixedScope { .. }, E::AdministratorTerminal) => format!(
+            "run each scope: `bosun {command} --scope system` as Administrator, then `bosun {command} --scope user`"
+        ),
     }
 }
 

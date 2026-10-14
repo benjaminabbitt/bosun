@@ -1171,7 +1171,7 @@ mod tests {
         match &r.outcomes[0].outcome {
             Outcome::Unsatisfiable { spec, available } => {
                 assert_eq!(spec, "vers:cargo/>=3.0.0");
-                assert_eq!(available, "1.0.0, 2.0.0");
+                assert_eq!(available, "2.0.0, 1.0.0"); // newest first
             }
             other => panic!("expected unsatisfiable, got {other:?}"),
         }
@@ -1267,7 +1267,7 @@ mod tests {
             &[],
             vec![entry(
                 "ctxloom",
-                Some(">=0.6"),
+                Some(">=0.6.0"),
                 &[("linux", block(&["github-release"], Some("ctxloom"), None))],
             )],
         );
@@ -1326,7 +1326,7 @@ mod tests {
             &[],
             vec![entry(
                 "fd",
-                Some("1.0"),
+                Some("1.0.0"),
                 &[("linux", block(&["cargo"], None, None))],
             )],
         );

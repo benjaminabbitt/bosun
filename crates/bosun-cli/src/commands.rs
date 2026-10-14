@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use bosun_core::record::{LockDocument, StateDocument};
 use bosun_core::{BackendId, Manifest, Scope};
 use bosun_io::{load_manifest, lock, manifest_hash};
-use bosun_ports::StateStore;
+use bosun_ports::{Installer, StateStore};
 use bosun_resolve::{
     check_targets, merge_lock, resolve, Freshness, NotApplicable, Outcome, Resolution,
 };
@@ -228,6 +228,8 @@ impl Render for StatusOutput {
 #[derive(Serialize)]
 pub struct LockOutput {
     check: bool,
+    /// An entry was unsatisfiable: nothing was written, exit 1 (§4.7).
+    error: bool,
     resolved: Vec<ResolvedInfo>,
     diagnostics: Vec<String>,
     targets: Vec<TargetFreshness>,
@@ -275,6 +277,7 @@ pub fn lock(
             .collect();
         return Ok(LockOutput {
             check: true,
+            error: false,
             resolved: Vec::new(),
             diagnostics: Vec::new(),
             targets,
@@ -283,6 +286,17 @@ pub fn lock(
 
     let resolution = resolve(&manifest, &hash, &env.host(), &env.resolvables(), pref)
         .map_err(|e| CliError::Resolve(e.to_string()))?;
+
+    // An unsatisfiable entry leaves this run's targets incomplete: write
+    // nothing and exit 1, never recording a target as fresh when it is not
+    // (§4.7).
+    let has_error = resolution
+        .outcomes
+        .iter()
+        .any(|o| matches!(o.outcome, Outcome::Unsatisfiable { .. }));
+    if has_error {
+        return Ok(lock_output(resolution));
+    }
     let merged = match existing {
         Some(prev) => merge_lock(&prev, &resolution.lock),
         None => resolution.lock.clone(),
@@ -297,6 +311,7 @@ pub fn lock(
 fn lock_output(resolution: Resolution) -> LockOutput {
     let mut resolved = Vec::new();
     let mut diagnostics = Vec::new();
+    let mut error = false;
     for entry in resolution.outcomes {
         match entry.outcome {
             Outcome::Resolved {
@@ -312,14 +327,18 @@ fn lock_output(resolution: Resolution) -> LockOutput {
             Outcome::NotApplicable(na) => {
                 diagnostics.push(format!("{}: not applicable ({})", entry.name, na_text(&na)))
             }
-            Outcome::Unsatisfiable { spec, available } => diagnostics.push(format!(
-                "{}: unsatisfiable {spec} (available: {available})",
-                entry.name
-            )),
+            Outcome::Unsatisfiable { spec, available } => {
+                error = true;
+                diagnostics.push(format!(
+                    "{}: unsatisfiable {spec} (available: {available})",
+                    entry.name
+                ));
+            }
         }
     }
     LockOutput {
         check: false,
+        error,
         resolved,
         diagnostics,
         targets: Vec::new(),
@@ -354,8 +373,11 @@ impl Render for LockOutput {
     }
 
     fn exit_code(&self) -> i32 {
-        // lock --check is a CI gate: any missing or stale target is pending (§4.7).
-        if self.check && self.targets.iter().any(|t| t.freshness != "fresh") {
+        if self.error {
+            // An unsatisfiable entry: nothing written, this is a failure (§4.7).
+            1
+        } else if self.check && self.targets.iter().any(|t| t.freshness != "fresh") {
+            // lock --check is a CI gate: any missing or stale target is pending.
             2
         } else {
             0
@@ -428,8 +450,8 @@ use bosun_apply::{
     build_install_plan, build_prune_plan, build_uninstall_plan, ApplyReport, ApplyResult, Current,
     Diagnostic, Managed, Plan,
 };
-use bosun_core::{Claim, Target};
-use bosun_resolve::frozen_select;
+use bosun_core::{Claim, Installed, Origin, Ref, Target};
+use bosun_resolve::{frozen_select, select_across_claims};
 
 /// Options for `install`.
 pub struct InstallOpts {
@@ -516,16 +538,37 @@ fn managed_from_resolution<'a>(
                 let installer = env.installer_for(backend).ok_or_else(|| {
                     CliError::Environment(format!("no installer for {}", backend.as_str()))
                 })?;
+                let vers_type = env.vers_type(backend).unwrap_or("generic").to_string();
+                let purl = leaf.placement.purl.clone();
                 let scope = installer.scope();
                 let doc = scope_state(scope, sys, usr);
+                let claims = claims_for(manifest_path, &entry.name, &pkg.meta.canonical(), doc);
+                // §4.6 A: a package not in bosun state is checked on the machine
+                // (accepted if present), so one installed outside bosun is never
+                // reinstalled or held.
+                let current = current_for(doc, &entry.name, installer, &purl)?;
+                // §4.6 D: when bosun would act, select over every claim's
+                // intersection (refusing an empty one), not just this manifest.
+                let resolved = if needs_resolution(&current) {
+                    let index = env.index_for(backend).ok_or_else(|| {
+                        CliError::Environment(format!("no index for {}", backend.as_str()))
+                    })?;
+                    let available = index
+                        .query_available(&Ref::new(purl.clone()), target)
+                        .map_err(|e| CliError::Resolve(e.to_string()))?;
+                    select_across_claims(&claims, &vers_type, &available, &[])
+                        .map_err(|e| CliError::Resolve(e.to_string()))?
+                } else {
+                    version.clone() // accepted: bosun does not install it
+                };
                 managed.push(Managed {
                     name: entry.name.clone(),
-                    purl: leaf.placement.purl.clone(),
+                    purl,
                     backend: backend.clone(),
-                    resolved: version.clone(),
-                    vers_type: env.vers_type(backend).unwrap_or("generic").to_string(),
-                    claims: claims_for(manifest_path, &entry.name, &pkg.meta.canonical(), doc),
-                    current: current_of(doc, &entry.name),
+                    resolved,
+                    vers_type,
+                    claims,
+                    current,
                     installer,
                 });
             }
@@ -565,18 +608,21 @@ fn managed_from_lock<'a>(
         let vers_type = env.vers_type(backend).unwrap_or("generic").to_string();
         let scope = installer.scope();
         let doc = scope_state(scope, sys, usr);
+        let purl = leaf.placement.purl.clone();
         let claims = claims_for(manifest_path, &pkg.name, &pkg.meta.canonical(), doc);
         // §7 --frozen: refuse if another claim's spec excludes the locked version.
         frozen_select(&leaf.resolved, &claims, &vers_type)
             .map_err(|e| CliError::Resolve(e.to_string()))?;
+        // §4.6 A: present outside bosun → accepted, not reinstalled.
+        let current = current_for(doc, &pkg.name, installer, &purl)?;
         managed.push(Managed {
             name: pkg.name.clone(),
-            purl: leaf.placement.purl.clone(),
+            purl,
             backend: backend.clone(),
             resolved: leaf.resolved.clone(),
             vers_type,
             claims,
-            current: current_of(doc, &pkg.name),
+            current,
             installer,
         });
     }
@@ -606,19 +652,49 @@ fn scope_state<'a>(
     }
 }
 
-fn current_of(doc: &StateDocument, name: &str) -> Current {
-    match doc
+/// The current state of a package (§4.6). bosun state is authoritative for what
+/// it installed; a package it did not record is checked on the machine with
+/// `verify_installed` and, if present, treated as `accepted` — so a package
+/// installed outside bosun is never reinstalled or held, only accepted.
+fn current_for(
+    doc: &StateDocument,
+    name: &str,
+    installer: &dyn Installer,
+    purl: &bosun_core::Purl,
+) -> Result<Current, CliError> {
+    if let Some(leaf) = doc
         .packages
         .iter()
         .find(|p| p.name == name)
         .and_then(|p| p.targets.values().next())
     {
-        Some(leaf) => Current::Present {
+        return Ok(Current::Present {
             version: Some(leaf.installed.clone()),
             origin: leaf.origin,
-        },
-        None => Current::Absent,
+        });
     }
+    match installer
+        .verify_installed(&Ref::new(purl.clone()))
+        .map_err(|e| CliError::Resolve(e.to_string()))?
+    {
+        Installed::Present { version } => Ok(Current::Present {
+            version,
+            origin: Origin::Accepted,
+        }),
+        Installed::Absent => Ok(Current::Absent),
+    }
+}
+
+/// Whether bosun would install/upgrade/downgrade (so it needs a resolved
+/// version). A package present but not bosun-owned (`accepted`) is left alone.
+fn needs_resolution(current: &Current) -> bool {
+    !matches!(
+        current,
+        Current::Present {
+            origin: Origin::Accepted,
+            ..
+        }
+    )
 }
 
 /// The claims to record: every other manifest's claim on this package, plus the

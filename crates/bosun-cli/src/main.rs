@@ -68,10 +68,13 @@ fn dispatch(cli: &Cli, format: Format) -> Result<i32, CliError> {
             )?;
             run_mutation(
                 &env,
+                Mutation {
+                    command: "install",
+                    plan_only: *plan,
+                    scope: scope.map(Into::into),
+                    yes: *yes,
+                },
                 built,
-                *plan,
-                scope.map(Into::into),
-                *yes,
                 format,
                 &mut out,
             )
@@ -85,10 +88,13 @@ fn dispatch(cli: &Cli, format: Format) -> Result<i32, CliError> {
             let built = commands::uninstall_plan(&env, path.clone())?;
             run_mutation(
                 &env,
+                Mutation {
+                    command: "uninstall",
+                    plan_only: *plan,
+                    scope: scope.map(Into::into),
+                    yes: *yes,
+                },
                 built,
-                *plan,
-                scope.map(Into::into),
-                *yes,
                 format,
                 &mut out,
             )
@@ -97,10 +103,13 @@ fn dispatch(cli: &Cli, format: Format) -> Result<i32, CliError> {
             let built = commands::prune_plan(&env)?;
             run_mutation(
                 &env,
+                Mutation {
+                    command: "prune",
+                    plan_only: *plan,
+                    scope: scope.map(Into::into),
+                    yes: *yes,
+                },
                 built,
-                *plan,
-                scope.map(Into::into),
-                *yes,
                 format,
                 &mut out,
             )
@@ -114,19 +123,29 @@ fn emit<T: Render>(value: &T, format: Format, out: &mut impl Write) -> Result<i3
     Ok(value.exit_code())
 }
 
+/// A mutating command and its flags.
+struct Mutation {
+    /// The command name, for the privilege remedy text.
+    command: &'static str,
+    /// `--plan`: stop after planning.
+    plan_only: bool,
+    /// `--scope`: restrict to one install scope.
+    scope: Option<Scope>,
+    /// `--yes`: skip the confirmation prompt.
+    yes: bool,
+}
+
 /// The plan → privilege → confirm → apply flow for a mutating command (§4.8).
 fn run_mutation(
     env: &Env,
+    m: Mutation,
     plan: Plan,
-    plan_only: bool,
-    scope: Option<Scope>,
-    yes: bool,
     format: Format,
     out: &mut impl Write,
 ) -> Result<i32, CliError> {
     // --plan stops here; it needs no root and changes nothing. Rendered
     // through the same path as any value, so its exit code is the plan's.
-    if plan_only {
+    if m.plan_only {
         return emit(&plan, format, out);
     }
     // A blocking diagnostic (unsatisfiable, empty intersection) refuses apply.
@@ -135,16 +154,17 @@ fn run_mutation(
         return Ok(1);
     }
     // Privilege is checked against what the plan changes (§5.5).
-    if let Err(e) = check_privilege(&plan, env.machine(), scope) {
+    if let Err(e) = check_privilege(&plan, env.machine(), m.scope) {
         return Ok(render_privilege_error(
             &e,
             env.machine().elevation(),
+            m.command,
             format,
             out,
         ));
     }
     // Confirm (§4.8): --yes skips; a TTY prompts; no TTY and no --yes refuses.
-    if !yes {
+    if !m.yes {
         if !std::io::stdin().is_terminal() {
             return Err(CliError::Environment(
                 "refusing to apply without a terminal; re-run with --yes".to_string(),
@@ -165,7 +185,7 @@ fn run_mutation(
     let mut report = bosun_apply::ApplyReport {
         outcomes: Vec::new(),
     };
-    for s in apply_scopes(&plan, scope) {
+    for s in apply_scopes(&plan, m.scope) {
         let part = env
             .apply(s, &plan)
             .map_err(|e| CliError::Resolve(e.to_string()))?;

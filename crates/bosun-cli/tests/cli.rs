@@ -340,10 +340,10 @@ const APPLY_FIXTURE: &str = r#"{
   "backends": [
     {"id":"cargo","version":"1.76.0","purl_type":"cargo","vers_type":"cargo","platform_independent":true,
      "scope":"user","supports_hold":false,
-     "available":{"ripgrep":["14.1.1"]},"installed":{"ripgrep":"14.1.1"}},
+     "available":{"ripgrep":["14.1.1"]}},
     {"id":"apt","version":"2.6.1","purl_type":"deb","vers_type":"deb","platform_independent":false,
      "scope":"system","supports_hold":true,
-     "available":{"jq":["1.7.1-3"]},"installed":{"jq":"1.7.1-3"}}
+     "available":{"jq":["1.7.1-3"]}}
   ]
 }"#;
 
@@ -527,7 +527,7 @@ fn a_failed_step_mid_apply_keeps_the_earlier_package() {
       "backends":[
         {"id":"cargo","version":"1.76.0","purl_type":"cargo","vers_type":"cargo","platform_independent":true,
          "scope":"user","supports_hold":false,
-         "available":{"one":["1.0.0"],"two":["2.0.0"]},"installed":{"one":"1.0.0","two":"2.0.0"}}
+         "available":{"one":["1.0.0"],"two":["2.0.0"]}}
       ]
     }"#;
     let manifest = "version: 1\ntargets: [linux/amd64]\npackages:\n  - name: one\n    spec: \">=1.0.0|<2.0.0\"\n    install:\n      linux: {backend: cargo}\n  - name: two\n    spec: \">=2.0.0|<3.0.0\"\n    install:\n      linux: {backend: cargo}\n";
@@ -646,4 +646,142 @@ fn uninstall_accepts_a_manifest_file_path() {
         .success();
     let state = fs::read_to_string(state_file(dir.path())).unwrap();
     assert!(!state.contains("ripgrep"), "state after uninstall: {state}");
+}
+
+// --- 10-3 regressions (A, C, D, E) -----------------------------------------
+
+fn write_project(fixture: &str, manifest: &str) -> TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("fixture.json"), fixture).unwrap();
+    fs::write(dir.path().join("bosun.yaml"), manifest).unwrap();
+    dir
+}
+
+#[test]
+fn install_accepts_a_package_present_outside_bosun() {
+    // A — host has jq installed (not by bosun), candidate is u2; the manifest
+    // is satisfied by what's present → accept, never install or hold.
+    let fixture = r#"{"os":"linux","arch":"amd64","distro":{"id":"debian","codename":"trixie"},
+      "privilege":"unelevated","user":"ben",
+      "backends":[{"id":"apt","version":"2.6.1","purl_type":"deb","vers_type":"deb","platform_independent":false,
+        "scope":"system","supports_hold":true,
+        "available":{"jq":["1.7.1-6+deb13u2"]},"installed":{"jq":"1.7.1-6+deb13u1"}}]}"#;
+    let manifest = "version: 1\ntargets: [linux/amd64]\npackages:\n  - name: jq\n    spec: \">=1.6\"\n    install:\n      linux:debian: {backend: apt}\n";
+    let dir = write_project(fixture, manifest);
+    let assert = bosun(dir.path())
+        .args(["--format", "json", "install"])
+        .arg(dir.path())
+        .arg("--plan")
+        .assert()
+        .code(0);
+    let json = stdout_json(&assert.get_output().stdout);
+    let actions = json["actions"].as_array().unwrap();
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0]["action"], "accept");
+    assert!(actions
+        .iter()
+        .all(|a| a["action"] != "install" && a["action"] != "hold"));
+}
+
+#[test]
+fn lock_refuses_to_write_an_incomplete_target() {
+    // C — an unsatisfiable entry must exit 1 and write no lockfile.
+    let fixture = r#"{"os":"linux","arch":"amd64","privilege":"unelevated","user":"t",
+      "backends":[{"id":"github-release","version":"1.0.0","purl_type":"github","vers_type":"semver","platform_independent":false,
+        "scope":"user","available":{"ctxloom/ctxloom":["0.6.4"]}}]}"#;
+    let manifest = "version: 1\ntargets: [linux/amd64]\npackages:\n  - name: ctxloom\n    spec: \">=99.0.0\"\n    install:\n      linux: {backend: github-release, package: ctxloom/ctxloom}\n";
+    let dir = write_project(fixture, manifest);
+    let assert = bosun(dir.path())
+        .args(["--format", "json", "lock"])
+        .arg(dir.path())
+        .assert()
+        .code(1);
+    assert_eq!(stdout_json(&assert.get_output().stdout)["error"], true);
+    assert!(!dir.path().join("bosun.lock").exists(), "no partial lock");
+}
+
+#[test]
+fn install_respects_another_projects_claim_range() {
+    // D — project B installed ripgrep 14.0.0 and claims it <14.1.0; installing
+    // project A must not upgrade past B's range.
+    let fixture = r#"{"os":"linux","arch":"amd64","privilege":"unelevated","user":"t",
+      "backends":[{"id":"cargo","version":"1.76.0","purl_type":"cargo","vers_type":"cargo","platform_independent":true,
+        "scope":"user","available":{"ripgrep":["14.0.0","14.1.1"]},"installed":{"ripgrep":"14.0.0"}}]}"#;
+    let manifest = "version: 1\ntargets: [linux/amd64]\npackages:\n  - name: ripgrep\n    spec: \">=14.0.0|<15.0.0\"\n    install:\n      linux: {backend: cargo}\n";
+    let dir = write_project(fixture, manifest);
+    write_user_state(
+        dir.path(),
+        r#"{"stateVersion":1,"packages":[{"name":"ripgrep","targets":{"linux/amd64":{"backend":"cargo","purl":"pkg:cargo/ripgrep","installed":"14.0.0","origin":"installed","claimedBy":[{"manifest":"/other/bosun.yaml","spec":"vers:cargo/>=14.0.0|<14.1.0"}]}}}]}"#,
+    );
+    let assert = bosun(dir.path())
+        .args(["--format", "json", "install"])
+        .arg(dir.path())
+        .arg("--plan")
+        .assert()
+        .code(0);
+    let json = stdout_json(&assert.get_output().stdout);
+    assert!(
+        json["actions"].as_array().unwrap().is_empty(),
+        "cross-claim clamps to 14.0.0, no upgrade: {json}"
+    );
+}
+
+#[test]
+fn a_system_uninstall_remedy_names_uninstall() {
+    // E — the remedy names the actual command, not always install.
+    let fixture = r#"{"os":"linux","arch":"amd64","distro":{"id":"debian","codename":"trixie"},
+      "privilege":"unelevated","user":"ben",
+      "backends":[{"id":"apt","version":"2.6.1","purl_type":"deb","vers_type":"deb","platform_independent":false,
+        "scope":"system","supports_hold":true,"available":{},"installed":{}}]}"#;
+    let manifest = "version: 1\ntargets: [linux/amd64]\npackages:\n  - name: jq\n    spec: \">=1.6\"\n    install:\n      linux:debian: {backend: apt}\n";
+    let dir = write_project(fixture, manifest);
+    let claim = dir.path().join("bosun.yaml").display().to_string();
+    let state = r#"{"stateVersion":1,"packages":[{"name":"jq","targets":{"linux/amd64":{"backend":"apt","purl":"pkg:deb/debian/jq?arch=amd64&distro=trixie","installed":"1.7.1-6+deb13u2","origin":"installed","claimedBy":[{"manifest":"MANIFEST","spec":"vers:deb/>=1.6"}]}}}]}"#.replace("MANIFEST", &claim);
+    write_system_state(dir.path(), &state);
+
+    let assert = bosun(dir.path())
+        .args(["--format", "json", "uninstall"])
+        .arg(dir.path())
+        .arg("--yes")
+        .assert()
+        .code(1);
+    let json = stdout_json(&assert.get_output().stdout);
+    assert_eq!(json["error"], "elevation_required");
+    assert!(
+        json["remedy"].as_str().unwrap().contains("uninstall"),
+        "remedy names the command: {json}"
+    );
+}
+
+#[test]
+fn an_accepted_package_with_a_conflicting_claim_warns_not_refuses() {
+    // jq is present (accepted) at 1.7.1 and satisfies this manifest (>=1.6),
+    // but project B claims it <1.7. bosun does not own it, so it is never
+    // re-resolved against B's range — it reports the mismatch and changes
+    // nothing, rather than refusing the whole run.
+    let fixture = r#"{"os":"linux","arch":"amd64","distro":{"id":"debian","codename":"trixie"},
+      "privilege":"unelevated","user":"ben",
+      "backends":[{"id":"apt","version":"2.6.1","purl_type":"deb","vers_type":"deb","platform_independent":false,
+        "scope":"system","supports_hold":true,"available":{"jq":["1.7.1"]}}]}"#;
+    let manifest = "version: 1\ntargets: [linux/amd64]\npackages:\n  - name: jq\n    spec: \">=1.6\"\n    install:\n      linux:debian: {backend: apt}\n";
+    let dir = write_project(fixture, manifest);
+    write_system_state(
+        dir.path(),
+        r#"{"stateVersion":1,"packages":[{"name":"jq","targets":{"linux/amd64":{"backend":"apt","purl":"pkg:deb/debian/jq?arch=amd64&distro=trixie","installed":"1.7.1","origin":"accepted","claimedBy":[{"manifest":"/b/bosun.yaml","spec":"vers:deb/<1.7"}]}}}]}"#,
+    );
+    let assert = bosun(dir.path())
+        .args(["--format", "json", "install"])
+        .arg(dir.path())
+        .arg("--plan")
+        .assert()
+        .code(0); // a warning, not a refusal
+    let json = stdout_json(&assert.get_output().stdout);
+    assert!(
+        json["actions"].as_array().unwrap().is_empty(),
+        "no change: {json}"
+    );
+    assert!(
+        !json["diagnostics"].as_array().unwrap().is_empty(),
+        "reports the mismatch: {json}"
+    );
 }

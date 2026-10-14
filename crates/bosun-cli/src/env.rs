@@ -3,9 +3,11 @@
 //! host (§5.3), or, when the test seam is active (`BOSUN_FIXTURE` +
 //! `BOSUN_STATE_DIR`, both required), from a fixture ([`crate::fixture`]).
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use bosun_apply::{ApplyReport, Driver, HostApplier, Plan};
@@ -126,6 +128,14 @@ impl Env {
             .iter()
             .find(|e| &e.id == backend)
             .map(|e| e.installer.as_ref())
+    }
+
+    /// The query index for a backend id, borrowing the owned entry.
+    pub fn index_for(&self, backend: &BackendId) -> Option<&dyn Index> {
+        self.backends
+            .iter()
+            .find(|e| &e.id == backend)
+            .map(|e| e.index.as_ref())
     }
 
     /// The vers type of a backend, for parsing claim specs (§5.6).
@@ -310,6 +320,9 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
     let user_name = fx.user.unwrap_or_else(|| "tester".to_string());
 
     let (store, system, user) = state_store_at(state_dir);
+    // One in-memory machine shared by every installer and the step runner,
+    // seeded with the packages each backend reports already present.
+    let machine_state: crate::fixture::Machine = Rc::new(RefCell::new(BTreeMap::new()));
     let backends = fx
         .backends
         .into_iter()
@@ -319,12 +332,17 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
                     what: format!("fixture backend {} version", b.id),
                     detail: e.to_string(),
                 })?;
+            for (native, ver) in &b.installed {
+                machine_state
+                    .borrow_mut()
+                    .insert(native.clone(), ver.clone());
+            }
             let installer = FixtureInstaller::new(
                 scope_of(b.scope.as_deref()),
                 b.supports_hold,
                 b.supports_downgrade,
                 b.vers_type.clone(),
-                b.installed,
+                machine_state.clone(),
             );
             Ok(BackendEntry {
                 id: BackendId::new(b.id),
@@ -356,6 +374,9 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
         backends,
         skipped: Vec::new(),
         machine: Box::new(machine),
-        exec: Exec::Fixture(Box::new(FixtureStepRunner::new(fx.fail_step))),
+        exec: Exec::Fixture(Box::new(FixtureStepRunner::new(
+            fx.fail_step,
+            machine_state,
+        ))),
     })
 }

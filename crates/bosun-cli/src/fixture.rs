@@ -3,7 +3,9 @@
 //! can be driven in integration tests without touching apt/cargo/the network.
 //! Production runs ignore it and probe the real host.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use bosun_core::vers::scheme_for_type;
 use bosun_core::{Capabilities, Installed, Ref, Scope, Source, Target, Version};
@@ -11,6 +13,12 @@ use bosun_ports::backend::{Index, Installer};
 use bosun_ports::step::{Step, StepRunner, Steps};
 use bosun_ports::PortError;
 use serde::Deserialize;
+
+/// The fixture's in-memory machine: native id → installed version. Steps mutate
+/// it and `verify_installed` reads it, so a plan sees what is present and apply
+/// updates it — exactly as a real host behaves (seeded from each backend's
+/// `installed` map, the packages already present before the run).
+pub type Machine = Rc<RefCell<BTreeMap<String, String>>>;
 
 /// The whole fixture.
 #[derive(Deserialize)]
@@ -122,24 +130,24 @@ pub struct FixtureInstaller {
     supports_hold: bool,
     supports_downgrade: bool,
     vers_type: String,
-    installed: BTreeMap<String, String>,
+    machine: Machine,
 }
 
 impl FixtureInstaller {
-    /// Build from a fixture backend's install-side fields.
+    /// Build from a fixture backend's install-side fields, sharing the machine.
     pub fn new(
         scope: Scope,
         supports_hold: bool,
         supports_downgrade: bool,
         vers_type: String,
-        installed: BTreeMap<String, String>,
+        machine: Machine,
     ) -> FixtureInstaller {
         FixtureInstaller {
             scope,
             supports_hold,
             supports_downgrade,
             vers_type,
-            installed,
+            machine,
         }
     }
 
@@ -174,7 +182,7 @@ impl Installer for FixtureInstaller {
         Ok(self.step("install", pkg, Some(version)))
     }
     fn verify_installed(&self, pkg: &Ref) -> Result<Installed, PortError> {
-        match self.installed.get(&pkg.purl.native_id()) {
+        match self.machine.borrow().get(&pkg.purl.native_id()) {
             Some(raw) => {
                 let version = Version::parse(raw, scheme_for_type(&self.vers_type))?;
                 Ok(Installed::Present {
@@ -201,32 +209,48 @@ impl Installer for FixtureInstaller {
     }
 }
 
-/// A [`StepRunner`] that no-ops every step, except it fails any `Run` whose argv
-/// contains `fail_on` (to drive a crash-mid-apply test).
+/// A [`StepRunner`] that applies each step to the shared machine — an
+/// `install`/`downgrade` records the version, a `remove` clears it — so
+/// `verify_installed` afterwards reflects reality. It fails any `Run` whose
+/// argv contains `fail_on` (without mutating), to drive a crash-mid-apply test.
 pub struct FixtureStepRunner {
     fail_on: Option<String>,
+    machine: Machine,
 }
 
 impl FixtureStepRunner {
-    /// Build with an optional failure marker.
-    pub fn new(fail_on: Option<String>) -> FixtureStepRunner {
-        FixtureStepRunner { fail_on }
+    /// Build with an optional failure marker, sharing the machine.
+    pub fn new(fail_on: Option<String>, machine: Machine) -> FixtureStepRunner {
+        FixtureStepRunner { fail_on, machine }
     }
 }
 
 impl StepRunner for FixtureStepRunner {
     fn execute(&self, steps: &[Step]) -> Result<(), PortError> {
         for step in steps {
-            if let Step::Run { argv, .. } = step {
-                if let Some(marker) = &self.fail_on {
-                    if argv.iter().any(|a| a == marker) {
-                        return Err(PortError::CommandFailed {
-                            program: argv.first().cloned().unwrap_or_default(),
-                            code: Some(1),
-                            stderr: "fixture step failure".to_string(),
-                        });
-                    }
+            let Step::Run { argv, .. } = step else {
+                continue;
+            };
+            if let Some(marker) = &self.fail_on {
+                if argv.iter().any(|a| a == marker) {
+                    return Err(PortError::CommandFailed {
+                        program: argv.first().cloned().unwrap_or_default(),
+                        code: Some(1),
+                        stderr: "fixture step failure".to_string(),
+                    });
                 }
+            }
+            // argv is [verb, native_id, version?]; reflect it on the machine.
+            match (argv.first().map(String::as_str), argv.get(1), argv.get(2)) {
+                (Some("install") | Some("downgrade"), Some(native), Some(version)) => {
+                    self.machine
+                        .borrow_mut()
+                        .insert(native.clone(), version.clone());
+                }
+                (Some("remove"), Some(native), _) => {
+                    self.machine.borrow_mut().remove(native);
+                }
+                _ => {} // hold and anything else change no presence
             }
         }
         Ok(())
