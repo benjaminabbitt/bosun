@@ -4,16 +4,18 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
+use std::sync::Mutex;
 
 use crate::error::PortError;
 use crate::exec::{Command, CommandRunner, HttpFetcher, HttpRequest, HttpResponse, Output};
 
 /// A [`CommandRunner`] that replays pre-programmed outputs in order and
-/// records every command it was asked to run.
+/// records every command it was asked to run. `Mutex` (not `RefCell`) so it is
+/// `Sync` and can be shared across parallel backend probes (§5.3).
 #[derive(Default)]
 pub struct FakeCommandRunner {
-    responses: RefCell<VecDeque<Result<Output, PortError>>>,
-    calls: RefCell<Vec<Command>>,
+    responses: Mutex<VecDeque<Result<Output, PortError>>>,
+    calls: Mutex<Vec<Command>>,
 }
 
 impl FakeCommandRunner {
@@ -33,24 +35,28 @@ impl FakeCommandRunner {
 
     /// Enqueue a raw output to return on the next call.
     pub fn with_output(self, output: Output) -> FakeCommandRunner {
-        self.responses.borrow_mut().push_back(Ok(output));
+        self.responses.lock().unwrap().push_back(Ok(output));
         self
     }
 
     /// The commands run so far, in order.
     pub fn calls(&self) -> Vec<Command> {
-        self.calls.borrow().clone()
+        self.calls.lock().unwrap().clone()
     }
 }
 
 impl CommandRunner for FakeCommandRunner {
     fn run(&self, command: &Command) -> Result<Output, PortError> {
-        self.calls.borrow_mut().push(command.clone());
-        self.responses.borrow_mut().pop_front().unwrap_or_else(|| {
-            Err(PortError::CommandNotFound {
-                program: command.program.clone(),
+        self.calls.lock().unwrap().push(command.clone());
+        self.responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| {
+                Err(PortError::CommandNotFound {
+                    program: command.program.clone(),
+                })
             })
-        })
     }
 }
 

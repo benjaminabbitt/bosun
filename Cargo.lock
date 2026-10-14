@@ -169,7 +169,9 @@ dependencies = [
  "bosun-backends",
  "bosun-core",
  "bosun-ports",
+ "rustix",
  "tempfile",
+ "thiserror",
  "tracing",
 ]
 

@@ -79,8 +79,9 @@ pub struct Backend {
 }
 
 /// Registers a backend when it is present (§5.3). Every backend is compiled
-/// in; only those whose probe succeeds are built for the run.
-pub trait BackendFactory {
+/// in; only those whose probe succeeds are built for the run. `Send + Sync`
+/// so all factories can be probed in parallel (§5.3).
+pub trait BackendFactory: Send + Sync {
     /// The backend's stable id.
     fn id(&self) -> BackendId;
     /// Cheap presence check against the host; `Ok(None)` means not present.

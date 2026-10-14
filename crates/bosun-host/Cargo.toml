@@ -12,7 +12,9 @@ bosun-core.workspace = true
 bosun-ports.workspace = true
 bosun-backends.workspace = true
 annals-diagnostic.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
+rustix.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

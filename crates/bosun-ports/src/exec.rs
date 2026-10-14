@@ -53,8 +53,9 @@ impl Output {
 }
 
 /// Runs external commands. The mutation side of a backend goes through this;
-/// it runs only on the local machine.
-pub trait CommandRunner {
+/// it runs only on the local machine. `Send + Sync` so one runner can be
+/// shared across parallel backend probes (§5.3).
+pub trait CommandRunner: Send + Sync {
     /// Run `command` to completion, capturing its output. A non-zero exit is
     /// **not** an `Err` — it is an `Output` with a non-zero `code`, so the
     /// caller decides whether that is a failure (some backends read a
