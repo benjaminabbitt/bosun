@@ -1161,7 +1161,8 @@ remote indexes. Traits stay ready; nothing is stubbed.
 | 5-2 | bosun-io: manifest + manifestHash; transactional StateStore on std file locks | landed; 106 workspace tests; hash proven comment-insensitive |
 | 6 | bosun-host: LinuxMachine/FakeMachine, os-release, privilege, probe registry | landed; 115 workspace tests; mutation os_release+machine 21/22 (miss: host-I/O `detect()` wrapper) |
 | 7-1 | step-list Installer contract, host StepExecutor, apt backend (§5.1) | landed; 136 tests; mutation apt+executor 33/33 viable caught |
-| 7-2 | cargo + github-release backends; executor hardening (atomic binary write, regular-file members) | in progress |
+| 7-2 | executor hardening (atomic temp→fsync→rename writes; regular-file members, `./name` ≡ `name`) + cargo backend (sparse-index listing) | landed; 147 tests; mutation cargo 22/24 (2 equivalent) |
+| 7-3 | github-release backend (goreleaser picker, enforced checksums.txt, `~/.local/bin`) | in progress |
 | 8–13 | resolve, apply, cli, acceptance, dogfood, quality | not started |
 
 **Active implementor:** `lame-wide-chant` (worktree branch `ctxloom/lame-wide-chant`), one
