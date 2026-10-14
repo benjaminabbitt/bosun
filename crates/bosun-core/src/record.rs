@@ -118,7 +118,6 @@ pub struct StateDocument {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{PackageId, Scope};
     use crate::platform::{Arch, Os};
     use crate::version::Scheme;
     use std::path::PathBuf;
@@ -220,15 +219,5 @@ mod tests {
         };
         assert_eq!(lock.lockfile_version, 1);
         assert_eq!(state.state_version, 1);
-    }
-
-    #[test]
-    fn installed_records_scope() {
-        let installed = crate::model::Installed {
-            package: PackageId::new("ripgrep"),
-            version: ver("14.1.1", Scheme::Semver),
-            scope: Scope::User,
-        };
-        assert_eq!(installed.scope, Scope::User);
     }
 }

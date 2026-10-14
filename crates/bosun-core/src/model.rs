@@ -7,8 +7,6 @@
 
 use std::path::PathBuf;
 
-use crate::version::Version;
-
 /// A backend's stable identifier: `apt`, `cargo`, `github-release`, … (§5.3).
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BackendId(pub String);
@@ -137,18 +135,6 @@ pub struct Capabilities {
     pub supports_hold: bool,
     /// Can move to a lower version on request.
     pub supports_downgrade: bool,
-}
-
-/// What a backend reports after installing (§5.1): the package id it actually
-/// installed, the version, and the scope it landed in.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Installed {
-    /// The package id as actually installed (§5.4).
-    pub package: PackageId,
-    /// The version now present.
-    pub version: Version,
-    /// The scope it landed in.
-    pub scope: Scope,
 }
 
 /// An upstream-published checksum (§4.5), e.g. `sha256:…`. Informational

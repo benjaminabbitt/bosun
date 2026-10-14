@@ -5,7 +5,7 @@
 //! renderer (§8) consumes the same steps instead of running them.
 
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
 
 use bosun_ports::{Command, CommandRunner, HttpFetcher, HttpRequest, PortError, Step};
@@ -73,7 +73,7 @@ impl<'a> StepExecutor<'a> {
                         ),
                     });
                 }
-                write_file(dest, &resp.body)
+                write_file(dest, &resp.body, None)
             }
             Step::Extract {
                 archive,
@@ -89,44 +89,77 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn write_file(dest: &Path, bytes: &[u8]) -> Result<(), PortError> {
-    if let Some(dir) = dest.parent() {
-        fs::create_dir_all(dir).map_err(|e| io_err(dir, e))?;
+/// Atomically write `bytes` to `dest`: a temp file in dest's own directory,
+/// fsync'd, given `mode` (if any) **before** the rename over `dest`. Rename —
+/// not an in-place write — avoids `ETXTBSY` when replacing a running
+/// executable (bosun replacing itself, or ctxloom while it runs), is
+/// crash-safe, and leaves no temp behind on failure (the temp is removed when
+/// the `NamedTempFile` drops).
+fn write_file(dest: &Path, bytes: &[u8], mode: Option<u32>) -> Result<(), PortError> {
+    let dir = dest.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(dir).map_err(|e| io_err(dir, e))?;
+    let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(|e| io_err(dir, e))?;
+    tmp.write_all(bytes).map_err(|e| io_err(tmp.path(), e))?;
+    tmp.as_file()
+        .sync_all()
+        .map_err(|e| io_err(tmp.path(), e))?;
+    if let Some(mode) = mode {
+        set_mode(tmp.as_file(), mode)?;
     }
-    fs::write(dest, bytes).map_err(|e| io_err(dest, e))
+    // On a persist failure the returned NamedTempFile drops, cleaning the temp.
+    tmp.persist(dest).map_err(|e| io_err(dest, e.error))?;
+    Ok(())
 }
 
-/// Extract one `.tar.gz` member to `dest`, setting its unix mode.
+/// Extract one **regular-file** `.tar.gz` member to `dest` with unix mode
+/// `mode`. A leading `./` on either side is ignored (goreleaser archives store
+/// members both ways). A symlink/hardlink/dir member is refused, naming its
+/// type, rather than silently written as a 0-byte executable.
 fn extract_member(archive: &Path, member: &str, dest: &Path, mode: u32) -> Result<(), PortError> {
     let file = fs::File::open(archive).map_err(|e| io_err(archive, e))?;
     let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(file));
-    let entries = tar.entries().map_err(|e| io_err(archive, e))?;
-    for entry in entries {
+    for entry in tar.entries().map_err(|e| io_err(archive, e))? {
         let mut entry = entry.map_err(|e| io_err(archive, e))?;
         let path = entry.path().map_err(|e| io_err(archive, e))?;
-        if path.to_str() == Some(member) {
-            let mut bytes = Vec::new();
-            entry
-                .read_to_end(&mut bytes)
-                .map_err(|e| io_err(archive, e))?;
-            write_file(dest, &bytes)?;
-            set_mode(dest, mode)?;
-            return Ok(());
+        if norm(&path.to_string_lossy()) != norm(member) {
+            continue;
         }
+        let kind = entry.header().entry_type();
+        if !kind.is_file() {
+            return Err(PortError::Backend {
+                detail: format!(
+                    "{member} in {} is not a regular file ({kind:?})",
+                    archive.display()
+                ),
+            });
+        }
+        let mut bytes = Vec::new();
+        entry
+            .read_to_end(&mut bytes)
+            .map_err(|e| io_err(archive, e))?;
+        return write_file(dest, &bytes, Some(mode));
     }
     Err(PortError::Backend {
         detail: format!("{member} not found in {}", archive.display()),
     })
 }
 
+/// Strip a single leading `./` for member comparison.
+fn norm(p: &str) -> &str {
+    p.strip_prefix("./").unwrap_or(p)
+}
+
 #[cfg(unix)]
-fn set_mode(dest: &Path, mode: u32) -> Result<(), PortError> {
+fn set_mode(file: &fs::File, mode: u32) -> Result<(), PortError> {
     use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(dest, fs::Permissions::from_mode(mode)).map_err(|e| io_err(dest, e))
+    file.set_permissions(fs::Permissions::from_mode(mode))
+        .map_err(|e| PortError::Backend {
+            detail: format!("set mode {mode:o}: {e}"),
+        })
 }
 
 #[cfg(not(unix))]
-fn set_mode(_dest: &Path, _mode: u32) -> Result<(), PortError> {
+fn set_mode(_file: &fs::File, _mode: u32) -> Result<(), PortError> {
     Ok(())
 }
 
@@ -336,5 +369,104 @@ mod tests {
             }]
         )
         .is_err());
+    }
+
+    fn targz(path: &Path, entries: &[(&str, &[u8])]) {
+        let f = std::fs::File::create(path).unwrap();
+        let mut tar = tar::Builder::new(GzEncoder::new(f, Compression::default()));
+        for (name, content) in entries {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(content.len() as u64);
+            h.set_mode(0o644);
+            h.set_cksum();
+            tar.append_data(&mut h, name, *content).unwrap();
+        }
+        tar.into_inner().unwrap().finish().unwrap();
+    }
+
+    fn list(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        v.sort();
+        v
+    }
+
+    fn extract(archive: &Path, member: &str, dest: &Path) -> Result<(), PortError> {
+        exec_with(
+            &FakeCommandRunner::new(),
+            &FakeHttpFetcher::new(),
+            &[Step::Extract {
+                archive: archive.to_path_buf(),
+                member: member.to_string(),
+                dest: dest.to_path_buf(),
+                mode: 0o755,
+            }],
+        )
+    }
+
+    #[test]
+    fn extract_replaces_a_held_open_file_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("r.tar.gz");
+        targz(&archive, &[("bin/jq", b"NEW")]);
+        let dest = dir.path().join("jq");
+        std::fs::write(&dest, b"OLD").unwrap();
+        // Hold the old inode open, as a running executable would be.
+        let mut held = std::fs::File::open(&dest).unwrap();
+
+        extract(&archive, "bin/jq", &dest).unwrap();
+
+        assert_eq!(std::fs::read(&dest).unwrap(), b"NEW"); // new content via a new inode
+        let mut old = String::new();
+        held.read_to_string(&mut old).unwrap();
+        assert_eq!(old, "OLD"); // the held handle still sees the old inode (rename, not in-place)
+    }
+
+    #[test]
+    fn write_leaves_no_temp_behind_on_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("r.tar.gz");
+        targz(&archive, &[("bin/jq", b"NEW")]);
+        // dest is a directory, so the final rename fails *after* the temp is
+        // written — exercising cleanup.
+        let dest = dir.path().join("occupied");
+        std::fs::create_dir(&dest).unwrap();
+        let before = list(dir.path());
+
+        assert!(extract(&archive, "bin/jq", &dest).is_err());
+        assert_eq!(list(dir.path()), before, "a temp file survived the failure");
+    }
+
+    #[test]
+    fn extract_rejects_a_symlink_member() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("r.tar.gz");
+        {
+            let f = std::fs::File::create(&archive).unwrap();
+            let mut tar = tar::Builder::new(GzEncoder::new(f, Compression::default()));
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(tar::EntryType::Symlink);
+            h.set_size(0);
+            tar.append_link(&mut h, "bin/jq", "/somewhere/else")
+                .unwrap();
+            tar.into_inner().unwrap().finish().unwrap();
+        }
+        let err = extract(&archive, "bin/jq", &dir.path().join("jq")).unwrap_err();
+        assert!(
+            matches!(err, PortError::Backend { detail } if detail.contains("not a regular file")),
+            "a symlink member must be refused"
+        );
+    }
+
+    #[test]
+    fn extract_matches_across_a_dot_slash_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("r.tar.gz");
+        targz(&archive, &[("./bin/jq", b"X")]); // stored with a leading ./
+        let dest = dir.path().join("jq");
+        extract(&archive, "bin/jq", &dest).unwrap(); // requested without ./
+        assert_eq!(std::fs::read(&dest).unwrap(), b"X");
     }
 }
