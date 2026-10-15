@@ -1261,6 +1261,8 @@ scenario in the real-backend tier (skipped for compile time).
 | 12 | dogfood: `bosun.yaml` (just, jq, ctxloom) committed; plan-only host run (user decision) | manifest committed; host run found 5 bugs (below) → 12-1 |
 | M2-0 | backend-specific settings under `ext:` (`BackendMeta::ext_keys`, checked at load); github-release `asset` moves there | landed |
 | M2-1 | annals-yaml `edit` (annals `4f92f43`); `bosun add` / `bosun remove` (edit, then `lock`); default spec from the newest version; `lock` drops packages the manifest no longer lists on every target | landed; 50 scenarios; annals edit mutation 197/200 viable caught (3 justified) |
+| M2-2 | github-release archive formats (tar gz/xz/zst/bz2, zip, single compressed, raw); `tag` template | landed |
+| M2-3 | github-deb / github-rpm: a release's `.deb` / `.rpm` through apt-get / dnf, system scope, cache `/var/cache/bosun`; presence verified with dpkg-query / rpm -q; apt holds, dnf doesn't claim one | landed hermetically; real apt/dnf run not done (github-rpm unverified: no Fedora host) |
 
 **First real-host smoke run (2026-10-14, release build, Debian 13, read-only `--plan` and
 `lock` in a scratch dir).** `backends` found apt 3.0.3, cargo 1.96.1 and github-release; jq

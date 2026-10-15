@@ -102,6 +102,34 @@ so writing `musl` into the template is usually right anyway.
 | trivy         | `trivy_0.67.2_Linux-64bit.tar.gz`                    | `{{ binary }}_{{ version }}_{{ os \| title }}-{% if arch == "amd64" %}64bit{% else %}{{ arch \| upper }}{% endif %}.tar.gz` |
 
 ripgrep's binary is `rg`, so the template spells the archive's `ripgrep` literally.
+## OS packages from a release: github-deb and github-rpm
+
+`github-deb` and `github-rpm` install the `.deb` or `.rpm` a release attaches, through
+`apt-get` or `dnf`, machine-wide (run with `sudo`). They find the release and the asset the
+same way, with the same variables, but have no default name: `asset` is required. The
+installed package's name is the entry's name unless `package_name` says otherwise:
+
+```yaml
+- name: bat
+  spec: ">=0.26.0|<0.27.0"
+  install:
+    linux:debian:
+      backend: github-deb
+      package: sharkdp/bat
+      ext:
+        github-deb: {asset: "{{ binary }}_{{ version }}_{{ arch }}.deb"}
+    linux:fedora:
+      backend: github-rpm
+      package: sharkdp/bat
+      ext:
+        github-rpm:
+          asset: "{{ binary }}-{{ version }}-1.{{ arch_uname }}.rpm"
+          package_name: bat
+```
+
+apt holds the package (`apt-mark hold`); github-rpm doesn't hold, since dnf needs its
+versionlock plugin for that, and the plan says so.
+
 ## Release tags
 
 bosun looks a version's release up by its tag: `v<version>`, then `<version>`. A project that

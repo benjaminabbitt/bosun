@@ -136,6 +136,58 @@ struct Release {
     assets: Vec<ReleaseAsset>,
 }
 
+/// One asset of a release, chosen for a package: where to download it, its
+/// name, and its published sha256 when there is one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReleaseFile {
+    pub(crate) url: String,
+    pub(crate) name: String,
+    pub(crate) sha256: Option<String>,
+}
+
+/// github-release's release lookup (tags, versions, asset templates,
+/// checksums) for the backends that install an OS package attached to a
+/// release (github-deb, github-rpm), so the rules are one implementation.
+#[derive(Clone)]
+pub(crate) struct ReleaseLookup(GithubReleaseBackend);
+
+impl ReleaseLookup {
+    /// Look releases up through `fetcher` for an `os`/`arch` host, with
+    /// `GITHUB_TOKEN` when set.
+    pub(crate) fn new(fetcher: Arc<dyn HttpFetcher>, os: Os, arch: Arch) -> ReleaseLookup {
+        ReleaseLookup(GithubReleaseBackend {
+            fetcher,
+            bin_dir: PathBuf::new(),
+            os,
+            arch,
+            token: std::env::var("GITHUB_TOKEN").ok(),
+        })
+    }
+
+    /// The versions `pkg`'s releases carry, by its tag pattern.
+    pub(crate) fn versions(&self, pkg: &Ref, target: &Target) -> Result<Vec<Version>, PortError> {
+        self.0.query_available(pkg, target)
+    }
+
+    /// The asset the `asset` template (required: there is no default) names
+    /// at `version`, refused unless `accept` takes its name.
+    pub(crate) fn file(
+        &self,
+        pkg: &Ref,
+        version: &Version,
+        accept: impl Fn(&str) -> bool,
+        refusal: &str,
+    ) -> Result<ReleaseFile, PortError> {
+        self.0.release_file(pkg, version, None, accept, refusal)
+    }
+
+    /// The binary name, also the default OS package name: the `binary`
+    /// qualifier, else the repository's name.
+    pub(crate) fn binary_of(pkg: &Ref) -> String {
+        GithubReleaseBackend::binary_of(pkg)
+    }
+}
+
 #[derive(Debug, serde::Deserialize)]
 struct ReleaseAsset {
     name: String,
@@ -203,21 +255,28 @@ impl GithubReleaseBackend {
     }
 
     /// The expected archive name: the `asset` qualifier rendered as a template
-    /// (see [`template`]), else goreleaser's default
-    /// `{{ binary }}_{{ version }}_{{ os }}_{{ arch }}.tar.gz`. `tag` is the
-    /// release's actual tag. A bad template is an error, never a fallback.
+    /// (see [`template`]), else `default` (goreleaser's
+    /// `{{ binary }}_{{ version }}_{{ os }}_{{ arch }}.tar.gz` for
+    /// github-release; none for the OS-package backends, which need one).
+    /// `tag` is the release's actual tag. A bad template is an error, never a
+    /// fallback.
     fn expected_asset(
         &self,
         pkg: &Ref,
         binary: &str,
         version: &Version,
         tag: &str,
+        default: Option<&str>,
     ) -> Result<String, PortError> {
-        let source = pkg
-            .purl
-            .qualifiers()
-            .get("asset")
-            .map_or(template::DEFAULT_TEMPLATE, String::as_str);
+        let source = match (pkg.purl.qualifiers().get("asset"), default) {
+            (Some(template), _) => template.as_str(),
+            (None, Some(default)) => default,
+            (None, None) => {
+                return Err(PortError::Backend {
+                    detail: format!("{}: {}", pkg.purl.native_id(), errmsg::ASSET_REQUIRED),
+                })
+            }
+        };
         template::render(
             source,
             &template::AssetVars {
@@ -292,21 +351,45 @@ impl GithubReleaseBackend {
         pkg: &Ref,
         version: &Version,
     ) -> Result<(String, String, ArchiveFormat, Option<String>), PortError> {
+        let file = self.release_file(
+            pkg,
+            version,
+            Some(template::DEFAULT_TEMPLATE),
+            |name| ArchiveFormat::of(name).is_some(),
+            errmsg::NOT_A_BINARY,
+        )?;
+        let format = ArchiveFormat::of(&file.name).expect("checked by release_file");
+        Ok((file.url, file.name, format, file.sha256))
+    }
+
+    /// The release asset for `pkg` at `version`: found by its tag (the `tag`
+    /// qualifier, else `v<version>`/`<version>`), named by the `asset`
+    /// template (else `default`), and refused unless `accept` takes its name
+    /// (`refusal` says why), with the release's published sha256 if any.
+    fn release_file(
+        &self,
+        pkg: &Ref,
+        version: &Version,
+        default: Option<&str>,
+        accept: impl Fn(&str) -> bool,
+        refusal: &str,
+    ) -> Result<ReleaseFile, PortError> {
         let repo = pkg.purl.native_id();
         let binary = Self::binary_of(pkg);
         let release = self.fetch_release(&repo, version, tag_pattern(pkg)?.as_ref())?;
-        let expected = self.expected_asset(pkg, &binary, version, &release.tag_name)?;
-        let format = ArchiveFormat::of(&expected).ok_or_else(|| PortError::Backend {
-            detail: format!("{repo}: {expected:?} is {}", errmsg::NOT_A_BINARY),
-        })?;
+        let expected = self.expected_asset(pkg, &binary, version, &release.tag_name, default)?;
+        if !accept(&expected) {
+            return Err(PortError::Backend {
+                detail: format!("{repo}: {expected:?} is {refusal}"),
+            });
+        }
         let archive = self.pick_archive(&expected, &release.assets)?;
         let sha256 = self.published_sha256(&release.assets, &archive.name)?;
-        Ok((
-            archive.browser_download_url.clone(),
-            archive.name.clone(),
-            format,
+        Ok(ReleaseFile {
+            url: archive.browser_download_url.clone(),
+            name: archive.name.clone(),
             sha256,
-        ))
+        })
     }
 
     /// The release for `version`: tagged as `pattern` says, else `v<version>`
@@ -560,8 +643,14 @@ mod tests {
         let b = backend(Arc::new(FakeHttpFetcher::new()), PathBuf::from("/b"));
         let plain = gh("pkg:github/ctxloom/ctxloom");
         assert_eq!(
-            b.expected_asset(&plain, "ctxloom", &sem("0.6.4"), "v0.6.4")
-                .unwrap(),
+            b.expected_asset(
+                &plain,
+                "ctxloom",
+                &sem("0.6.4"),
+                "v0.6.4",
+                Some(template::DEFAULT_TEMPLATE)
+            )
+            .unwrap(),
             "ctxloom_0.6.4_linux_amd64.tar.gz"
         );
         let full = with_asset(
@@ -569,8 +658,14 @@ mod tests {
             "{{ binary }}_{{ version }}_{{ os }}_{{ arch }}_full.tar.gz",
         );
         assert_eq!(
-            b.expected_asset(&full, "ctxloom", &sem("0.6.4"), "v0.6.4")
-                .unwrap(),
+            b.expected_asset(
+                &full,
+                "ctxloom",
+                &sem("0.6.4"),
+                "v0.6.4",
+                Some(template::DEFAULT_TEMPLATE)
+            )
+            .unwrap(),
             "ctxloom_0.6.4_linux_amd64_full.tar.gz"
         );
     }
@@ -583,8 +678,14 @@ mod tests {
             "{{ binary }}_{{ tag }}_{{ os | title }}_{{ arch_goreleaser }}.tar.gz",
         );
         assert_eq!(
-            b.expected_asset(&gum, "gum", &sem("2.0.2"), "v2.0.2")
-                .unwrap(),
+            b.expected_asset(
+                &gum,
+                "gum",
+                &sem("2.0.2"),
+                "v2.0.2",
+                Some(template::DEFAULT_TEMPLATE)
+            )
+            .unwrap(),
             "gum_v2.0.2_Linux_x86_64.tar.gz"
         );
     }
@@ -594,7 +695,13 @@ mod tests {
         let b = backend(Arc::new(FakeHttpFetcher::new()), PathBuf::from("/b"));
         let bad = with_asset("pkg:github/o/r", "{{ platform }}.tar.gz");
         let err = b
-            .expected_asset(&bad, "r", &sem("1.0.0"), "v1.0.0")
+            .expected_asset(
+                &bad,
+                "r",
+                &sem("1.0.0"),
+                "v1.0.0",
+                Some(template::DEFAULT_TEMPLATE),
+            )
             .unwrap_err();
         assert!(matches!(err, PortError::Backend { detail }
             if detail.contains(crate::errmsg::ASSET_UNKNOWN_VARIABLE) && detail.contains("platform")));

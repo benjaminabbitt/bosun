@@ -11,7 +11,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use bosun_apply::{ApplyReport, Driver, HostApplier, Plan};
-use bosun_backends::{AptFactory, CargoFactory, GithubReleaseFactory};
+use bosun_backends::{
+    AptFactory, CargoFactory, GithubPackageFactory, GithubReleaseFactory, PackageKind,
+};
 use bosun_core::vers::scheme_for_type;
 use bosun_core::version::Scheme;
 use bosun_core::{Arch, BackendId, Distro, Os, Scope, Target, Version};
@@ -28,7 +30,10 @@ use bosun_ports::{
 use bosun_resolve::{Host, ResolvableBackend};
 
 use crate::error::CliError;
-use crate::fixture::{Fixture, FixtureIndex, FixtureInstaller, FixtureStepRunner, RealSteps};
+use crate::fixture::{
+    Fixture, FixtureIndex, FixtureInstaller, FixtureStepRunner, PackageDb, PackageDbRunner,
+    RealSteps,
+};
 
 /// One backend available this run: the resolver metadata, the query index, and
 /// the install side — all owned so they outlive a command.
@@ -229,6 +234,10 @@ fn backend_schemes(backends: &[BackendEntry]) -> bosun_io::BackendSchemes {
     )
 }
 
+/// Where system-scope backends cache downloads (github-deb, github-rpm):
+/// root-owned, beside the other package caches.
+const SYSTEM_CACHE: &str = "/var/cache/bosun";
+
 /// Every compiled-in backend factory, built (not probed). The schemes map is
 /// taken from these so a backend absent this run is still known (§6).
 fn compiled_in_factories(
@@ -238,10 +247,22 @@ fn compiled_in_factories(
     os: Os,
     arch: Arch,
 ) -> Vec<Box<dyn BackendFactory>> {
+    let package = |kind| {
+        Box::new(GithubPackageFactory::new(
+            kind,
+            runner.clone(),
+            fetcher.clone(),
+            PathBuf::from(SYSTEM_CACHE),
+            os,
+            arch,
+        )) as Box<dyn BackendFactory>
+    };
     vec![
         Box::new(AptFactory::new(runner.clone())),
-        Box::new(CargoFactory::new(runner, fetcher.clone())),
-        Box::new(GithubReleaseFactory::new(fetcher, bin_dir, os, arch)),
+        Box::new(CargoFactory::new(runner.clone(), fetcher.clone())),
+        Box::new(GithubReleaseFactory::new(fetcher.clone(), bin_dir, os, arch)),
+        package(PackageKind::Deb),
+        package(PackageKind::Rpm),
     ]
 }
 
@@ -402,6 +423,8 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
         .clone()
         .unwrap_or_else(|| PathBuf::from(state_dir).join("bin"));
     let any_real = fx.backends.iter().any(|b| b.real);
+    let packages: PackageDb = Arc::default();
+    let cache_dir = PathBuf::from(state_dir).join("cache");
     // One in-memory machine shared by every installer and the step runner,
     // seeded with the packages each backend reports already present.
     let machine_state: crate::fixture::Machine = Rc::new(RefCell::new(BTreeMap::new()));
@@ -415,7 +438,13 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
                     detail: e.to_string(),
                 })?;
             if b.real {
-                return real_backend(&b.id, version, &fetcher, &bin_dir, os, arch);
+                let places = RealPlaces {
+                    fetcher: &fetcher,
+                    bin_dir: &bin_dir,
+                    cache_dir: &cache_dir,
+                    packages: &packages,
+                };
+                return real_backend(&b.id, version, &places, os, arch);
             }
             for (native, ver) in &b.installed {
                 machine_state
@@ -485,38 +514,64 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
         exec: Exec::Fixture(Box::new(FixtureStepRunner::new(
             fx.fail_step,
             machine_state,
-            any_real.then(|| RealSteps { fetcher, bin_dir }),
+            any_real.then(|| RealSteps {
+                fetcher,
+                bin_dir,
+                packages,
+            }),
         ))),
     })
 }
 
-/// bosun's own compiled-in backend `id`, built over the fixture's canned HTTP
-/// and bin dir (only github-release, where bosun is the installer, has no
-/// external tool to fake).
+/// Where a fixture's real backends fetch from and install to.
+struct RealPlaces<'a> {
+    fetcher: &'a Arc<dyn HttpFetcher>,
+    bin_dir: &'a std::path::Path,
+    cache_dir: &'a std::path::Path,
+    packages: &'a PackageDb,
+}
+
+/// bosun's own compiled-in backend `id`, built over the fixture's canned HTTP:
+/// github-release with a scratch bin dir, and github-deb / github-rpm with a
+/// scratch cache and package managers answered from the fixture's package db.
 fn real_backend(
     id: &str,
     version: Version,
-    fetcher: &Arc<dyn HttpFetcher>,
-    bin_dir: &std::path::Path,
+    places: &RealPlaces,
     os: Os,
     arch: Arch,
 ) -> Result<BackendEntry, CliError> {
-    let factory = match id {
-        "github-release" => {
-            GithubReleaseFactory::new(fetcher.clone(), bin_dir.to_path_buf(), os, arch)
-        }
+    let runner: Arc<dyn CommandRunner> = Arc::new(PackageDbRunner::new(places.packages.clone()));
+    let package = |kind| -> Box<dyn BackendFactory> {
+        Box::new(GithubPackageFactory::new(
+            kind,
+            runner.clone(),
+            places.fetcher.clone(),
+            places.cache_dir.to_path_buf(),
+            os,
+            arch,
+        ))
+    };
+    let factory: Box<dyn BackendFactory> = match id {
+        "github-release" => Box::new(GithubReleaseFactory::new(
+            places.fetcher.clone(),
+            places.bin_dir.to_path_buf(),
+            os,
+            arch,
+        )),
+        "github-deb" => package(PackageKind::Deb),
+        "github-rpm" => package(PackageKind::Rpm),
         other => {
             return Err(env_err(format!(
-                "fixture backend {other} cannot be real; only github-release can"
+                "fixture backend {other} cannot be real; only bosun's own release backends can"
             )))
         }
     };
-    let runner = bosun_ports::testing::FakeCommandRunner::new();
     let host = HostInfo {
         os,
         arch,
         distro: None,
-        runner: &runner,
+        runner: runner.as_ref(),
     };
     let probe = factory
         .probe(&host)

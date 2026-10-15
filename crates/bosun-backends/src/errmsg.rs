@@ -23,3 +23,14 @@ pub const NOT_A_BINARY: &str = "not a binary bosun can install";
 
 /// A github-release `tag` template is not a literal tag with one `{{ version }}`.
 pub const TAG_TEMPLATE: &str = "invalid tag template";
+
+/// An OS-package backend (github-deb, github-rpm) was given no `asset`
+/// template; it has no default name to look for.
+pub const ASSET_REQUIRED: &str =
+    "needs an asset template (ext.<backend>.asset) naming the package file";
+
+/// The asset an OS-package backend was pointed at is not its kind of package.
+pub const NOT_A_DEB: &str = "not a .deb package";
+
+/// The asset an OS-package backend was pointed at is not its kind of package.
+pub const NOT_AN_RPM: &str = "not an .rpm package";

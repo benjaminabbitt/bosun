@@ -9,10 +9,10 @@
 //! checksum lookup and extraction run for real without the network.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use bosun_core::vers::scheme_for_type;
 use bosun_core::{
@@ -22,7 +22,7 @@ use bosun_host::StepExecutor;
 use bosun_ports::backend::{Index, Installer};
 use bosun_ports::step::{Step, StepRunner, Steps};
 use bosun_ports::testing::FakeCommandRunner;
-use bosun_ports::{HttpFetcher, PortError};
+use bosun_ports::{Command, CommandRunner, HttpFetcher, Output, PortError};
 use serde::Deserialize;
 
 /// The fixture's in-memory machine: native id → installed version. Steps mutate
@@ -254,19 +254,96 @@ impl Installer for FixtureInstaller {
     }
 }
 
+/// The OS packages a fixture's dpkg/rpm reports installed, by package name:
+/// the real github-deb and github-rpm backends install into it through
+/// [`RealSteps`] and read it back through [`PackageDbRunner`].
+pub type PackageDb = Arc<Mutex<BTreeSet<String>>>;
+
+/// The package managers the real github-deb / github-rpm backends drive,
+/// answered from a [`PackageDb`]: `apt-get --version` and `dnf --version`
+/// (present), `dpkg-query -W -f=${Status} <name>` and `rpm -q <name>` (by the
+/// db). Anything else exits 127, as an absent program would.
+pub struct PackageDbRunner {
+    db: PackageDb,
+}
+
+impl PackageDbRunner {
+    /// A runner over `db`.
+    pub fn new(db: PackageDb) -> PackageDbRunner {
+        PackageDbRunner { db }
+    }
+}
+
+impl CommandRunner for PackageDbRunner {
+    fn run(&self, command: &Command) -> Result<Output, PortError> {
+        let args: Vec<&str> = command.args.iter().map(String::as_str).collect();
+        let installed = |name: &str| self.db.lock().expect("package db").contains(name);
+        let (code, stdout) = match (command.program.as_str(), args.as_slice()) {
+            ("apt-get", ["--version"]) => (0, "apt 2.6.1 (amd64)".to_string()),
+            ("dnf", ["--version"]) => (0, "4.18.0".to_string()),
+            ("dpkg-query", ["-W", "-f=${Status}", name]) if installed(name) => {
+                (0, "install ok installed".to_string())
+            }
+            ("rpm", ["-q", name]) if installed(name) => (0, format!("{name}-fixture")),
+            ("dpkg-query", _) | ("rpm", _) => (1, String::new()),
+            _ => (127, String::new()),
+        };
+        Ok(Output {
+            code: Some(code),
+            stdout: stdout.into_bytes(),
+            stderr: Vec::new(),
+        })
+    }
+}
+
 /// Where `real` backends' steps run: `Fetch`/`Extract` through the host
-/// executor over the canned HTTP, and removals confined to `bin_dir`.
+/// executor over the canned HTTP, removals confined to `bin_dir`, and the
+/// github-deb / github-rpm package-manager commands applied to `packages`.
 pub struct RealSteps {
     /// The canned HTTP the real backends fetch through.
     pub fetcher: Arc<dyn HttpFetcher>,
     /// The scratch bin dir real backends install into.
     pub bin_dir: PathBuf,
+    /// The OS packages installed through apt-get / dnf.
+    pub packages: PackageDb,
 }
 
 impl RealSteps {
     fn fetch_or_extract(&self, step: &Step) -> Result<(), PortError> {
         StepExecutor::new(&FakeCommandRunner::new(), self.fetcher.as_ref())
             .execute(std::slice::from_ref(step))
+    }
+
+    /// A github-deb / github-rpm package-manager command, applied to the
+    /// package db: installing a fetched file (cached under a directory named
+    /// for its package) adds the package, a removal drops it, a hold changes
+    /// nothing. Any other argv is not ours (`false`).
+    fn package(&self, argv: &[String]) -> Result<bool, PortError> {
+        let args: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let mut db = self.packages.lock().expect("package db");
+        match args.as_slice() {
+            ["apt-get", "install", .., file] | ["dnf", "install" | "downgrade", .., file] => {
+                let file = Path::new(file);
+                if !file.exists() {
+                    return Err(PortError::Backend {
+                        detail: format!("{} was not fetched", file.display()),
+                    });
+                }
+                let name = file
+                    .parent()
+                    .and_then(Path::file_name)
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                db.insert(name);
+                Ok(true)
+            }
+            ["apt-get", "remove", "-y", name] | ["dnf", "remove", "-y", name] => {
+                db.remove(*name);
+                Ok(true)
+            }
+            ["apt-mark", ..] => Ok(true),
+            _ => Ok(false),
+        }
     }
 
     /// A real backend's `rm -f <file>` inside `bin_dir`, done in-process; any
@@ -335,7 +412,7 @@ impl StepRunner for FixtureStepRunner {
                 }
             }
             if let Some(real) = &self.real {
-                if real.remove(argv)? {
+                if real.remove(argv)? || real.package(argv)? {
                     continue;
                 }
             }

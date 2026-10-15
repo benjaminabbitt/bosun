@@ -70,6 +70,13 @@ fn known_backend(id: &str) -> BackendMeta {
             scope: "user",
             supports_hold: false,
         },
+        "github-deb" | "github-rpm" => BackendMeta {
+            purl_type: "github",
+            vers_type: "semver",
+            platform_independent: false,
+            scope: "system",
+            supports_hold: id == "github-deb",
+        },
         other => panic!("unknown backend {other:?}; add it to known_backend"),
     }
 }
@@ -310,6 +317,23 @@ fn github_release_itself(world: &mut BosunWorld) {
         id: "github-release".into(),
         version: "1.0.0".into(),
         meta: known_backend("github-release"),
+        available: BTreeMap::new(),
+        checksums: BTreeMap::new(),
+        installed: BTreeMap::new(),
+        real: true,
+    });
+}
+
+/// bosun's own github-deb or github-rpm backend, its package manager answered
+/// from the fixture's package db.
+#[given(regex = r"^bosun installs release (\.deb|\.rpm) packages$")]
+fn github_package_itself(world: &mut BosunWorld, kind: String) {
+    world.path();
+    let id = if kind == ".deb" { "github-deb" } else { "github-rpm" };
+    world.backends.push(Backend {
+        id: id.into(),
+        version: "1.0.0".into(),
+        meta: known_backend(id),
         available: BTreeMap::new(),
         checksums: BTreeMap::new(),
         installed: BTreeMap::new(),
