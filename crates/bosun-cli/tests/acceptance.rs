@@ -281,13 +281,13 @@ fn versions(list: &str) -> Vec<String> {
 
 // ---- the machine and its backends -----------------------------------------
 
-#[given(regex = r"^an? (Linux|Debian \S+) (\S+) machine, (not elevated|elevated)$")]
+#[given(regex = r"^an? (Linux|Debian \S+|Windows) (\S+) machine, (not elevated|elevated)$")]
 fn a_machine(world: &mut BosunWorld, os: String, arch: String, privilege: String) {
     let distro = os
         .strip_prefix("Debian ")
         .map(|codename| ("debian".to_string(), codename.to_string()));
     world.machine = Some(Machine {
-        os: "linux".into(),
+        os: if os == "Windows" { "windows" } else { "linux" }.into(),
         arch,
         distro,
         elevated: privilege == "elevated",
@@ -329,7 +329,11 @@ fn github_release_itself(world: &mut BosunWorld) {
 #[given(regex = r"^bosun installs release (\.deb|\.rpm) packages$")]
 fn github_package_itself(world: &mut BosunWorld, kind: String) {
     world.path();
-    let id = if kind == ".deb" { "github-deb" } else { "github-rpm" };
+    let id = if kind == ".deb" {
+        "github-deb"
+    } else {
+        "github-rpm"
+    };
     world.backends.push(Backend {
         id: id.into(),
         version: "1.0.0".into(),
@@ -735,6 +739,10 @@ fn assert_executable(path: &Path) {
     let mode = fs::metadata(path).unwrap().permissions().mode();
     assert_eq!(mode & 0o111, 0o111, "{} mode {mode:o}", path.display());
 }
+
+/// Windows has no mode bits; an installed `.exe` is executable as written.
+#[cfg(not(unix))]
+fn assert_executable(_path: &Path) {}
 
 #[then("the manifest reads:")]
 fn manifest_reads(world: &mut BosunWorld, step: &Step) {

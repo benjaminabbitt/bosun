@@ -28,6 +28,24 @@ fmt-check:
 release:
     cargo build --release -p bosun-cli
 
+# Type-check the workspace for Windows (x86_64-pc-windows-gnu) from Linux. Needs
+# the rustup target and zig: ring's build script compiles C, and `zig cc` stands
+# in for a MinGW gcc (the --target flag cc adds is dropped; zig takes its own).
+check-win:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    cat > "$tmp/cc" <<'SH'
+    #!/bin/sh
+    for a in "$@"; do shift; case "$a" in --target=*) ;; *) set -- "$@" "$a";; esac; done
+    exec zig cc -target x86_64-windows-gnu "$@"
+    SH
+    printf '#!/bin/sh\nexec zig ar "$@"\n' > "$tmp/ar"
+    chmod +x "$tmp/cc" "$tmp/ar"
+    CC_x86_64_pc_windows_gnu="$tmp/cc" AR_x86_64_pc_windows_gnu="$tmp/ar" \
+        cargo check --workspace --all-targets --target x86_64-pc-windows-gnu
+
 # Install the bosun binary into ~/.cargo/bin from this checkout.
 install:
     cargo install --locked --path crates/bosun-cli

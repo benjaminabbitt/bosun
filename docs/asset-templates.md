@@ -102,6 +102,14 @@ so writing `musl` into the template is usually right anyway.
 | trivy         | `trivy_0.67.2_Linux-64bit.tar.gz`                    | `{{ binary }}_{{ version }}_{{ os \| title }}-{% if arch == "amd64" %}64bit{% else %}{{ arch \| upper }}{% endif %}.tar.gz` |
 
 ripgrep's binary is `rg`, so the template spells the archive's `ripgrep` literally.
+## Windows
+
+On Windows the binary is installed as `<binary>.exe` in `%USERPROFILE%\.local\bin` (bosun
+warns when that isn't on `PATH`). `{{ binary }}` in a template stays the bare name, as
+release assets spell it: `{{ binary }}_{{ version }}_{{ os }}_{{ arch }}.zip` finds
+`tool_1.2.0_windows_amd64.zip`, and bosun looks for `tool.exe` inside it. A release that
+ships the `.exe` itself is installed as it is.
+
 ## OS packages from a release: github-deb and github-rpm
 
 `github-deb` and `github-rpm` install the `.deb` or `.rpm` a release attaches, through

@@ -17,9 +17,11 @@ use bosun_backends::{
 use bosun_core::vers::scheme_for_type;
 use bosun_core::version::Scheme;
 use bosun_core::{Arch, BackendId, Distro, Os, Scope, Target, Version};
+#[cfg(unix)]
+use bosun_host::LinuxMachine;
 use bosun_host::{
-    build_registry, detect_arch, FakeMachine, LinuxMachine, ProcessCommandRunner, SkipReason,
-    StepExecutor, UreqHttpFetcher,
+    build_registry, detect_arch, FakeMachine, ProcessCommandRunner, SkipReason, StepExecutor,
+    UreqHttpFetcher,
 };
 use bosun_io::FileStateStore;
 use bosun_ports::backend::{Index, Installer};
@@ -260,7 +262,12 @@ fn compiled_in_factories(
     vec![
         Box::new(AptFactory::new(runner.clone())),
         Box::new(CargoFactory::new(runner.clone(), fetcher.clone())),
-        Box::new(GithubReleaseFactory::new(fetcher.clone(), bin_dir, os, arch)),
+        Box::new(GithubReleaseFactory::new(
+            fetcher.clone(),
+            bin_dir,
+            os,
+            arch,
+        )),
         package(PackageKind::Deb),
         package(PackageKind::Rpm),
     ]
@@ -304,10 +311,57 @@ fn env_err(e: impl std::fmt::Display) -> CliError {
     CliError::Environment(e.to_string())
 }
 
+/// The OS this build runs on: Windows, else Linux (macOS has no machine
+/// adapter yet and runs as Linux).
+fn host_os() -> Os {
+    if cfg!(windows) {
+        Os::Windows
+    } else {
+        Os::Linux
+    }
+}
+
+/// The real machine for `os`: privilege, user and distro read once here.
+#[cfg(unix)]
+fn host_machine(
+    arch: Arch,
+    distro: Option<Distro>,
+    system: PathBuf,
+    user: PathBuf,
+    _runner: &dyn CommandRunner,
+) -> Box<dyn Machine> {
+    Box::new(LinuxMachine::new(arch, distro, system, user))
+}
+
+/// The real machine for `os`: privilege, user and distro read once here.
+#[cfg(windows)]
+fn host_machine(
+    arch: Arch,
+    _distro: Option<Distro>,
+    system: PathBuf,
+    user: PathBuf,
+    runner: &dyn CommandRunner,
+) -> Box<dyn Machine> {
+    let invoking = User {
+        name: std::env::var("USERNAME").unwrap_or_default(),
+        uid: None,
+    };
+    Box::new(bosun_host::WindowsMachine::new(
+        arch,
+        bosun_host::windows_privilege(runner),
+        invoking,
+        system,
+        user,
+    ))
+}
+
 fn from_host() -> Result<Env, CliError> {
-    let os = Os::Linux; // M1 targets Linux; the Machine trait leaves room for more.
+    let os = host_os();
     let arch = detect_arch().map_err(env_err)?;
-    let distro = bosun_host::os_release::detect();
+    let distro = match os {
+        Os::Linux => bosun_host::os_release::detect(),
+        _ => None,
+    };
     let system = bosun_io::paths::state_path(Scope::System).map_err(env_err)?;
     let user = bosun_io::paths::state_path(Scope::User).map_err(env_err)?;
 
@@ -353,22 +407,22 @@ fn from_host() -> Result<Env, CliError> {
         })
         .collect();
 
-    let machine = LinuxMachine::new(arch, distro, system.clone(), user.clone());
+    let machine = host_machine(arch, distro, system.clone(), user.clone(), runner.as_ref());
     Ok(Env {
         state: FileStateStore::new(system, user, schemes.clone()),
         backends,
         skipped,
         schemes,
         ext_keys,
-        machine: Box::new(machine),
+        machine,
         exec: Exec::Host { runner, fetcher },
     })
 }
 
+/// The user's home: `%USERPROFILE%` on Windows, `$HOME` elsewhere.
 fn home_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default()
+    let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var_os(var).map(PathBuf::from).unwrap_or_default()
 }
 
 fn scope_of(raw: Option<&str>) -> Scope {
@@ -502,7 +556,10 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
         },
         system_state: system,
         user_state: user,
-        elevation: Elevation::Sudo,
+        elevation: match os {
+            Os::Windows => Elevation::AdministratorTerminal,
+            _ => Elevation::Sudo,
+        },
     };
     Ok(Env {
         state: store,
@@ -514,11 +571,7 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
         exec: Exec::Fixture(Box::new(FixtureStepRunner::new(
             fx.fail_step,
             machine_state,
-            any_real.then(|| RealSteps {
-                fetcher,
-                bin_dir,
-                packages,
-            }),
+            any_real.then(|| RealSteps { fetcher, packages }),
         ))),
     })
 }

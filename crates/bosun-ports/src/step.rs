@@ -62,6 +62,13 @@ pub enum Step {
         /// The unix file mode to set (e.g. `0o755`).
         mode: u32,
     },
+    /// Delete the file at `path` (a binary bosun installed); a file already
+    /// gone is not an error. Host: bosun removes it, on every OS alike.
+    /// Container: `RUN rm -f <path>`.
+    Remove {
+        /// The file to delete.
+        path: PathBuf,
+    },
 }
 
 /// How a downloaded release asset is packed, read from its file name.

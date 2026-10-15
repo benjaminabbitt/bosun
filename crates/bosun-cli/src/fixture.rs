@@ -296,14 +296,12 @@ impl CommandRunner for PackageDbRunner {
     }
 }
 
-/// Where `real` backends' steps run: `Fetch`/`Extract` through the host
-/// executor over the canned HTTP, removals confined to `bin_dir`, and the
-/// github-deb / github-rpm package-manager commands applied to `packages`.
+/// Where `real` backends' steps run: `Fetch`/`Extract`/`Remove` through the
+/// host executor over the canned HTTP, and the github-deb / github-rpm
+/// package-manager commands applied to `packages`.
 pub struct RealSteps {
     /// The canned HTTP the real backends fetch through.
     pub fetcher: Arc<dyn HttpFetcher>,
-    /// The scratch bin dir real backends install into.
-    pub bin_dir: PathBuf,
     /// The OS packages installed through apt-get / dnf.
     pub packages: PackageDb,
 }
@@ -343,25 +341,6 @@ impl RealSteps {
             }
             ["apt-mark", ..] => Ok(true),
             _ => Ok(false),
-        }
-    }
-
-    /// A real backend's `rm -f <file>` inside `bin_dir`, done in-process; any
-    /// other argv is not ours (`false`).
-    fn remove(&self, argv: &[String]) -> Result<bool, PortError> {
-        let [rm, force, path] = argv else {
-            return Ok(false);
-        };
-        let path = Path::new(path);
-        if rm != "rm" || force != "-f" || !path.starts_with(&self.bin_dir) {
-            return Ok(false);
-        }
-        match std::fs::remove_file(path) {
-            Ok(()) => Ok(true),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
-            Err(e) => Err(PortError::Backend {
-                detail: format!("{}: {e}", path.display()),
-            }),
         }
     }
 }
@@ -412,7 +391,7 @@ impl StepRunner for FixtureStepRunner {
                 }
             }
             if let Some(real) = &self.real {
-                if real.remove(argv)? || real.package(argv)? {
+                if real.package(argv)? {
                     continue;
                 }
             }

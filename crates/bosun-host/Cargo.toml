@@ -12,7 +12,6 @@ bosun-core.workspace = true
 bosun-ports.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-rustix.workspace = true
 sha2.workspace = true
 flate2.workspace = true
 tar.workspace = true
@@ -22,6 +21,10 @@ ruzstd.workspace = true
 bzip2.workspace = true
 tempfile.workspace = true
 ureq.workspace = true
+
+# euid/uid for the Linux privilege check; Windows asks `whoami /groups`.
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
 
 [lints]
 workspace = true

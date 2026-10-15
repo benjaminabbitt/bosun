@@ -90,7 +90,8 @@ impl BackendFactory for GithubReleaseFactory {
     }
 
     fn build(&self, _probe: Probe) -> Backend {
-        if needs_path_warning(&self.bin_dir, &std::env::var("PATH").unwrap_or_default()) {
+        let path_var = std::env::var("PATH").unwrap_or_default();
+        if needs_path_warning(&self.bin_dir, &path_var, self.os) {
             warn!(message = logmsg::BIN_DIR_NOT_ON_PATH, bin_dir = %self.bin_dir.display());
         }
         let backend = GithubReleaseBackend {
@@ -107,17 +108,26 @@ impl BackendFactory for GithubReleaseFactory {
     }
 }
 
-/// Whether `bin_dir` is one of the `:`-separated entries of `path_var`.
-fn on_path(bin_dir: &Path, path_var: &str) -> bool {
+/// Whether `bin_dir` is one of `path_var`'s entries, as `os` reads `PATH`:
+/// `;`-separated and case-insensitive on Windows (a trailing `\` ignored),
+/// `:`-separated and exact elsewhere.
+fn on_path(bin_dir: &Path, path_var: &str, os: Os) -> bool {
+    if os == Os::Windows {
+        let norm = |p: &str| p.trim_end_matches(['\\', '/']).to_lowercase();
+        let want = norm(&bin_dir.to_string_lossy());
+        return path_var
+            .split(';')
+            .any(|p| !p.is_empty() && norm(p) == want);
+    }
     path_var
         .split(':')
         .any(|p| !p.is_empty() && Path::new(p) == bin_dir)
 }
 
-/// Whether to warn that `bin_dir` is not on `$PATH`. Split out from `build` so
+/// Whether to warn that `bin_dir` is not on `PATH`. Split out from `build` so
 /// the condition is tested rather than only logged.
-fn needs_path_warning(bin_dir: &Path, path_var: &str) -> bool {
-    !on_path(bin_dir, path_var)
+fn needs_path_warning(bin_dir: &Path, path_var: &str, os: Os) -> bool {
+    !on_path(bin_dir, path_var, os)
 }
 
 #[derive(Clone)]
@@ -243,6 +253,18 @@ fn tag_pattern(pkg: &Ref) -> Result<Option<tag::TagPattern>, PortError> {
 }
 
 impl GithubReleaseBackend {
+    /// The binary's file name on this host: the binary name, with `.exe` on
+    /// Windows. The `binary` template variable stays the bare name, as release
+    /// assets spell it.
+    fn installed_name(&self, pkg: &Ref) -> String {
+        let binary = Self::binary_of(pkg);
+        if self.os == Os::Windows && !binary.to_ascii_lowercase().ends_with(".exe") {
+            format!("{binary}.exe")
+        } else {
+            binary
+        }
+    }
+
     /// The binary name: the purl's `binary` qualifier, else the purl's name
     /// (the repo segment). The shared ctxloom repo would set `binary` to keep
     /// its tools distinct; a single-binary repo needs nothing.
@@ -492,7 +514,7 @@ impl Installer for GithubReleaseBackend {
     }
 
     fn install_exact(&self, pkg: &Ref, version: &Version) -> Result<Steps, PortError> {
-        let binary = Self::binary_of(pkg);
+        let binary = self.installed_name(pkg);
         let (url, archive_name, format, sha256) = self.archive_and_checksum(pkg, version)?;
         if sha256.is_none() {
             warn!(
@@ -523,7 +545,7 @@ impl Installer for GithubReleaseBackend {
         // runs a binary it didn't build, and `Present { version: None }` carries
         // no version — bosun state is the version authority (§4.6), so this can
         // never be mistaken for a version in a comparison.
-        let path = self.bin_dir.join(Self::binary_of(pkg));
+        let path = self.bin_dir.join(self.installed_name(pkg));
         Ok(if path.exists() {
             Installed::Present { version: None }
         } else {
@@ -540,18 +562,8 @@ impl Installer for GithubReleaseBackend {
     }
 
     fn uninstall(&self, pkg: &Ref) -> Result<Steps, PortError> {
-        // Removing a fetched binary is deleting the file; modelled as a step.
-        Ok(vec![Step::Run {
-            argv: vec![
-                "rm".to_string(),
-                "-f".to_string(),
-                self.bin_dir
-                    .join(Self::binary_of(pkg))
-                    .display()
-                    .to_string(),
-            ],
-            env: vec![],
-            scope: Scope::User,
+        Ok(vec![Step::Remove {
+            path: self.bin_dir.join(self.installed_name(pkg)),
         }])
     }
 }
@@ -604,9 +616,87 @@ mod tests {
     #[test]
     fn on_path_matches_exact_entry() {
         let dir = Path::new("/home/x/.local/bin");
-        assert!(on_path(dir, "/usr/bin:/home/x/.local/bin:/bin"));
-        assert!(!on_path(dir, "/usr/bin:/bin"));
-        assert!(!on_path(dir, ""));
+        assert!(on_path(dir, "/usr/bin:/home/x/.local/bin:/bin", Os::Linux));
+        assert!(!on_path(dir, "/usr/bin:/bin", Os::Linux));
+        assert!(!on_path(dir, "", Os::Linux));
+        // Linux paths are case-sensitive.
+        assert!(!on_path(dir, "/HOME/x/.local/bin", Os::Linux));
+    }
+
+    #[test]
+    fn on_windows_path_entries_split_at_semicolons_and_ignore_case() {
+        let dir = Path::new(r"C:\Users\x\.local\bin");
+        assert!(on_path(
+            dir,
+            r"C:\Windows;c:\users\X\.LOCAL\bin",
+            Os::Windows
+        ));
+        assert!(on_path(dir, r"C:\Users\x\.local\bin\", Os::Windows));
+        assert!(!on_path(dir, r"C:\Windows;C:\Users\x\bin", Os::Windows));
+        assert!(!on_path(dir, "", Os::Windows));
+    }
+
+    fn windows(fetcher: Arc<dyn HttpFetcher>) -> GithubReleaseBackend {
+        GithubReleaseBackend {
+            os: Os::Windows,
+            ..backend(fetcher, PathBuf::from("/w/bin"))
+        }
+    }
+
+    #[test]
+    fn on_windows_the_binary_is_found_and_installed_as_an_exe() {
+        let tag_url = "https://api.github.com/repos/o/tool/releases/tags/v1.0.0";
+        let release = r#"{"tag_name":"v1.0.0","assets":[
+            {"name":"tool_1.0.0_windows_amd64.zip","browser_download_url":"https://x/tool.zip"},
+            {"name":"tool-windows-amd64.exe","browser_download_url":"https://x/tool.exe"}]}"#;
+        let fetcher: Arc<dyn HttpFetcher> =
+            Arc::new(FakeHttpFetcher::new().with_body(tag_url, release));
+        let b = windows(fetcher);
+        let zip = b
+            .install_exact(
+                &with_asset(
+                    "pkg:github/o/tool",
+                    "{{ binary }}_{{ version }}_{{ os }}_{{ arch }}.zip",
+                ),
+                &sem("1.0.0"),
+            )
+            .unwrap();
+        assert!(
+            matches!(&zip[1], Step::Extract { member, dest, format: ArchiveFormat::Zip, .. }
+                if member == "tool.exe" && dest == &PathBuf::from("/w/bin/tool.exe")),
+            "{zip:?}"
+        );
+        let raw = b
+            .install_exact(
+                &with_asset("pkg:github/o/tool", "{{ binary }}-{{ os }}-{{ arch }}.exe"),
+                &sem("1.0.0"),
+            )
+            .unwrap();
+        assert!(
+            matches!(&raw[1], Step::Extract { dest, format: ArchiveFormat::Raw, .. }
+                if dest == &PathBuf::from("/w/bin/tool.exe")),
+            "{raw:?}"
+        );
+        assert_eq!(
+            b.uninstall(&gh("pkg:github/o/tool")).unwrap(),
+            vec![Step::Remove {
+                path: PathBuf::from("/w/bin/tool.exe")
+            }]
+        );
+    }
+
+    #[test]
+    fn on_windows_presence_is_the_exe() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("tool.exe"), b"x").unwrap();
+        let b = GithubReleaseBackend {
+            bin_dir: dir.path().to_path_buf(),
+            ..windows(Arc::new(FakeHttpFetcher::new()))
+        };
+        assert_eq!(
+            b.verify_installed(&gh("pkg:github/o/tool")).unwrap(),
+            Installed::Present { version: None }
+        );
     }
 
     #[test]
@@ -1138,8 +1228,12 @@ mod tests {
     #[test]
     fn needs_path_warning_when_not_on_path() {
         let dir = Path::new("/home/x/.local/bin");
-        assert!(needs_path_warning(dir, "/usr/bin:/bin"));
-        assert!(!needs_path_warning(dir, "/usr/bin:/home/x/.local/bin"));
+        assert!(needs_path_warning(dir, "/usr/bin:/bin", Os::Linux));
+        assert!(!needs_path_warning(
+            dir,
+            "/usr/bin:/home/x/.local/bin",
+            Os::Linux
+        ));
     }
 
     #[test]
@@ -1215,14 +1309,8 @@ mod tests {
         );
         assert_eq!(
             b.uninstall(&gh("pkg:github/ctxloom/ctxloom")).unwrap(),
-            vec![Step::Run {
-                argv: vec![
-                    "rm".into(),
-                    "-f".into(),
-                    "/home/x/.local/bin/ctxloom".into()
-                ],
-                env: vec![],
-                scope: Scope::User,
+            vec![Step::Remove {
+                path: PathBuf::from("/home/x/.local/bin/ctxloom"),
             }]
         );
     }

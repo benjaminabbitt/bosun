@@ -68,6 +68,9 @@ enum StepView<'a> {
         dest: String,
         mode: u32,
     },
+    Remove {
+        path: String,
+    },
 }
 
 #[derive(Serialize)]
@@ -111,6 +114,9 @@ fn step_view(step: &Step) -> StepView<'_> {
             member,
             dest: dest.display().to_string(),
             mode: *mode,
+        },
+        Step::Remove { path } => StepView::Remove {
+            path: path.display().to_string(),
         },
     }
 }

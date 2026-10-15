@@ -17,6 +17,10 @@ pub mod registry;
 pub use error::HostError;
 pub use executor::StepExecutor;
 pub use http::UreqHttpFetcher;
-pub use machine::{detect_arch, FakeMachine, LinuxMachine};
+#[cfg(unix)]
+pub use machine::LinuxMachine;
+pub use machine::{
+    detect_arch, privilege_from_whoami, windows_privilege, FakeMachine, WindowsMachine,
+};
 pub use process::ProcessCommandRunner;
 pub use registry::{build_registry, RegisteredBackend, Registry, SkipReason, SkippedBackend};

@@ -4,8 +4,8 @@
 //! sha256 when the step carries one; `Extract` pulls the one member with a
 //! given file name out of a tar (plain, gz, xz, zstd or bzip2) or zip archive,
 //! wherever in the archive it sits, decompresses a single compressed file, or
-//! copies a raw binary. The container renderer (§8) consumes the same steps
-//! instead of running them.
+//! copies a raw binary; `Remove` deletes a file. The container renderer (§8)
+//! consumes the same steps instead of running them.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -89,6 +89,11 @@ impl<'a> StepExecutor<'a> {
                 dest,
                 mode,
             } => extract(*format, archive, member, dest, *mode),
+            Step::Remove { path } => match fs::remove_file(path) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(io_err(path, e)),
+            },
         }
     }
 }
@@ -971,5 +976,41 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    // --- remove ----------------------------------------------------------------
+
+    fn remove(path: &Path) -> Result<(), PortError> {
+        exec_with(
+            &FakeCommandRunner::new(),
+            &FakeHttpFetcher::new(),
+            &[Step::Remove {
+                path: path.to_path_buf(),
+            }],
+        )
+    }
+
+    #[test]
+    fn remove_deletes_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("tool");
+        std::fs::write(&file, b"x").unwrap();
+        remove(&file).unwrap();
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn removing_a_file_already_gone_is_fine() {
+        let dir = tempfile::tempdir().unwrap();
+        remove(&dir.path().join("never-there")).unwrap();
+    }
+
+    #[test]
+    fn remove_refuses_a_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        assert!(remove(&sub).is_err());
+        assert!(sub.exists());
     }
 }

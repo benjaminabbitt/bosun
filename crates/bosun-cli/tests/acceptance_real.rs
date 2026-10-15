@@ -10,6 +10,7 @@
 //! cleaned at the start of the apt scenario.
 
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -210,6 +211,8 @@ fn binary_executable(w: &mut RealWorld, name: String) {
     let path = w.bin_dir().join(&name);
     let meta = fs::metadata(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     assert!(meta.is_file(), "{} is not a file", path.display());
+    // Windows has no mode bits to check.
+    #[cfg(unix)]
     assert!(
         meta.permissions().mode() & 0o111 != 0,
         "{} not executable",
