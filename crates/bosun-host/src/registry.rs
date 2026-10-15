@@ -218,7 +218,7 @@ mod tests {
                 purl_type: "generic",
                 vers_type: "generic",
                 platform_independent: true,
-                ext_keys: &[],
+                option_keys: &[],
             }
         }
         fn probe(&self, _: &HostInfo) -> Result<Option<Probe>, PortError> {

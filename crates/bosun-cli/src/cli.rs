@@ -53,27 +53,29 @@ pub enum Command {
     Add {
         /// bosun's name for the package.
         name: String,
-        /// The backend to install with; repeat, or comma-separate, for a
-        /// preference list.
+        /// A backend that may install it; repeat, or comma-separate, for
+        /// several. Which one is used is this machine's preference
+        /// (`--installer`, `BOSUN_INSTALLER`, config).
         #[arg(long = "backend", value_delimiter = ',')]
         backends: Vec<String>,
-        /// The backend's own id for the package, where it differs from the name.
-        /// With several backends, name one backend's own id with
-        /// `--ext <backend>.package=<id>`.
+        /// The backend's own id for the package, where it differs from the
+        /// name, for every --backend. Name one backend's own id with
+        /// `--opt <backend>.package=<id>`.
         #[arg(long)]
         package: Option<String>,
         /// The version spec. Default: the newest version, up to the next one
         /// that may break it (`>=2.0.2|<3.0.0`).
         #[arg(long, allow_hyphen_values = true)]
         spec: Option<String>,
-        /// The selector the install block applies to (`linux`, `linux:debian`).
-        /// Default: this machine's OS.
+        /// The selector the install block applies to (`any`, `linux`,
+        /// `linux:debian`). Default: `any` when every --backend is
+        /// platform-independent (npm, cargo, …), else this machine's OS.
         #[arg(long = "on")]
         selector: Option<String>,
-        /// A backend setting under `ext`: `key=value` for the one --backend,
-        /// or `backend.key=value`. Repeatable.
-        #[arg(long)]
-        ext: Vec<String>,
+        /// A backend option: `key=value` for the one --backend, or
+        /// `backend.key=value`. Repeatable.
+        #[arg(long = "opt")]
+        opts: Vec<String>,
         /// The manifest directory or file (default: current directory).
         #[arg(long)]
         manifest: Option<PathBuf>,
@@ -107,9 +109,18 @@ pub enum Command {
     Lock {
         /// The manifest directory or file (default: current directory).
         path: Option<PathBuf>,
-        /// Report stale or missing targets instead of writing (a CI gate).
+    },
+    /// Rewrite an older-version manifest as the current version. The rewrite
+    /// drops comments, so it shows the result and asks first.
+    Migrate {
+        /// The manifest directory or file (default: current directory).
+        path: Option<PathBuf>,
+        /// Show the migrated manifest and stop (changes nothing).
         #[arg(long)]
-        check: bool,
+        plan: bool,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
     },
     /// Move the machine toward a manifest (install, upgrade, downgrade, hold).
     Install {

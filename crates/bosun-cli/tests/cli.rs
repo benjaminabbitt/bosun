@@ -20,8 +20,7 @@ const FIXTURE: &str = r#"{
   ]
 }"#;
 
-const MANIFEST: &str = r#"version: 1
-targets: [linux/amd64]
+const MANIFEST: &str = r#"version: 2
 packages:
   - name: jq
     spec: ">=1.7|<2"
@@ -111,35 +110,6 @@ fn lock_resolves_and_writes_the_lockfile() {
 }
 
 #[test]
-fn lock_check_reports_missing_then_fresh() {
-    let dir = project();
-    // Before locking, the declared target is missing → exit 2.
-    let before = bosun(dir.path())
-        .args(["--format", "json", "lock"])
-        .arg(dir.path())
-        .arg("--check")
-        .assert()
-        .code(2);
-    let json = stdout_json(&before.get_output().stdout);
-    assert_eq!(json["targets"][0]["freshness"], "missing");
-
-    // Lock, then check again → fresh, exit 0.
-    bosun(dir.path())
-        .args(["lock"])
-        .arg(dir.path())
-        .assert()
-        .success();
-    let after = bosun(dir.path())
-        .args(["--format", "json", "lock"])
-        .arg(dir.path())
-        .arg("--check")
-        .assert()
-        .code(0);
-    let json = stdout_json(&after.get_output().stdout);
-    assert_eq!(json["targets"][0]["freshness"], "fresh");
-}
-
-#[test]
 fn status_reports_wanted_versions_for_an_empty_machine() {
     let dir = project();
     let assert = bosun(dir.path())
@@ -209,10 +179,10 @@ fn text_format_renders_human_lines() {
 }
 
 #[test]
-fn installer_preference_overrides_manifest_order() {
-    let manifest = "version: 1\ntargets: [linux/amd64]\npackages:\n  - name: fd\n    spec: \">=1.0.0|<2.0.0\"\n    install:\n      linux: {backends: [apt, cargo]}\n";
+fn installer_preference_picks_among_the_acceptable_backends() {
+    let manifest = "version: 2\npackages:\n  - name: fd\n    spec: \">=1.0.0|<2.0.0\"\n    install:\n      linux: {backends: {apt: {}, cargo: {}}}\n";
 
-    // Default: the manifest lists apt first, so apt wins.
+    // Default: no preference, so the first registered backend (apt) wins.
     let dir = project_with(manifest);
     let default = bosun(dir.path())
         .args(["--format", "json", "lock"])
@@ -276,7 +246,7 @@ fn status_reflects_installed_state() {
 
 #[test]
 fn a_non_applicable_entry_is_reported_with_its_reason() {
-    let manifest = "version: 1\ntargets: [linux/amd64]\npackages:\n  - name: mac-only\n    spec: \">=1.0.0|<2.0.0\"\n    install:\n      darwin: {backend: cargo}\n";
+    let manifest = "version: 2\npackages:\n  - name: mac-only\n    spec: \">=1.0.0|<2.0.0\"\n    install:\n      darwin: {backend: cargo}\n";
     let dir = project_with(manifest);
     let run = bosun(dir.path())
         .args(["--format", "json", "lock"])
@@ -347,8 +317,7 @@ const APPLY_FIXTURE: &str = r#"{
   ]
 }"#;
 
-const USER_MANIFEST: &str = r#"version: 1
-targets: [linux/amd64]
+const USER_MANIFEST: &str = r#"version: 2
 packages:
   - name: ripgrep
     spec: ">=14.0.0|<15.0.0"
@@ -356,8 +325,7 @@ packages:
       linux: {backend: cargo}
 "#;
 
-const SYSTEM_MANIFEST: &str = r#"version: 1
-targets: [linux/amd64]
+const SYSTEM_MANIFEST: &str = r#"version: 2
 packages:
   - name: jq
     spec: ">=1.7|<2"
@@ -530,7 +498,7 @@ fn a_failed_step_mid_apply_keeps_the_earlier_package() {
          "available":{"one":["1.0.0"],"two":["2.0.0"]}}
       ]
     }"#;
-    let manifest = "version: 1\ntargets: [linux/amd64]\npackages:\n  - name: one\n    spec: \">=1.0.0|<2.0.0\"\n    install:\n      linux: {backend: cargo}\n  - name: two\n    spec: \">=2.0.0|<3.0.0\"\n    install:\n      linux: {backend: cargo}\n";
+    let manifest = "version: 2\npackages:\n  - name: one\n    spec: \">=1.0.0|<2.0.0\"\n    install:\n      linux: {backend: cargo}\n  - name: two\n    spec: \">=2.0.0|<3.0.0\"\n    install:\n      linux: {backend: cargo}\n";
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("fixture.json"), fixture).unwrap();
     fs::write(dir.path().join("bosun.yaml"), manifest).unwrap();
@@ -666,7 +634,7 @@ fn install_accepts_a_package_present_outside_bosun() {
       "backends":[{"id":"apt","version":"2.6.1","purl_type":"deb","vers_type":"deb","platform_independent":false,
         "scope":"system","supports_hold":true,
         "available":{"jq":["1.7.1-6+deb13u2"]},"installed":{"jq":"1.7.1-6+deb13u1"}}]}"#;
-    let manifest = "version: 1\ntargets: [linux/amd64]\npackages:\n  - name: jq\n    spec: \">=1.6\"\n    install:\n      linux:debian: {backend: apt}\n";
+    let manifest = "version: 2\npackages:\n  - name: jq\n    spec: \">=1.6\"\n    install:\n      linux:debian: {backend: apt}\n";
     let dir = write_project(fixture, manifest);
     let assert = bosun(dir.path())
         .args(["--format", "json", "install"])
@@ -689,7 +657,7 @@ fn lock_refuses_to_write_an_incomplete_target() {
     let fixture = r#"{"os":"linux","arch":"amd64","privilege":"unelevated","user":"t",
       "backends":[{"id":"github-release","version":"1.0.0","purl_type":"github","vers_type":"semver","platform_independent":false,
         "scope":"user","available":{"ctxloom/ctxloom":["0.6.4"]}}]}"#;
-    let manifest = "version: 1\ntargets: [linux/amd64]\npackages:\n  - name: ctxloom\n    spec: \">=99.0.0\"\n    install:\n      linux: {backend: github-release, package: ctxloom/ctxloom}\n";
+    let manifest = "version: 2\npackages:\n  - name: ctxloom\n    spec: \">=99.0.0\"\n    install:\n      linux: {backend: github-release, package: ctxloom/ctxloom}\n";
     let dir = write_project(fixture, manifest);
     let assert = bosun(dir.path())
         .args(["--format", "json", "lock"])
@@ -707,7 +675,7 @@ fn install_respects_another_projects_claim_range() {
     let fixture = r#"{"os":"linux","arch":"amd64","privilege":"unelevated","user":"t",
       "backends":[{"id":"cargo","version":"1.76.0","purl_type":"cargo","vers_type":"cargo","platform_independent":true,
         "scope":"user","available":{"ripgrep":["14.0.0","14.1.1"]},"installed":{"ripgrep":"14.0.0"}}]}"#;
-    let manifest = "version: 1\ntargets: [linux/amd64]\npackages:\n  - name: ripgrep\n    spec: \">=14.0.0|<15.0.0\"\n    install:\n      linux: {backend: cargo}\n";
+    let manifest = "version: 2\npackages:\n  - name: ripgrep\n    spec: \">=14.0.0|<15.0.0\"\n    install:\n      linux: {backend: cargo}\n";
     let dir = write_project(fixture, manifest);
     write_user_state(
         dir.path(),
@@ -733,7 +701,7 @@ fn a_system_uninstall_remedy_names_uninstall() {
       "privilege":"unelevated","user":"ben",
       "backends":[{"id":"apt","version":"2.6.1","purl_type":"deb","vers_type":"deb","platform_independent":false,
         "scope":"system","supports_hold":true,"available":{},"installed":{}}]}"#;
-    let manifest = "version: 1\ntargets: [linux/amd64]\npackages:\n  - name: jq\n    spec: \">=1.6\"\n    install:\n      linux:debian: {backend: apt}\n";
+    let manifest = "version: 2\npackages:\n  - name: jq\n    spec: \">=1.6\"\n    install:\n      linux:debian: {backend: apt}\n";
     let dir = write_project(fixture, manifest);
     let claim = dir.path().join("bosun.yaml").display().to_string();
     let state = r#"{"stateVersion":1,"packages":[{"name":"jq","targets":{"linux/amd64":{"backend":"apt","purl":"pkg:deb/debian/jq?arch=amd64&distro=trixie","installed":"1.7.1-6+deb13u2","origin":"installed","claimedBy":[{"manifest":"MANIFEST","spec":"vers:deb/>=1.6"}]}}}]}"#.replace("MANIFEST", &claim);
@@ -763,7 +731,7 @@ fn an_accepted_package_with_a_conflicting_claim_warns_not_refuses() {
       "privilege":"unelevated","user":"ben",
       "backends":[{"id":"apt","version":"2.6.1","purl_type":"deb","vers_type":"deb","platform_independent":false,
         "scope":"system","supports_hold":true,"available":{"jq":["1.7.1"]}}]}"#;
-    let manifest = "version: 1\ntargets: [linux/amd64]\npackages:\n  - name: jq\n    spec: \">=1.6\"\n    install:\n      linux:debian: {backend: apt}\n";
+    let manifest = "version: 2\npackages:\n  - name: jq\n    spec: \">=1.6\"\n    install:\n      linux:debian: {backend: apt}\n";
     let dir = write_project(fixture, manifest);
     write_system_state(
         dir.path(),
@@ -827,7 +795,7 @@ fn yaml_format_renders_yaml() {
 #[test]
 fn status_reports_a_not_applicable_entry() {
     let dir = project_with(
-        "version: 1\ntargets: [linux/amd64]\npackages:\n  - name: mac-only\n    spec: \">=1.0.0|<2.0.0\"\n    install:\n      darwin: {backend: cargo}\n",
+        "version: 2\npackages:\n  - name: mac-only\n    spec: \">=1.0.0|<2.0.0\"\n    install:\n      darwin: {backend: cargo}\n",
     );
     let out = bosun(dir.path())
         .args(["--format", "json", "status"])
@@ -841,32 +809,6 @@ fn status_reports_a_not_applicable_entry() {
             .iter()
             .any(|d| d.as_str().unwrap().contains("not applicable")),
         "diagnostics: {diags:?}"
-    );
-}
-
-#[test]
-fn lock_check_reports_a_stale_target() {
-    let dir = project();
-    bosun(dir.path())
-        .args(["lock"])
-        .arg(dir.path())
-        .assert()
-        .success();
-    // Change the manifest (a new spec → a new hash) so the lock is stale.
-    fs::write(
-        dir.path().join("bosun.yaml"),
-        "version: 1\ntargets: [linux/amd64]\npackages:\n  - name: jq\n    spec: \">=1.7.1\"\n    install:\n      linux:debian: {backend: apt}\n",
-    )
-    .unwrap();
-    let out = bosun(dir.path())
-        .args(["--format", "json", "lock"])
-        .arg(dir.path())
-        .arg("--check")
-        .assert()
-        .code(2);
-    assert_eq!(
-        stdout_json(&out.get_output().stdout)["targets"][0]["freshness"],
-        "stale"
     );
 }
 
@@ -894,7 +836,7 @@ fn a_text_format_privilege_error_shows_the_remedy() {
       "privilege":"unelevated","user":"ben",
       "backends":[{"id":"apt","version":"2.6.1","purl_type":"deb","vers_type":"deb","platform_independent":false,
         "scope":"system","supports_hold":true,"available":{"jq":["1.7.1-6+deb13u2"]}}]}"#;
-    let manifest = "version: 1\ntargets: [linux/amd64]\npackages:\n  - name: jq\n    spec: \">=1.6\"\n    install:\n      linux:debian: {backend: apt}\n";
+    let manifest = "version: 2\npackages:\n  - name: jq\n    spec: \">=1.6\"\n    install:\n      linux:debian: {backend: apt}\n";
     let dir = write_project(fixture, manifest);
     let out = bosun(dir.path())
         .args(["--format", "text", "install"])
@@ -964,7 +906,7 @@ fn lock_records_the_github_release_checksum() {
         "scope":"user",
         "available":{"ctxloom/ctxloom":["0.6.4"]},
         "checksums":{"ctxloom/ctxloom":"89a356c697c9458929ecf851bc85da3a9548d19aa978837b54c0b0b27100810f"}}]}"#;
-    let manifest = "version: 1\ntargets: [linux/amd64]\npackages:\n  - name: ctxloom\n    spec: \">=0.6.4|<0.7.0\"\n    install:\n      linux: {backend: github-release, package: ctxloom/ctxloom}\n";
+    let manifest = "version: 2\npackages:\n  - name: ctxloom\n    spec: \">=0.6.4|<0.7.0\"\n    install:\n      linux: {backend: github-release, package: ctxloom/ctxloom}\n";
     let dir = write_project(fixture, manifest);
     bosun(dir.path())
         .args(["lock"])
@@ -991,7 +933,7 @@ fn status_shows_a_package_present_but_not_managed() {
       "backends":[{"id":"apt","version":"2.6.1","purl_type":"deb","vers_type":"deb","platform_independent":false,
         "scope":"system","supports_hold":true,
         "available":{"jq":["1.7.1-6+deb13u1"]},"installed":{"jq":"1.7.1-6+deb13u1"}}]}"#;
-    let manifest = "version: 1\ntargets: [linux/amd64]\npackages:\n  - name: jq\n    spec: \">=1.6\"\n    install:\n      linux:debian: {backend: apt}\n";
+    let manifest = "version: 2\npackages:\n  - name: jq\n    spec: \">=1.6\"\n    install:\n      linux:debian: {backend: apt}\n";
     let dir = write_project(fixture, manifest);
     let text = bosun(dir.path())
         .args(["--format", "text", "status"])
@@ -1031,7 +973,7 @@ fn frozen_refuses_an_accepted_package_at_a_different_version_than_the_lock() {
       "backends":[{"id":"apt","version":"2.6.1","purl_type":"deb","vers_type":"deb","platform_independent":false,
         "scope":"system","supports_hold":true,
         "available":{"jq":["1.7.1-6+deb13u1","1.7.1-6+deb13u2"]},"installed":{"jq":"1.7.1-6+deb13u1"}}]}"#;
-    let manifest = "version: 1\ntargets: [linux/amd64]\npackages:\n  - name: jq\n    spec: \">=1.6\"\n    install:\n      linux:debian: {backend: apt}\n";
+    let manifest = "version: 2\npackages:\n  - name: jq\n    spec: \">=1.6\"\n    install:\n      linux:debian: {backend: apt}\n";
     let dir = write_project(fixture, manifest);
     let lock = r#"{"lockfileVersion":1,"targets":{"linux/amd64":{"manifestHash":"sha256:x"}},
       "packages":[{"name":"jq","spec":"vers:deb/>=1.6","targets":{"linux/amd64":{
@@ -1106,7 +1048,7 @@ fn apt_install_is_idempotent_on_the_second_run() {
       "privilege":"elevated","user":"root",
       "backends":[{"id":"apt","version":"2.6.1","purl_type":"deb","vers_type":"deb","platform_independent":false,
         "scope":"system","supports_hold":true,"available":{"jq":["1.7.1-6+deb13u1"]}}]}"#;
-    let manifest = "version: 1\ntargets: [linux/amd64]\npackages:\n  - name: jq\n    spec: \">=1.6\"\n    install:\n      linux:debian: {backend: apt}\n";
+    let manifest = "version: 2\npackages:\n  - name: jq\n    spec: \">=1.6\"\n    install:\n      linux:debian: {backend: apt}\n";
     assert_second_run_is_idempotent(write_project(fixture, manifest).path());
 }
 
@@ -1115,7 +1057,7 @@ fn cargo_install_is_idempotent_on_the_second_run() {
     let fixture = r#"{"os":"linux","arch":"amd64","privilege":"unelevated","user":"t",
       "backends":[{"id":"cargo","version":"1.76.0","purl_type":"cargo","vers_type":"cargo","platform_independent":true,
         "scope":"user","available":{"ripgrep":["14.1.1"]}}]}"#;
-    let manifest = "version: 1\ntargets: [linux/amd64]\npackages:\n  - name: ripgrep\n    spec: \">=14.0.0|<15.0.0\"\n    install:\n      linux: {backend: cargo}\n";
+    let manifest = "version: 2\npackages:\n  - name: ripgrep\n    spec: \">=14.0.0|<15.0.0\"\n    install:\n      linux: {backend: cargo}\n";
     assert_second_run_is_idempotent(write_project(fixture, manifest).path());
 }
 
@@ -1127,6 +1069,6 @@ fn github_release_install_is_idempotent_on_the_second_run() {
     let fixture = r#"{"os":"linux","arch":"amd64","privilege":"unelevated","user":"t",
       "backends":[{"id":"github-release","version":"1.0.0","purl_type":"github","vers_type":"semver","platform_independent":false,
         "scope":"user","available":{"ctxloom/ctxloom":["0.6.4"]}}]}"#;
-    let manifest = "version: 1\ntargets: [linux/amd64]\npackages:\n  - name: ctxloom\n    spec: \">=0.6.4|<0.7.0\"\n    install:\n      linux: {backend: github-release, package: ctxloom/ctxloom}\n";
+    let manifest = "version: 2\npackages:\n  - name: ctxloom\n    spec: \">=0.6.4|<0.7.0\"\n    install:\n      linux: {backend: github-release, package: ctxloom/ctxloom}\n";
     assert_second_run_is_idempotent(write_project(fixture, manifest).path());
 }

@@ -104,7 +104,7 @@ real to check later):
 
 | command | does |
 |---|---|
-| `add <name> --backend … [--package] [--spec] [--on <selector>] [--ext k=v]` / `remove <name> [--plan] [--yes]` | edit one manifest entry, keeping every other byte, then run `lock` on the edited manifest. `add` checks the entry first (ext keys, then a resolve on this machine) and writes nothing on error; without `--spec` it writes the range from the newest version up to the next breaking one (`>=2.0.2\|<3.0.0`, below 1.0 the next minor, apt: any revision of the upstream version); it never installs. `remove` first releases the package (drops this manifest's claim, uninstalls only if bosun installed it and no other manifest claims it, behind the usual confirm), then edits and locks |
+| `add <name> --backend … [--package] [--spec] [--on <selector>] [--opt k=v]` / `remove <name> [--plan] [--yes]` | edit one manifest entry, keeping every other byte, then run `lock` on the edited manifest. Both refuse a manifest older than the current version (run `migrate`). `add` writes under `any` when every backend is platform-independent, else this machine's OS, unless `--on` says; it checks the entry first (backend options, then a resolve on this machine) and writes nothing on error; without `--spec` it writes the range from the newest version up to the next breaking one (`>=2.0.2\|<3.0.0`, below 1.0 the next minor, apt: any revision of the upstream version); it never installs. `remove` first releases the package (drops this manifest's claim, uninstalls only if bosun installed it and no other manifest claims it, behind the usual confirm), then edits and locks |
 | `refresh` | explicit index refresh, per backend |
 | `install [path] [--plan] [--scope system\|user] [--yes]` | plan → privilege check → confirm → apply: resolve each entry with the local package manager, install, record in the machine state (§4.8, §5.5). **Never uninstalls** (except the old name in a `formerly` migration, §5.4) |
 | `uninstall [path] [--plan] [--scope system\|user] [--yes]` | the inverse of `install` for one manifest: drop all of its claims, then uninstall each package bosun installed that no other manifest still claims; same plan → confirm → apply flow (§9) |
@@ -113,7 +113,8 @@ real to check later):
 | `export` | seed a manifest from the current machine |
 | `status` | what bosun manages on this machine and which manifests claim it (drift is `install --plan`'s job) |
 | `adopt <name>` | explicitly take ownership of an existing install: `accepted` → `installed` (§4.6) |
-| `lock [--check]` | resolve this machine's platform (plus platform-independent `any` entries) and merge the result into `bosun.lock`, keeping other platforms' entries; `--check` fails if any declared platform is missing or stale (§4.5, §4.7) |
+| `lock` | resolve this machine's platform (plus platform-independent `any` entries) and merge the result into `bosun.lock`, keeping other platforms' entries (§4.5, §4.7) |
+| `migrate [path] [--plan] [--yes]` | rewrite an older-version manifest as the current version (loading migrates in memory anyway; this writes it, so `add` / `remove` can edit it). annals writes the migrated tree without comments, so it shows the result and confirms first, and keeps the original as `<file>.v<N>` |
 | `install --frozen` | install exactly what `bosun.lock` records for this platform; never re-resolves, never writes the lockfile; errors if this platform is missing or stale (§7) |
 | `render args\|env\|json` | versions for a target platform as build args, env lines, or a JSON versions file (§8.3) |
 | `backends` | registered backends, their versions, and why others were skipped (§5.3) |
@@ -148,8 +149,13 @@ the same fields.
   - **Edits keep comments:** `add`, `remove` and `export` go through annals-yaml's
     comment-preserving editor, which splices only the entry it changes and leaves every
     other byte, comments included, as the person wrote it.
-  - **Format versions:** the manifest and user config carry a root `version` and load
-    through `annals_yaml::versioned`, whose registered migrations upgrade older files.
+  - **Format versions:** every file carries a monotonic format version: `version` in the
+    manifest (2) and user config (1), `lockfileVersion` and `stateVersion` in the JSON files.
+    The YAML files load through `annals_yaml::versioned`: a file with no `version` is version
+    0, and the registered steps migrate an older file in memory on every load. A newer version
+    than the build reads is refused, never misread. Manifest 1 → 2 drops `targets` and folds
+    the backend list, shared `package` and `ext` into the `backends` map; config 0 → 1 only
+    stamps the version.
   - **Editor validation:** a published JSON Schema, referenced by a
     `# yaml-language-server: $schema=…` comment.
   - **Errors** are `annals-diagnostic` values: a stable code and named args, matching bosun's
@@ -534,21 +540,22 @@ trait BackendFactory {
 
 **Selection: the project decides what's allowed, the user's preference picks among it.**
 
-- A manifest `install` selector names **one** backend or an **ordered list** of acceptable ones
-  (`backends: [scoop, winget]`). The list is names only; a backend whose package id differs
-  names it in its own `ext` section (`ext: {winget: {package: sharkdp.fd}}`, §5.4).
+- **The manifest is about the package; the preference is the machine's.** A manifest `install`
+  selector names the **set** of acceptable backends, each with its options
+  (`backends: {scoop: {}, winget: {package: sharkdp.fd}}`, §5.4). It says nothing about
+  order.
 - If it names exactly one, that backend is used: a preference never overrides a single
   explicit backend, because version grammar and pin durability differ per backend
   (`ripgrep` via apt = distro's old Debian version; via cargo = crates.io semver, any version).
-- If it lists several, bosun takes the first that is both **registered** and highest in the
-  **preferred-installer order**, resolved with this precedence:
+- If it names several, bosun takes the registered one highest in the **preferred-installer
+  order**, resolved with this precedence:
 
 | source | example |
 |---|---|
 | command-line flag | `--installer brew,cargo` |
 | environment | `BOSUN_INSTALLER=brew,cargo` |
 | user config | `<config dir>/bosun/config.yaml`: `installer: [brew, cargo]` |
-| manifest | the order the selector lists them in |
+| built in | the order backends are registered in (`bosun backends`) |
 
   Each level is an ordered list; backends it doesn't mention fall back to the next level.
 
@@ -570,8 +577,7 @@ ID and version string. The author still names the backend explicitly; it is just
 
 ```yaml
 # yaml-language-server: $schema=https://…/bosun.schema.json
-version: 1
-targets: [linux/amd64, linux/arm64, darwin/arm64, windows/amd64]
+version: 2
 
 # reuse: most entries only need to state where they differ from these
 defaults:
@@ -593,39 +599,43 @@ packages:
     install:
       linux:debian: {backend: apt, package: fd-find, spec: 9.0.0-1}
       linux:fedora: {backend: dnf, package: fd-find}
-      # scoop if present, else winget; each names its own package
+      # either is fine; this machine's preference picks. Each names its own package
       windows:
-        backends: [scoop, winget]
-        ext: {winget: {package: sharkdp.fd}}
+        backends:
+          scoop: {}
+          winget: {package: sharkdp.fd}
 
   - name: eza
     spec: 0.20.0
     formerly: [exa]
-    install:
-      linux: {backend: cargo}
+    install: {backend: cargo}    # a bare block is `any`: cargo isn't tied to an OS
 ```
 
 (Versions above are illustrative.)
 
 Rules (draft syntax):
 
-- **Selectors:** `install` keys are `<os>` or `<os>:<distro>`; the most specific match for the
-  current machine wins (exact distro `ID` > `ID_LIKE` match > plain `<os>`), then
-  `defaults.install`. No match = the entry doesn't apply on this platform (reported by
-  `status`, not an error). Distro detection is below.
-- **`ext`: backend-specific settings.** `ext: {<backend id>: {<key>: <scalar>}}` on an
-  install block (or in `defaults.install`, inherited per key) carries settings only that
-  backend reads, such as github-release's `asset` template. bosun-core carries it verbatim;
-  each backend declares its keys in `BackendMeta::ext_keys`, and the manifest is checked
-  against every compiled-in backend at load, so an unknown backend or key is an error. The
-  chosen backend's section becomes qualifiers on its identity purl, which it validates when
-  it reads them; other backends' sections are ignored. One key is bosun's, not the backend's,
-  and every backend takes it: **`package`**, the backend's own package id, which wins over the
-  block's shared `package` when that backend is chosen. It becomes the purl's name, never a
-  qualifier. This is how a fallback list names each candidate's package.
+- **Selectors:** `install` keys are `any`, `<os>` or `<os>:<distro>`; the most specific match
+  for the current machine wins (exact distro `ID` > `ID_LIKE` match > plain `<os>` > `any`),
+  then `defaults.install`. A bare block under `install` (its keys are block keys, not
+  selectors) is `any`; mixing the two is an error. No match = the entry doesn't apply on this
+  platform (reported by `status`, not an error). Distro detection is below.
+- **`backends`: the acceptable backends and their options.** `backends: {<backend id>:
+  {<option>: <scalar>}}`; `backend: <id>` with an optional `package:` is the shorthand for one
+  backend whose only option is its package. **`package`** is bosun's option, which every
+  backend takes: the backend's own package id, the purl's name, never a qualifier. The rest
+  are the backend's own (github-release's `asset` template, …): bosun-core carries them
+  verbatim, each backend declares them in `BackendMeta::option_keys`, and the manifest is
+  checked against every compiled-in backend at load, so an unknown backend or option is an
+  error. The chosen backend's options become qualifiers on its identity purl, which it
+  validates when it reads them. A block-level `package` beside a `backends` map is an error
+  (name it per backend).
 - **Defaults keep it sparse:** `package` defaults to `name`; a per-platform `spec` overrides the
-  entry's `spec`; `defaults` supplies backend choices, so entries only state
-  exceptions.
+  entry's `spec`; `defaults` supplies backends and their options, so entries only state
+  exceptions. An entry that names no backend inherits the defaults' set, and its `package`
+  (`windows: {package: sharkdp.fd}`) is that backend's id; one that names a backend inherits
+  that backend's defaults options per key. `defaults` can't name a `package`: it would be
+  every entry's.
 - **`formerly`:** previous names (logical or backend package IDs). On `install`, if a package
   under a former name is present: bosun-installed → migrate (uninstall old, install new,
   update state); accepted or unmanaged → report it, don't touch it (migration uninstalls the
@@ -1169,13 +1179,13 @@ remote indexes. Traits stay ready; nothing is stubbed.
   records the resolved version and state is the authority for it.
 - `Ref` carries the canonical purl. github-release identity uses purl qualifiers `binary`
   (default: the entry's logical name, set by resolve) and an optional `asset` template, from
-  the install block's `ext.github-release.asset` (see `docs/asset-templates.md`). The asset template is a
+  the github-release `asset` option (see `docs/asset-templates.md`). The asset template is a
   minijinja template with strict undefined over precomputed variables (`binary`, `version`,
   `tag`, `os`, `arch`, `arch_uname`, `arch_goreleaser`); the default is goreleaser's
   `{{ binary }}_{{ version }}_{{ os }}_{{ arch }}.tar.gz`, matched exactly. A bad template is
   an error at resolve, through `Index::checksum`. The binary is located in the archive by file
   name at any depth (exactly one match). A published checksum is verified; none published means
-  install, warn and record none. An optional `tag` qualifier (`ext.github-release.tag`) is a
+  install, warn and record none. An optional `tag` option (`backends.github-release.tag`) is a
   literal tag pattern with one `{{ version }}` (`jq-{{ version }}`): release lookup uses it
   instead of `v<version>`/`<version>`, and version listing keeps only tags that fit it.
 - Resolve takes a narrow `Host { os, arch, distro }` and `ResolvableBackend { id, purl_type,
@@ -1265,10 +1275,11 @@ scenario in the real-backend tier (skipped for compile time).
 | 12-2 | installed-version scheme from backend metadata (state + lock); idempotency test per backend | landed; 299 tests; github-release idempotency test confirmed red without the fix |
 | 12-3 | scheme map from every compiled-in backend; unknown backend id in lock/state is an error, not Generic | landed; 303 tests + 20 scenarios |
 | 12 | dogfood: `bosun.yaml` (just, jq, ctxloom) committed; plan-only host run (user decision) | manifest committed; host run found 5 bugs (below) → 12-1 |
-| M2-0 | backend-specific settings under `ext:` (`BackendMeta::ext_keys`, checked at load); github-release `asset` moves there | landed |
+| M2-0 | backend-specific settings under `ext:` (`BackendMeta::ext_keys`, checked at load); github-release `asset` moves there | landed; superseded by M2-4 |
 | M2-1 | annals-yaml `edit` (annals `4f92f43`); `bosun add` / `bosun remove` (edit, then `lock`); default spec from the newest version; `lock` drops packages the manifest no longer lists on every target | landed; 50 scenarios; annals edit mutation 197/200 viable caught (3 justified) |
 | M2-2 | github-release archive formats (tar gz/xz/zst/bz2, zip, single compressed, raw); `tag` template | landed |
 | M2-3 | github-deb / github-rpm: a release's `.deb` / `.rpm` through apt-get / dnf, system scope, cache `/var/cache/bosun`; presence verified with dpkg-query / rpm -q; apt holds, dnf doesn't claim one | landed hermetically; real apt/dnf run not done (github-rpm unverified: no Fedora host) |
+| M2-4 | manifest version 2: `backends` map (acceptable set + options, `package` per backend), no order and no `targets`; `any` selector and bare-block shorthand; 1 → 2 migration; config `version` (0 → 1); `bosun migrate`; `lock --check` removed | landed |
 | M3-1 | WindowsMachine (Administrator = High/System integrity label in `whoami /groups`; state `%ProgramData%` / `%LOCALAPPDATA%`, config `%APPDATA%`); github-release on Windows (`<binary>.exe` into `%USERPROFILE%\.local\bin`, `;`-separated case-insensitive PATH check); `Step::Remove` replaces `rm -f`; `just check-win` (zig cc as MinGW) | landed hermetically; workspace type-checks for x86_64-pc-windows-gnu; **unverified on a real Windows host** |
 | M3-2 | winget (user), scoop (user), choco (system) backends; probe only on Windows | landed hermetically (argv and output parsing unit-tested, fixture scenarios); **unverified on a real Windows host** |
 | M3-3 | github-installer: a release's `.msi` (`msiexec /i … /qn /norestart`) or `.exe` (manifest `silent_args`, required); found in the Uninstall registry keys (`reg query`, three views) by `display_name` (`*` suffix = prefix); uninstall `msiexec /x {ProductCode}` or the entry's quiet/plain uninstaller; system scope, no hold, no downgrade | landed (unit tests); **unverified on a real Windows host**; no fixture scenario (the seam has no registry) |

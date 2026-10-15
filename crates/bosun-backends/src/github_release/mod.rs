@@ -4,7 +4,7 @@
 //! runs; the query side lists release tags over HTTP.
 //!
 //! An asset is picked by **exact name**: the `asset` qualifier (the manifest's
-//! `ext.github-release.asset`) rendered as a minijinja template for this host, else
+//! `backends.github-release.asset`) rendered as a minijinja template for this host, else
 //! goreleaser's default archive name `<binary>_<version>_<os>_<arch>.tar.gz`
 //! (see [`template`]). The binary is located inside the archive by name, at
 //! any depth, when the `Extract` step runs.
@@ -73,7 +73,7 @@ impl BackendFactory for GithubReleaseFactory {
             purl_type: "github",
             vers_type: "semver",
             platform_independent: false,
-            ext_keys: &["asset", "tag"],
+            option_keys: &["asset", "tag"],
         }
     }
 

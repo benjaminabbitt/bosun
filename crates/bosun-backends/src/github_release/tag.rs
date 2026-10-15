@@ -1,5 +1,5 @@
 //! Release tags that aren't `v<version>` or `<version>`: the `tag` qualifier
-//! (the manifest's `ext.github-release.tag`) is the tag with `{{ version }}`
+//! (the manifest's `backends.github-release.tag`) is the tag with `{{ version }}`
 //! where the version goes, such as `jq-{{ version }}`, `bun-v{{ version }}` or
 //! `kustomize/v{{ version }}`. It is read both ways: a version names its tag,
 //! and a tag that fits the pattern gives its version, so a repository that

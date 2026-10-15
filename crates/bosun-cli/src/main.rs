@@ -8,6 +8,7 @@ mod edit;
 mod env;
 mod error;
 mod fixture;
+mod migrate;
 mod output;
 
 use std::io::{IsTerminal, Write};
@@ -46,7 +47,7 @@ fn dispatch(cli: &Cli, format: Format) -> Result<i32, CliError> {
             package,
             spec,
             selector,
-            ext,
+            opts,
             manifest,
         } => {
             let opts = edit::AddOpts {
@@ -55,7 +56,7 @@ fn dispatch(cli: &Cli, format: Format) -> Result<i32, CliError> {
                 package: package.clone(),
                 spec: spec.clone(),
                 selector: selector.clone(),
-                ext: ext.clone(),
+                opts: opts.clone(),
                 manifest: manifest.clone(),
             };
             let value = edit::add(&env, opts, &pref)?;
@@ -104,9 +105,12 @@ fn dispatch(cli: &Cli, format: Format) -> Result<i32, CliError> {
             let value = commands::status(&env, path.clone(), &pref)?;
             emit(&value, format, &mut out)
         }
-        Command::Lock { path, check } => {
-            let value = commands::lock(&env, path.clone(), *check, &pref)?;
+        Command::Lock { path } => {
+            let value = commands::lock(&env, path.clone(), &pref)?;
             emit(&value, format, &mut out)
+        }
+        Command::Migrate { path, plan, yes } => {
+            migrate::run(path.clone(), *plan, *yes, format, &mut out)
         }
         Command::Install {
             path,
@@ -253,21 +257,8 @@ fn apply_mutation(
         )));
     }
     // Confirm (§4.8): --yes skips; a TTY prompts; no TTY and no --yes refuses.
-    if !m.yes {
-        if !std::io::stdin().is_terminal() {
-            return Err(CliError::Environment(
-                "refusing to apply without a terminal; re-run with --yes".to_string(),
-            ));
-        }
-        eprintln!("{}", Render::text(plan));
-        eprint!("Apply? [y/N] ");
-        std::io::stderr().flush().ok();
-        let mut line = String::new();
-        std::io::stdin().read_line(&mut line).map_err(io_err)?;
-        if !matches!(line.trim(), "y" | "Y" | "yes" | "Yes") {
-            eprintln!("Aborted; nothing changed.");
-            return Ok(Applied::Stopped(0));
-        }
+    if !m.yes && !confirm(&Render::text(plan), "Apply?")? {
+        return Ok(Applied::Stopped(0));
     }
     // Apply each scope the plan touches (a mixed plan was already refused unless
     // --scope narrowed it, §5.5), each in its own state transaction.
@@ -289,6 +280,26 @@ fn apply_mutation(
     } else {
         Applied::Done(report)
     })
+}
+
+/// Show `shown` and ask `question` on the terminal (stderr). No terminal is a
+/// refusal naming `--yes`; anything but yes is a decline, said as such.
+pub(crate) fn confirm(shown: &str, question: &str) -> Result<bool, CliError> {
+    if !std::io::stdin().is_terminal() {
+        return Err(CliError::Environment(
+            "refusing to apply without a terminal; re-run with --yes".to_string(),
+        ));
+    }
+    eprintln!("{shown}");
+    eprint!("{question} [y/N] ");
+    std::io::stderr().flush().ok();
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).map_err(io_err)?;
+    let yes = matches!(line.trim(), "y" | "Y" | "yes" | "Yes");
+    if !yes {
+        eprintln!("Aborted; nothing changed.");
+    }
+    Ok(yes)
 }
 
 /// The scopes to apply: the requested one, else every scope the plan touches.

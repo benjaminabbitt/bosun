@@ -580,6 +580,13 @@ fn the_manifest(world: &mut BosunWorld, step: &Step) {
     world.manifest = Some(body);
 }
 
+#[given("the config:")]
+fn the_config(world: &mut BosunWorld, step: &Step) {
+    let dir = world.path().join("config").join("bosun");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("config.yaml"), docstring(step)).unwrap();
+}
+
 /// A step's docstring, with cucumber's leading newline taken off.
 fn docstring(step: &Step) -> String {
     let body = step.docstring.clone().expect("step needs a docstring");
@@ -606,6 +613,9 @@ fn i_run(world: &mut BosunWorld, cmdline: String) {
     let output = Command::new(env!("CARGO_BIN_EXE_bosun"))
         .env("BOSUN_FIXTURE", p.join("fixture.json"))
         .env("BOSUN_STATE_DIR", p.join("state"))
+        // the user config is this scenario's own, never the developer's.
+        .env("XDG_CONFIG_HOME", p.join("config"))
+        .env("APPDATA", p.join("config"))
         // run from the project directory, so a relative path like
         // `./bosun.yaml` names this project's manifest.
         .current_dir(&p)
@@ -767,6 +777,13 @@ fn manifest_reads(world: &mut BosunWorld, step: &Step) {
         docstring(step).trim_end(),
         "bosun.yaml:\n{got}"
     );
+}
+
+#[then(regex = r"^the file (\S+) reads:$")]
+fn file_reads(world: &mut BosunWorld, step: &Step, name: String) {
+    let got =
+        fs::read_to_string(world.path().join(&name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+    assert_eq!(got.trim_end(), docstring(step).trim_end(), "{name}:\n{got}");
 }
 
 #[then("the manifest is unchanged")]

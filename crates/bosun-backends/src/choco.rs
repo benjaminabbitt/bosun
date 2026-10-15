@@ -45,7 +45,7 @@ impl BackendFactory for ChocoFactory {
             purl_type: "choco",
             vers_type: "generic",
             platform_independent: false,
-            ext_keys: &[],
+            option_keys: &[],
         }
     }
 

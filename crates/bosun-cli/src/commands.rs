@@ -6,12 +6,9 @@ use std::path::{Path, PathBuf};
 
 use bosun_core::record::{LockDocument, StateDocument};
 use bosun_core::{BackendId, Manifest, Scope};
-use bosun_io::{check_ext, load_manifest, lock, manifest_hash};
+use bosun_io::{check_options, load_manifest, lock, manifest_hash};
 use bosun_ports::{Installer, StateStore};
-use bosun_resolve::{
-    check_targets, merge_lock, resolve, retain_listed, Freshness, NotApplicable, Outcome,
-    Resolution,
-};
+use bosun_resolve::{merge_lock, resolve, retain_listed, NotApplicable, Outcome, Resolution};
 use serde::Serialize;
 
 use crate::env::Env;
@@ -58,7 +55,7 @@ pub(crate) fn manifest_file(path: Option<PathBuf>) -> Result<PathBuf, CliError> 
     }
 }
 
-/// Load the manifest at `file` and check its `ext` sections against the
+/// Load the manifest at `file` and check its backend options against the
 /// backends this build has (§5.4).
 pub(crate) fn load(env: &Env, file: &Path) -> Result<Manifest, CliError> {
     let text = fs::read_to_string(file).map_err(|e| CliError::Io {
@@ -70,7 +67,7 @@ pub(crate) fn load(env: &Env, file: &Path) -> Result<Manifest, CliError> {
         detail,
     };
     let manifest = load_manifest(&text, file).map_err(|e| parse_err(e.to_string()))?;
-    check_ext(&manifest, env.ext_keys())
+    check_options(&manifest, env.option_keys())
         .map_err(|e| parse_err(format!("{}: {e}", file.display())))?;
     Ok(manifest)
 }
@@ -290,12 +287,10 @@ impl Render for StatusOutput {
 /// (when `--check`).
 #[derive(Serialize)]
 pub struct LockOutput {
-    check: bool,
     /// An entry was unsatisfiable: nothing was written, exit 1 (§4.7).
     error: bool,
     resolved: Vec<ResolvedInfo>,
     diagnostics: Vec<String>,
-    targets: Vec<TargetFreshness>,
 }
 
 #[derive(Serialize)]
@@ -306,20 +301,8 @@ struct ResolvedInfo {
     version: String,
 }
 
-#[derive(Serialize)]
-struct TargetFreshness {
-    target: String,
-    freshness: String,
-}
-
-/// Resolve this platform (and `any`) and merge into `bosun.lock`; `--check`
-/// instead reports declared targets that are missing or stale (§4.7).
-pub fn lock(
-    env: &Env,
-    path: Option<PathBuf>,
-    check: bool,
-    pref: &[BackendId],
-) -> Result<LockOutput, CliError> {
+/// Resolve this platform (and `any`) and merge into `bosun.lock`.
+pub fn lock(env: &Env, path: Option<PathBuf>, pref: &[BackendId]) -> Result<LockOutput, CliError> {
     let file = manifest_file(path)?;
     let manifest = load(env, &file)?;
     let hash = manifest_hash(&manifest);
@@ -328,24 +311,6 @@ pub fn lock(
         .unwrap_or_else(|| Path::new("."))
         .join("bosun.lock");
     let existing = read_lock(&lock_path, &env.schemes())?;
-
-    if check {
-        let doc = existing.unwrap_or_else(empty_lock);
-        let targets = check_targets(&manifest.targets, &hash, &doc)
-            .into_iter()
-            .map(|t| TargetFreshness {
-                target: t.target.to_string(),
-                freshness: freshness_text(t.freshness).to_string(),
-            })
-            .collect();
-        return Ok(LockOutput {
-            check: true,
-            error: false,
-            resolved: Vec::new(),
-            diagnostics: Vec::new(),
-            targets,
-        });
-    }
 
     let resolution = resolve(&manifest, &hash, &env.host(), &env.resolvables(), pref)
         .map_err(|e| CliError::Resolve(e.to_string()))?;
@@ -400,27 +365,14 @@ fn lock_output(resolution: Resolution) -> LockOutput {
         }
     }
     LockOutput {
-        check: false,
         error,
         resolved,
         diagnostics,
-        targets: Vec::new(),
     }
 }
 
 impl Render for LockOutput {
     fn text(&self) -> String {
-        if self.check {
-            let mut lines: Vec<String> = self
-                .targets
-                .iter()
-                .map(|t| format!("{:<16} {}", t.target, t.freshness))
-                .collect();
-            if lines.is_empty() {
-                lines.push("no targets declared".to_string());
-            }
-            return lines.join("\n");
-        }
         let mut lines = Vec::new();
         for r in &self.resolved {
             lines.push(format!(
@@ -439,9 +391,6 @@ impl Render for LockOutput {
         if self.error {
             // An unsatisfiable entry: nothing written, this is a failure (§4.7).
             1
-        } else if self.check && self.targets.iter().any(|t| t.freshness != "fresh") {
-            // lock --check is a CI gate: any missing or stale target is pending.
-            2
         } else {
             0
         }
@@ -476,14 +425,6 @@ fn na_text(na: &NotApplicable) -> String {
     }
 }
 
-fn freshness_text(f: Freshness) -> &'static str {
-    match f {
-        Freshness::Fresh => "fresh",
-        Freshness::Stale => "stale",
-        Freshness::Missing => "missing",
-    }
-}
-
 fn read_lock(
     path: &Path,
     schemes: &bosun_io::BackendSchemes,
@@ -500,14 +441,6 @@ fn read_lock(
         detail: e.to_string(),
     })?;
     Ok(Some(doc))
-}
-
-fn empty_lock() -> LockDocument {
-    LockDocument {
-        lockfile_version: 1,
-        targets: std::collections::BTreeMap::new(),
-        packages: Vec::new(),
-    }
 }
 
 // --- install / uninstall / prune (§4.2, §4.8) ------------------------------

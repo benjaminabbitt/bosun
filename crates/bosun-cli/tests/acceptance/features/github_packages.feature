@@ -12,17 +12,16 @@ Feature: github-deb and github-rpm install the OS package a release attaches
     And sharkdp/bat v0.26.1 also publishes bat-v0.26.1-x86_64-unknown-linux-musl.tar.gz
     And the manifest:
       """
-      version: 1
-      targets: [linux/amd64]
+      version: 2
       packages:
         - name: bat
           spec: ">=0.26.0|<0.27.0"
           install:
             linux:
-              backend: github-deb
-              package: sharkdp/bat
-              ext:
-                github-deb: {asset: "{{ binary }}_{{ version }}_{{ arch }}.deb"}
+              backends:
+                github-deb:
+                  package: sharkdp/bat
+                  asset: "{{ binary }}_{{ version }}_{{ arch }}.deb"
       """
     When I run `bosun --format json install . --plan`
     Then it reports changes pending
@@ -44,17 +43,15 @@ Feature: github-deb and github-rpm install the OS package a release attaches
     And sharkdp/bat v0.26.1 publishes bat-0.26.1-1.x86_64.rpm holding just the binary
     And the manifest:
       """
-      version: 1
-      targets: [linux/amd64]
+      version: 2
       packages:
         - name: bat
           spec: ">=0.26.0|<0.27.0"
           install:
             linux:
-              backend: github-rpm
-              package: sharkdp/bat
-              ext:
+              backends:
                 github-rpm:
+                  package: sharkdp/bat
                   asset: "{{ binary }}-{{ version }}-1.{{ arch_uname }}.rpm"
                   package_name: bat-cat
       """
@@ -75,17 +72,16 @@ Feature: github-deb and github-rpm install the OS package a release attaches
     And sharkdp/bat v0.26.1 publishes bat_0.26.1_amd64.deb holding just the binary
     And the manifest:
       """
-      version: 1
-      targets: [linux/amd64]
+      version: 2
       packages:
         - name: bat
           spec: ">=0.26.0|<0.27.0"
           install:
             linux:
-              backend: github-deb
-              package: sharkdp/bat
-              ext:
-                github-deb: {asset: "{{ binary }}_{{ version }}_{{ arch }}.deb"}
+              backends:
+                github-deb:
+                  package: sharkdp/bat
+                  asset: "{{ binary }}_{{ version }}_{{ arch }}.deb"
       """
     When I run `bosun install . --yes`
     Then it fails
@@ -98,17 +94,16 @@ Feature: github-deb and github-rpm install the OS package a release attaches
     And sharkdp/bat v0.26.1 publishes bat-v0.26.1-x86_64-unknown-linux-musl.tar.gz with bat at its root
     And the manifest:
       """
-      version: 1
-      targets: [linux/amd64]
+      version: 2
       packages:
         - name: bat
           spec: ">=0.26.0|<0.27.0"
           install:
             linux:
-              backend: github-deb
-              package: sharkdp/bat
-              ext:
-                github-deb: {asset: "{{ binary }}-{{ tag }}-{{ arch_uname }}-unknown-linux-musl.tar.gz"}
+              backends:
+                github-deb:
+                  package: sharkdp/bat
+                  asset: "{{ binary }}-{{ tag }}-{{ arch_uname }}-unknown-linux-musl.tar.gz"
       """
     When I run `bosun lock .`
     Then it fails

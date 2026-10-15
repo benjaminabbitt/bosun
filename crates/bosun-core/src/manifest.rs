@@ -8,15 +8,13 @@
 
 use std::collections::BTreeMap;
 
-use crate::platform::{Selector, Target};
+use crate::platform::Selector;
 
 /// A whole manifest.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Manifest {
-    /// Format version (`1`).
+    /// Format version (`2`).
     pub version: u32,
-    /// The targets this manifest declares (§4.5).
-    pub targets: Vec<Target>,
     /// `defaults.install`: per-selector install defaults entries inherit from.
     pub defaults: BTreeMap<Selector, InstallBlock>,
     /// The packages, in file order.
@@ -40,57 +38,54 @@ pub struct ManifestEntry {
 /// from `defaults.install`; the package id defaults to the logical name.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct InstallBlock {
-    /// Candidate backends in preference order (§5.3). The resolver picks the
-    /// first that is registered; an explicit flag/env/config choice still wins
-    /// over this list, and a single named backend is never overridden. Written
-    /// as a scalar or a sequence in the manifest; empty means "inherit/any".
-    pub backends: Vec<String>,
-    /// The backend-native package id, where it differs from the name. Shared
-    /// by every candidate backend; one backend's own id goes in its `ext`
-    /// section under [`EXT_PACKAGE`], which wins over this.
+    /// The acceptable backends, each with its options (§5.3, §5.4). A set, not
+    /// an order: which one is used here is the machine's preference, never the
+    /// manifest's. Empty means "inherit from `defaults.install`".
+    pub backends: Backends,
+    /// The package id for backends this block inherits rather than names
+    /// (`windows: {package: sharkdp.fd}` over a `defaults` backend). A named
+    /// backend's own [`PACKAGE_OPTION`] wins over this.
     pub package: Option<String>,
     /// A per-selector spec override.
     pub spec: Option<String>,
-    /// Backend-specific settings, by backend id then key (`ext:
-    /// {github-release: {asset: …}}`). Carried verbatim: each backend declares
-    /// the keys it reads and interprets their values, so this crate stays
-    /// backend-agnostic. The one exception is [`EXT_PACKAGE`], which every
-    /// backend accepts and bosun reads itself.
-    pub ext: Ext,
 }
 
-/// The `ext` key naming one backend's own package id (`ext: {winget:
-/// {package: sharkdp.fd}}`), so a fallback list can name each candidate's
-/// package. bosun's key, not the backend's: it becomes the identity's name,
-/// never a qualifier.
-pub const EXT_PACKAGE: &str = "package";
+/// The acceptable backends: backend id → its options.
+pub type Backends = BTreeMap<String, Options>;
+
+/// One backend's options: [`PACKAGE_OPTION`] plus the keys that backend
+/// declares (github-release's `asset`, …). Carried verbatim; each backend
+/// interprets its own values, so this crate stays backend-agnostic.
+pub type Options = BTreeMap<String, String>;
+
+/// The option naming a backend's own package id (`winget: {package:
+/// sharkdp.fd}`). bosun's option, not the backend's: every backend takes it,
+/// and it becomes the identity's name, never a qualifier.
+pub const PACKAGE_OPTION: &str = "package";
 
 impl InstallBlock {
-    /// The package id to use with `backend`: its own `ext` package, else the
-    /// shared [`InstallBlock::package`]. `None` means the logical name.
+    /// The package id to use with `backend`: its own [`PACKAGE_OPTION`], else
+    /// the block's [`InstallBlock::package`]. `None` means the logical name.
     pub fn package_for(&self, backend: &str) -> Option<&str> {
-        self.ext
+        self.backends
             .get(backend)
-            .and_then(|settings| settings.get(EXT_PACKAGE))
+            .and_then(|options| options.get(PACKAGE_OPTION))
             .or(self.package.as_ref())
             .map(String::as_str)
     }
 }
 
-/// Backend-specific install settings: backend id → key → value.
-pub type Ext = BTreeMap<String, BTreeMap<String, String>>;
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn block(package: Option<&str>, ext: &[(&str, &str, &str)]) -> InstallBlock {
+    fn block(package: Option<&str>, options: &[(&str, &str, &str)]) -> InstallBlock {
         let mut b = InstallBlock {
             package: package.map(str::to_string),
             ..Default::default()
         };
-        for (backend, key, value) in ext {
-            b.ext
+        for (backend, key, value) in options {
+            b.backends
                 .entry(backend.to_string())
                 .or_default()
                 .insert(key.to_string(), value.to_string());

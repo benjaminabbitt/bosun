@@ -13,17 +13,16 @@ Feature: github-release installs from every common archive format
     Given o/tool v1.2.0 publishes <asset> with tool in tool-1.2.0/
     And the manifest:
       """
-      version: 1
-      targets: [linux/amd64]
+      version: 2
       packages:
         - name: tool
           spec: ">=1.0.0|<2.0.0"
           install:
             linux:
-              backend: github-release
-              package: o/tool
-              ext:
-                github-release: {asset: "{{ binary }}-{{ version }}-{{ arch_uname }}-linux.<format>"}
+              backends:
+                github-release:
+                  package: o/tool
+                  asset: "{{ binary }}-{{ version }}-{{ arch_uname }}-linux.<format>"
       """
     When I run `bosun install . --yes`
     Then it succeeds
@@ -42,17 +41,16 @@ Feature: github-release installs from every common archive format
     Given restic/restic v0.18.1 publishes restic_0.18.1_linux_amd64.bz2 holding just the binary
     And the manifest:
       """
-      version: 1
-      targets: [linux/amd64]
+      version: 2
       packages:
         - name: restic
           spec: ">=0.18.0|<0.19.0"
           install:
             linux:
-              backend: github-release
-              package: restic/restic
-              ext:
-                github-release: {asset: "{{ binary }}_{{ version }}_{{ os }}_{{ arch }}.bz2"}
+              backends:
+                github-release:
+                  package: restic/restic
+                  asset: "{{ binary }}_{{ version }}_{{ os }}_{{ arch }}.bz2"
       """
     When I run `bosun install . --yes`
     Then it succeeds
@@ -62,17 +60,16 @@ Feature: github-release installs from every common archive format
     Given kubernetes-sigs/kind v0.30.0 publishes kind-linux-amd64 holding just the binary
     And the manifest:
       """
-      version: 1
-      targets: [linux/amd64]
+      version: 2
       packages:
         - name: kind
           spec: ">=0.30.0|<0.31.0"
           install:
             linux:
-              backend: github-release
-              package: kubernetes-sigs/kind
-              ext:
-                github-release: {asset: "{{ binary }}-{{ os }}-{{ arch }}"}
+              backends:
+                github-release:
+                  package: kubernetes-sigs/kind
+                  asset: "{{ binary }}-{{ os }}-{{ arch }}"
       """
     When I run `bosun install . --yes`
     Then it succeeds
@@ -85,17 +82,16 @@ Feature: github-release installs from every common archive format
     Given sharkdp/bat v0.26.1 publishes bat_0.26.1_amd64.deb holding just the binary
     And the manifest:
       """
-      version: 1
-      targets: [linux/amd64]
+      version: 2
       packages:
         - name: bat
           spec: ">=0.26.0|<0.27.0"
           install:
             linux:
-              backend: github-release
-              package: sharkdp/bat
-              ext:
-                github-release: {asset: "{{ binary }}_{{ version }}_{{ arch }}.deb"}
+              backends:
+                github-release:
+                  package: sharkdp/bat
+                  asset: "{{ binary }}_{{ version }}_{{ arch }}.deb"
       """
     When I run `bosun lock .`
     Then it fails

@@ -15,6 +15,8 @@ pub const CONVERT: &str = "invalid recorded value";
 /// A lock/state leaf names a backend this build does not know, so its version
 /// scheme is unknown and the file cannot be read.
 pub const UNKNOWN_BACKEND: &str = "unknown backend";
+/// A manifest edit on an older-version file.
+pub const MANIFEST_OUTDATED: &str = "the manifest is version";
 /// `bosun add` named a package the manifest already has.
 pub const DUPLICATE_ENTRY: &str = "the manifest already has a package named";
 /// `bosun remove` named a package the manifest does not have.

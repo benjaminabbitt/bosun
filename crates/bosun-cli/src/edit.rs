@@ -7,11 +7,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use bosun_apply::{build_release_plan, ApplyReport, Plan};
-use bosun_core::manifest::{Ext, InstallBlock, ManifestEntry};
+use bosun_core::manifest::{Backends, InstallBlock, ManifestEntry, PACKAGE_OPTION};
 use bosun_core::platform::Selector;
 use bosun_core::{default_spec, BackendId, Manifest};
 use bosun_io::manifest_edit::{add_entry, remove_entry};
-use bosun_io::{check_ext, load_manifest, manifest_hash};
+use bosun_io::{check_options, load_manifest, manifest_hash};
 use bosun_resolve::{resolve, Outcome};
 use serde::Serialize;
 
@@ -24,16 +24,18 @@ use crate::output::Render;
 pub struct AddOpts {
     /// bosun's logical name for the package.
     pub name: String,
-    /// Candidate backends, in preference order.
+    /// The acceptable backends (a set; preference is the machine's).
     pub backends: Vec<String>,
-    /// The backend-native package id, where it differs from the name.
+    /// The backend-native package id, where it differs from the name: for
+    /// every `--backend` that doesn't name its own with `--opt`.
     pub package: Option<String>,
     /// The spec; when absent, one is derived from the newest version.
     pub spec: Option<String>,
-    /// The selector the install block goes under; default this machine's OS.
+    /// The selector the install block goes under; default `any` when every
+    /// backend is platform-independent, else this machine's OS.
     pub selector: Option<String>,
-    /// `key=value` or `backend.key=value` settings for `ext`.
-    pub ext: Vec<String>,
+    /// `key=value` or `backend.key=value` backend options.
+    pub opts: Vec<String>,
     /// The manifest directory or file.
     pub manifest: Option<PathBuf>,
 }
@@ -80,28 +82,18 @@ pub fn add(env: &Env, opts: AddOpts, pref: &[BackendId]) -> Result<AddOutput, Cl
         Some(s) => s
             .parse::<Selector>()
             .map_err(|_| CliError::Usage(format!("--on {s}: not a selector")))?,
-        None => env
-            .host()
-            .os
-            .to_string()
-            .parse()
-            .expect("an OS is a selector"),
+        None => default_selector(env, &opts.backends),
     };
-    let block = InstallBlock {
-        backends: opts.backends.clone(),
-        package: opts.package.clone(),
-        spec: None,
-        ext: parse_ext(&opts.ext, &opts.backends)?,
-    };
+    let block = install_block(&opts)?;
     let mut entry = ManifestEntry {
         name: opts.name.clone(),
         spec: opts.spec.clone(),
         formerly: Vec::new(),
         install: BTreeMap::from([(selector, block)]),
     };
-    // The ext settings are checked before any lookup, so a typo costs nothing.
+    // The backend options are checked before any lookup, so a typo costs nothing.
     let alone = with_only(&manifest, entry.clone());
-    check_ext(&alone, env.ext_keys()).map_err(|e| CliError::Parse {
+    check_options(&alone, env.option_keys()).map_err(|e| CliError::Parse {
         what: "manifest".to_string(),
         detail: format!("{}: {e}", file.display()),
     })?;
@@ -130,13 +122,13 @@ pub fn add(env: &Env, opts: AddOpts, pref: &[BackendId]) -> Result<AddOutput, Cl
     let text = read(&file)?;
     let edited = add_entry(&text, &file, &entry).map_err(io_error)?;
     let reloaded = load_manifest(&edited, &file).map_err(io_error)?;
-    check_ext(&reloaded, env.ext_keys()).map_err(|e| CliError::Parse {
+    check_options(&reloaded, env.option_keys()).map_err(|e| CliError::Parse {
         what: "manifest".to_string(),
         detail: format!("{}: {e}", file.display()),
     })?;
     write(&file, &edited)?;
 
-    let lock = commands::lock(env, Some(file.clone()), false, pref)?;
+    let lock = commands::lock(env, Some(file.clone()), pref)?;
     Ok(AddOutput {
         name: entry.name,
         spec: entry.spec.unwrap_or_default(),
@@ -181,32 +173,75 @@ fn resolve_alone(
     }
 }
 
-/// `--ext` values as an `ext` map. `backend.key=value` names its backend;
-/// a bare `key=value` belongs to the one backend given, and is an error when
-/// there are none or several.
-fn parse_ext(values: &[String], backends: &[String]) -> Result<Ext, CliError> {
-    let mut ext = Ext::new();
-    for raw in values {
+/// The selector `add` writes under without `--on`: `any` when every backend
+/// is a registered platform-independent one (npm, cargo, …), since nothing
+/// ties it to this OS; else this machine's OS.
+fn default_selector(env: &Env, backends: &[String]) -> Selector {
+    let resolvables = env.resolvables();
+    let independent = !backends.is_empty()
+        && backends.iter().all(|b| {
+            resolvables
+                .iter()
+                .any(|r| r.id.as_str() == b && r.platform_independent)
+        });
+    if independent {
+        Selector::Any
+    } else {
+        env.host()
+            .os
+            .to_string()
+            .parse()
+            .expect("an OS is a selector")
+    }
+}
+
+/// The install block `add` writes: each `--backend` with its `--opt`s, and
+/// `--package` for those that don't name their own. With no `--backend`, the
+/// package is for whatever backend the block inherits.
+fn install_block(opts: &AddOpts) -> Result<InstallBlock, CliError> {
+    let mut backends: Backends = opts
+        .backends
+        .iter()
+        .map(|b| (b.clone(), Default::default()))
+        .collect();
+    for raw in &opts.opts {
         let (path, value) = raw
             .split_once('=')
-            .ok_or_else(|| CliError::Usage(format!("--ext {raw}: expected key=value")))?;
+            .ok_or_else(|| CliError::Usage(format!("--opt {raw}: expected key=value")))?;
         let (backend, key) = match path.split_once('.') {
             Some((backend, key)) => (backend.to_string(), key),
-            None => match backends {
+            None => match opts.backends.as_slice() {
                 [one] => (one.clone(), path),
                 _ => {
                     return Err(CliError::Usage(format!(
-                        "--ext {raw}: name the backend (backend.{path}=…) unless exactly one \
+                        "--opt {raw}: name the backend (backend.{path}=…) unless exactly one \
                          --backend is given"
                     )))
                 }
             },
         };
-        ext.entry(backend)
-            .or_default()
-            .insert(key.to_string(), value.to_string());
+        let options = backends.get_mut(&backend).ok_or_else(|| {
+            CliError::Usage(format!(
+                "--opt {raw}: {backend} is not one of the --backend values"
+            ))
+        })?;
+        options.insert(key.to_string(), value.to_string());
     }
-    Ok(ext)
+    let mut package = opts.package.clone();
+    if !backends.is_empty() {
+        if let Some(p) = package.take() {
+            for options in backends.values_mut() {
+                options
+                    .entry(PACKAGE_OPTION.to_string())
+                    .or_insert_with(|| p.clone());
+            }
+        }
+    }
+    Ok(InstallBlock {
+        backends,
+        package,
+        spec: None,
+    })
 }
 
 // --- remove ------------------------------------------------------------------
@@ -309,7 +344,7 @@ impl Removal {
         pref: &[BackendId],
     ) -> Result<RemoveOutput, CliError> {
         write(&self.file, &self.edited)?;
-        let lock = commands::lock(env, Some(self.file.clone()), false, pref)?;
+        let lock = commands::lock(env, Some(self.file.clone()), pref)?;
         Ok(RemoveOutput {
             name: self.name,
             manifest: self.file.display().to_string(),
@@ -321,21 +356,21 @@ impl Removal {
     }
 }
 
-fn read(file: &Path) -> Result<String, CliError> {
+pub(crate) fn read(file: &Path) -> Result<String, CliError> {
     fs::read_to_string(file).map_err(|e| CliError::Io {
         path: file.to_path_buf(),
         detail: e.to_string(),
     })
 }
 
-fn write(file: &Path, text: &str) -> Result<(), CliError> {
+pub(crate) fn write(file: &Path, text: &str) -> Result<(), CliError> {
     fs::write(file, text).map_err(|e| CliError::Io {
         path: file.to_path_buf(),
         detail: e.to_string(),
     })
 }
 
-fn io_error(e: bosun_io::IoError) -> CliError {
+pub(crate) fn io_error(e: bosun_io::IoError) -> CliError {
     CliError::Parse {
         what: "manifest".to_string(),
         detail: e.to_string(),
@@ -350,33 +385,80 @@ mod tests {
         v.iter().map(|s| s.to_string()).collect()
     }
 
-    #[test]
-    fn a_bare_ext_key_belongs_to_the_one_backend() {
-        let ext = parse_ext(&strings(&["asset=a.tar.gz"]), &strings(&["github-release"])).unwrap();
-        assert_eq!(ext["github-release"]["asset"], "a.tar.gz");
+    fn opts(backends: &[&str], package: Option<&str>, opts: &[&str]) -> AddOpts {
+        AddOpts {
+            name: "fd".to_string(),
+            backends: strings(backends),
+            package: package.map(str::to_string),
+            spec: None,
+            selector: None,
+            opts: strings(opts),
+            manifest: None,
+        }
     }
 
     #[test]
-    fn a_qualified_ext_key_names_its_backend() {
-        let ext = parse_ext(
-            &strings(&["github-release.asset=x=y.tar.gz"]),
-            &strings(&["cargo", "github-release"]),
-        )
+    fn each_backend_is_acceptable_with_no_options_by_default() {
+        let block = install_block(&opts(&["scoop", "winget"], None, &[])).unwrap();
+        assert_eq!(block.backends.len(), 2);
+        assert!(block.backends.values().all(|o| o.is_empty()));
+    }
+
+    #[test]
+    fn a_bare_opt_belongs_to_the_one_backend() {
+        let block = install_block(&opts(&["github-release"], None, &["asset=a.tar.gz"])).unwrap();
+        assert_eq!(block.backends["github-release"]["asset"], "a.tar.gz");
+    }
+
+    #[test]
+    fn a_qualified_opt_names_its_backend() {
+        let block = install_block(&opts(
+            &["cargo", "github-release"],
+            None,
+            &["github-release.asset=x=y.tar.gz"],
+        ))
         .unwrap();
-        assert_eq!(ext["github-release"]["asset"], "x=y.tar.gz");
+        assert_eq!(block.backends["github-release"]["asset"], "x=y.tar.gz");
+        assert!(block.backends["cargo"].is_empty());
     }
 
     #[test]
-    fn a_bare_ext_key_with_several_or_no_backends_is_a_usage_error() {
-        for backends in [strings(&["cargo", "apt"]), Vec::new()] {
-            let err = parse_ext(&strings(&["asset=a"]), &backends).unwrap_err();
+    fn package_goes_to_every_backend_that_names_none_of_its_own() {
+        let block = install_block(&opts(
+            &["scoop", "winget"],
+            Some("fd"),
+            &["winget.package=sharkdp.fd"],
+        ))
+        .unwrap();
+        assert_eq!(block.package_for("scoop"), Some("fd"));
+        assert_eq!(block.package_for("winget"), Some("sharkdp.fd"));
+        assert_eq!(block.package, None);
+    }
+
+    #[test]
+    fn package_with_no_backend_is_for_the_inherited_one() {
+        let block = install_block(&opts(&[], Some("sharkdp.fd"), &[])).unwrap();
+        assert!(block.backends.is_empty());
+        assert_eq!(block.package.as_deref(), Some("sharkdp.fd"));
+    }
+
+    #[test]
+    fn an_opt_for_a_backend_not_given_is_a_usage_error() {
+        let err = install_block(&opts(&["cargo"], None, &["apt.package=fd-find"])).unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)), "{err:?}");
+    }
+
+    #[test]
+    fn a_bare_opt_with_several_or_no_backends_is_a_usage_error() {
+        for backends in [&["cargo", "apt"][..], &[]] {
+            let err = install_block(&opts(backends, None, &["asset=a"])).unwrap_err();
             assert!(matches!(err, CliError::Usage(_)), "{err:?}");
         }
     }
 
     #[test]
-    fn an_ext_value_without_equals_is_a_usage_error() {
-        let err = parse_ext(&strings(&["asset"]), &strings(&["cargo"])).unwrap_err();
+    fn an_opt_without_equals_is_a_usage_error() {
+        let err = install_block(&opts(&["cargo"], None, &["asset"])).unwrap_err();
         assert!(matches!(err, CliError::Usage(_)), "{err:?}");
     }
 }

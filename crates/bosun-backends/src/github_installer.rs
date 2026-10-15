@@ -84,7 +84,7 @@ impl BackendFactory for GithubInstallerFactory {
             purl_type: "github",
             vers_type: "semver",
             platform_independent: false,
-            ext_keys: &[
+            option_keys: &[
                 "asset",
                 "tag",
                 "display_name",
@@ -221,7 +221,7 @@ impl GithubInstallerBackend {
     fn need(pkg: &Ref, key: &str) -> Result<String, PortError> {
         Self::setting(pkg, key).ok_or_else(|| PortError::Backend {
             detail: format!(
-                "{}: {} ext.{BACKEND}.{key}",
+                "{}: {} backends.{BACKEND}.{key}",
                 pkg.purl.native_id(),
                 errmsg::INSTALLER_NEEDS
             ),
@@ -757,6 +757,6 @@ HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Nsis
         assert!(probe(Os::Windows).is_some());
         assert!(probe(Os::Linux).is_none());
         assert_eq!(f.id().as_str(), "github-installer");
-        assert!(f.meta().ext_keys.contains(&"silent_args"));
+        assert!(f.meta().option_keys.contains(&"silent_args"));
     }
 }

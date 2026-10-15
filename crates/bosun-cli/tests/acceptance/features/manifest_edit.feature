@@ -14,8 +14,7 @@ Feature: bosun add and bosun remove edit the manifest, then lock
     Given the manifest:
       """
       # my tools
-      version: 1
-      targets: [linux/amd64]
+      version: 2
       packages: []
       """
     When I run `bosun --format text add ripgrep --backend cargo`
@@ -24,13 +23,11 @@ Feature: bosun add and bosun remove edit the manifest, then lock
     And the manifest reads:
       """
       # my tools
-      version: 1
-      targets: [linux/amd64]
+      version: 2
       packages:
         - name: ripgrep
           spec: ">=14.1.1|<15.0.0"
-          install:
-            linux: {backend: cargo}
+          install: {backend: cargo}
       """
     And the lock pins ripgrep 14.1.1
     And ripgrep is not installed
@@ -38,8 +35,7 @@ Feature: bosun add and bosun remove edit the manifest, then lock
   Scenario: add keeps the spec it is given and the comments around it
     Given the manifest:
       """
-      version: 1
-      targets: [linux/amd64]
+      version: 2
       packages:
         # pinned for the CI image
         - name: just
@@ -52,8 +48,7 @@ Feature: bosun add and bosun remove edit the manifest, then lock
     Then it succeeds
     And the manifest reads:
       """
-      version: 1
-      targets: [linux/amd64]
+      version: 2
       packages:
         # pinned for the CI image
         - name: just
@@ -62,8 +57,7 @@ Feature: bosun add and bosun remove edit the manifest, then lock
             linux: {backend: cargo}
         - name: ripgrep
           spec: ">=13.0.0|<14.0.0"
-          install:
-            linux: {backend: cargo}
+          install: {backend: cargo}
       """
     And the lock pins ripgrep 13.0.0
     And the lock pins just 1.40.0
@@ -73,24 +67,20 @@ Feature: bosun add and bosun remove edit the manifest, then lock
     And muesli/duf v0.8.1 publishes duf_0.8.1_linux_x86_64.tar.gz with duf at its root
     And the manifest:
       """
-      version: 1
-      targets: [linux/amd64]
+      version: 2
       """
-    When I run `bosun add duf --backend github-release --package muesli/duf --ext "asset={{ binary }}_{{ version }}_{{ os }}_{{ arch_goreleaser }}.tar.gz"`
+    When I run `bosun add duf --backend github-release --package muesli/duf --opt "asset={{ binary }}_{{ version }}_{{ os }}_{{ arch_goreleaser }}.tar.gz"`
     Then it succeeds
     And the manifest reads:
       """
-      version: 1
-      targets: [linux/amd64]
+      version: 2
       packages:
         - name: duf
           spec: ">=0.8.1|<0.9.0"
           install:
             linux:
-              backend: github-release
-              package: muesli/duf
-              ext:
-                github-release: {asset: "{{ binary }}_{{ version }}_{{ os }}_{{ arch_goreleaser }}.tar.gz"}
+              backends:
+                github-release: {package: muesli/duf, asset: "{{ binary }}_{{ version }}_{{ os }}_{{ arch_goreleaser }}.tar.gz"}
       """
     And the lock pins duf 0.8.1
     When I run `bosun install . --yes`
@@ -101,32 +91,28 @@ Feature: bosun add and bosun remove edit the manifest, then lock
     Given cargo publishes fd-find 10.2.0
     And the manifest:
       """
-      version: 1
-      targets: [linux/amd64]
+      version: 2
       """
-    When I run `bosun add fd --backend github-release,cargo --package sharkdp/fd --ext cargo.package=fd-find`
+    When I run `bosun add fd --backend github-release,cargo --package sharkdp/fd --opt cargo.package=fd-find`
     Then it succeeds
     And the manifest reads:
       """
-      version: 1
-      targets: [linux/amd64]
+      version: 2
       packages:
         - name: fd
           spec: ">=10.2.0|<11.0.0"
           install:
             linux:
-              backends: [github-release, cargo]
-              package: sharkdp/fd
-              ext:
+              backends:
                 cargo: {package: fd-find}
+                github-release: {package: sharkdp/fd}
       """
     And the lock pins fd 10.2.0
 
   Scenario: add a name the manifest already has changes nothing
     Given the manifest:
       """
-      version: 1
-      targets: [linux/amd64]
+      version: 2
       packages:
         - name: ripgrep
           spec: "13.0.0"
@@ -142,8 +128,7 @@ Feature: bosun add and bosun remove edit the manifest, then lock
   Scenario: add with a spec nothing satisfies changes nothing
     Given the manifest:
       """
-      version: 1
-      targets: [linux/amd64]
+      version: 2
       packages: []
       """
     When I run `bosun add ripgrep --backend cargo --spec ">=99.0.0"`
@@ -152,23 +137,21 @@ Feature: bosun add and bosun remove edit the manifest, then lock
     And the manifest is unchanged
     And no lock is written
 
-  Scenario: add with an ext key the backend doesn't read changes nothing
+  Scenario: add with an option the backend doesn't read changes nothing
     Given the manifest:
       """
-      version: 1
-      targets: [linux/amd64]
+      version: 2
       packages: []
       """
-    When I run `bosun add ripgrep --backend cargo --ext features=x`
+    When I run `bosun add ripgrep --backend cargo --opt features=x`
     Then it fails
-    And it reports "unknown key \"features\" in ext.cargo (allowed: package)"
+    And it reports "unknown key \"features\" in backends.cargo (allowed: package)"
     And the manifest is unchanged
 
   Scenario: remove takes the entry out, drops it from the lock and uninstalls it
     Given the manifest:
       """
-      version: 1
-      targets: [linux/amd64]
+      version: 2
       packages:
         # search
         - name: ripgrep
@@ -187,8 +170,7 @@ Feature: bosun add and bosun remove edit the manifest, then lock
     And it says "Removed ripgrep"
     And the manifest reads:
       """
-      version: 1
-      targets: [linux/amd64]
+      version: 2
       packages:
         - name: just
           spec: "1.40.0"
@@ -203,8 +185,7 @@ Feature: bosun add and bosun remove edit the manifest, then lock
   Scenario: remove keeps a package another project still wants
     Given the manifest:
       """
-      version: 1
-      targets: [linux/amd64]
+      version: 2
       packages:
         - name: ripgrep
           spec: ">=14.0.0|<15.0.0"
@@ -218,16 +199,14 @@ Feature: bosun add and bosun remove edit the manifest, then lock
     And bosun has recorded ripgrep 14.1.1
     And the manifest reads:
       """
-      version: 1
-      targets: [linux/amd64]
+      version: 2
       packages: []
       """
 
   Scenario: remove --plan shows what it would do and changes nothing
     Given the manifest:
       """
-      version: 1
-      targets: [linux/amd64]
+      version: 2
       packages:
         - name: ripgrep
           spec: ">=14.0.0|<15.0.0"
@@ -245,8 +224,7 @@ Feature: bosun add and bosun remove edit the manifest, then lock
   Scenario: remove a name the manifest doesn't have fails
     Given the manifest:
       """
-      version: 1
-      targets: [linux/amd64]
+      version: 2
       packages: []
       """
     When I run `bosun remove ripgrep --yes`
@@ -257,8 +235,7 @@ Feature: bosun add and bosun remove edit the manifest, then lock
   Scenario: add writes the entry but fails when another entry can't be locked
     Given the manifest:
       """
-      version: 1
-      targets: [linux/amd64]
+      version: 2
       packages:
         - name: just
           spec: ">=99.0.0"
@@ -274,8 +251,7 @@ Feature: bosun add and bosun remove edit the manifest, then lock
   Scenario: remove edits the manifest but fails when what is left can't be locked
     Given the manifest:
       """
-      version: 1
-      targets: [linux/amd64]
+      version: 2
       packages:
         - name: just
           spec: ">=99.0.0"

@@ -7,8 +7,7 @@ Feature: github-release packages are locked with their release checksum
     And the ctxloom/ctxloom release publishes checksum sha256:4f1c0a9e2b7d
     And the manifest:
       """
-      version: 1
-      targets: [linux/amd64]
+      version: 2
       packages:
         - name: ctxloom
           spec: ">=0.6.4|<0.7.0"

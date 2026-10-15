@@ -36,7 +36,7 @@ impl BackendFactory for AptFactory {
             purl_type: "deb",
             vers_type: "deb",
             platform_independent: false,
-            ext_keys: &[],
+            option_keys: &[],
         }
     }
 

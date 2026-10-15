@@ -18,7 +18,7 @@ For ctxloom 0.6.4 on linux/amd64 that gives `ctxloom_0.6.4_linux_amd64.tar.gz`.
 
 ## Overriding the template
 
-Set `asset` in the install block's `ext.github-release` section when a release uses a
+Set the `asset` option under the block's `github-release` backend when a release uses a
 different layout:
 
 ```yaml
@@ -27,24 +27,23 @@ packages:
     spec: ">=2.0.0|<3.0.0"
     install:
       linux:
-        backend: github-release
-        package: charmbracelet/gum
-        ext:
+        backends:
           github-release:
+            package: charmbracelet/gum
             asset: "{{ binary }}_{{ version }}_{{ os | title }}_{{ arch_goreleaser }}.tar.gz"
 ```
 
 The template must name the asset exactly as it appears on the release page, extension
 included. Quote it in YAML: a value that starts with `{` would otherwise be read as a mapping.
 
-`ext` holds settings that only one backend reads, keyed by that backend's id. A key the
-backend doesn't declare is an error that lists the keys it does (`unknown key "aset" in
-ext.github-release (allowed: package, asset, tag)`), and so is a section for a backend bosun
-doesn't have. `package` is the one key every backend takes: that backend's own package id,
-when a block lists several backends that name the package differently.
-`ext` can also go in `defaults.install`; an entry inherits it key by key, and a key the entry
-sets wins. When a block lists other backends too and one of them is chosen, the
-`github-release` section is ignored.
+`backends` maps each backend that may install the package to its options. `package` is the
+one option every backend takes: that backend's own package id. The others are the backend's
+own, and an option it doesn't declare is an error that lists the ones it does (`unknown key
+"aset" in backends.github-release (allowed: package, asset, tag)`), as is a backend bosun
+doesn't have. With one backend and no options but `package`, the shorthand
+`{backend: github-release, package: owner/repo}` says the same thing.
+`defaults.install` can set options too; an entry that names the same backend inherits them
+key by key, and a key the entry sets wins.
 
 ## Variables
 
@@ -126,10 +125,9 @@ Inno Setup `/VERYSILENT /SUPPRESSMSGBOXES`); an uninstaller without a quiet form
   spec: ">=2.0.0|<3.0.0"
   install:
     windows:
-      backend: github-installer
-      package: owner/app
-      ext:
+      backends:
         github-installer:
+          package: owner/app
           asset: "{{ binary }}-setup-{{ version }}.exe"
           display_name: "App*"
           silent_args: "/VERYSILENT /SUPPRESSMSGBOXES"
@@ -147,15 +145,14 @@ installed package's name is the entry's name unless `package_name` says otherwis
   spec: ">=0.26.0|<0.27.0"
   install:
     linux:debian:
-      backend: github-deb
-      package: sharkdp/bat
-      ext:
-        github-deb: {asset: "{{ binary }}_{{ version }}_{{ arch }}.deb"}
+      backends:
+        github-deb:
+          package: sharkdp/bat
+          asset: "{{ binary }}_{{ version }}_{{ arch }}.deb"
     linux:fedora:
-      backend: github-rpm
-      package: sharkdp/bat
-      ext:
+      backends:
         github-rpm:
+          package: sharkdp/bat
           asset: "{{ binary }}-{{ version }}-1.{{ arch_uname }}.rpm"
           package_name: bat
 ```
@@ -169,7 +166,7 @@ bosun looks a version's release up by its tag: `v<version>`, then `<version>`. A
 tags differently sets `tag`, the tag with `{{ version }}` where the version goes:
 
 ```yaml
-ext:
+backends:
   github-release:
     tag: "jq-{{ version }}"            # jq-1.8.2
     asset: "jq-{{ os }}-{{ arch }}"

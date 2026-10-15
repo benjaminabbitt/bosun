@@ -70,6 +70,20 @@ pub enum IoError {
         /// The package name.
         name: String,
     },
+    /// `bosun add` / `remove` on a manifest older than this build writes.
+    #[error(
+        "{path}: {kind} {found}, but this build writes version {current}; run `bosun migrate` \
+         first",
+        kind = errmsg::MANIFEST_OUTDATED
+    )]
+    ManifestOutdated {
+        /// The manifest.
+        path: PathBuf,
+        /// Its `version`.
+        found: u32,
+        /// The version this build writes.
+        current: u32,
+    },
     /// The manifest could not be edited in place.
     #[error("{kind}: {path} ({detail})", kind = errmsg::EDIT)]
     Edit {

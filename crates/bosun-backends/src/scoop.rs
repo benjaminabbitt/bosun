@@ -48,7 +48,7 @@ impl BackendFactory for ScoopFactory {
             purl_type: "scoop",
             vers_type: "generic",
             platform_independent: false,
-            ext_keys: &[],
+            option_keys: &[],
         }
     }
 

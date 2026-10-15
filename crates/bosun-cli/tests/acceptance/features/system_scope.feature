@@ -5,8 +5,7 @@ Feature: accept, hold and privilege at system scope (apt)
     And apt publishes jq 1.7.1-6+deb13u2
     And the manifest:
       """
-      version: 1
-      targets: [linux/amd64]
+      version: 2
       packages:
         - name: jq
           spec: ">=1.6"

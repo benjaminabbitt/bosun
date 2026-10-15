@@ -7,9 +7,11 @@ use std::path::Path;
 
 use annals_yaml::edit::Document;
 use annals_yaml::Value;
-use bosun_core::manifest::{InstallBlock, ManifestEntry};
+use bosun_core::manifest::{InstallBlock, ManifestEntry, Options, PACKAGE_OPTION};
+use bosun_core::platform::Selector;
 
 use crate::error::IoError;
+use crate::manifest::{manifest_version, MANIFEST_VERSION};
 
 /// How deep a new entry is written in block style before collections of
 /// scalars go on one line: `formerly: [fdfind]`, `linux: {backend: apt}`.
@@ -18,7 +20,7 @@ const ENTRY_FLOW_DEPTH: usize = 2;
 /// `text` with `entry` appended to `packages`. An entry with the same name is
 /// an error; the manifest keeps one entry per name.
 pub fn add_entry(text: &str, source: &Path, entry: &ManifestEntry) -> Result<String, IoError> {
-    let mut doc = document(text, source)?;
+    let mut doc = current_document(text, source)?;
     if index_of(&doc, &entry.name).is_some() {
         return Err(IoError::DuplicateEntry {
             path: source.to_path_buf(),
@@ -32,7 +34,7 @@ pub fn add_entry(text: &str, source: &Path, entry: &ManifestEntry) -> Result<Str
 
 /// `text` without the entry named `name`.
 pub fn remove_entry(text: &str, source: &Path, name: &str) -> Result<String, IoError> {
-    let mut doc = document(text, source)?;
+    let mut doc = current_document(text, source)?;
     let index = index_of(&doc, name).ok_or_else(|| IoError::NoSuchEntry {
         path: source.to_path_buf(),
         name: name.to_string(),
@@ -42,11 +44,22 @@ pub fn remove_entry(text: &str, source: &Path, name: &str) -> Result<String, IoE
     Ok(doc.into_string())
 }
 
-fn document(text: &str, source: &Path) -> Result<Document, IoError> {
-    Document::parse(text).map_err(|e| IoError::Parse {
+/// The manifest to edit, refused unless it is at [`MANIFEST_VERSION`]: an
+/// edit splices current-shape entries in, which an older file can't hold.
+fn current_document(text: &str, source: &Path) -> Result<Document, IoError> {
+    let doc = Document::parse(text).map_err(|e| IoError::Parse {
         path: source.to_path_buf(),
         detail: e.to_string(),
-    })
+    })?;
+    let found = manifest_version(text, source)?;
+    if found != MANIFEST_VERSION {
+        return Err(IoError::ManifestOutdated {
+            path: source.to_path_buf(),
+            found,
+            current: MANIFEST_VERSION,
+        });
+    }
+    Ok(doc)
 }
 
 fn edit_error(source: &Path, e: annals_yaml::edit::EditError) -> IoError {
@@ -70,7 +83,7 @@ fn scalar(s: &str) -> Value {
 }
 
 /// The entry as the manifest writes it: `name`, `spec`, `formerly`, then
-/// `install` by selector; empty fields are left out.
+/// `install` by selector (a lone `any` block bare); empty fields are left out.
 fn entry_value(entry: &ManifestEntry) -> Value {
     let mut fields = vec![("name".to_string(), scalar(&entry.name))];
     if let Some(spec) = &entry.spec {
@@ -80,26 +93,62 @@ fn entry_value(entry: &ManifestEntry) -> Value {
         let names = entry.formerly.iter().map(|n| scalar(n)).collect();
         fields.push(("formerly".to_string(), Value::Seq(names)));
     }
-    if !entry.install.is_empty() {
-        let blocks = entry
-            .install
-            .iter()
-            .map(|(selector, block)| (selector.to_string(), block_value(block)))
-            .collect();
-        fields.push(("install".to_string(), Value::Map(blocks)));
+    let install = match entry.install.iter().collect::<Vec<_>>().as_slice() {
+        [] => None,
+        [(Selector::Any, block)] => Some(block_value(block)),
+        blocks => Some(Value::Map(
+            blocks
+                .iter()
+                .map(|(selector, block)| (selector.to_string(), block_value(block)))
+                .collect(),
+        )),
+    };
+    if let Some(install) = install {
+        fields.push(("install".to_string(), install));
     }
     Value::Map(fields)
 }
 
-/// An install block: `backend` for one, `backends` for a preference list.
+/// Whether `options` say nothing but the package, so the one-backend
+/// shorthand (`backend: apt, package: fd-find`) can write them.
+fn package_only(options: &Options) -> bool {
+    options.keys().all(|k| k == PACKAGE_OPTION)
+}
+
+fn options_value(options: &Options) -> Value {
+    // `package` first: it is what a reader looks for.
+    let (package, rest): (Vec<_>, Vec<_>) = options.iter().partition(|(k, _)| *k == PACKAGE_OPTION);
+    Value::Map(
+        package
+            .into_iter()
+            .chain(rest)
+            .map(|(k, v)| (k.clone(), scalar(v)))
+            .collect(),
+    )
+}
+
+/// An install block: `backend` (+ `package`) for one backend with no other
+/// options, else a `backends` map.
 fn block_value(block: &InstallBlock) -> Value {
     let mut fields = Vec::new();
-    match block.backends.as_slice() {
-        [] => {}
-        [one] => fields.push(("backend".to_string(), scalar(one))),
-        many => fields.push((
+    let mut backends = block.backends.iter();
+    match (backends.next(), backends.next()) {
+        (None, _) => {}
+        (Some((one, options)), None) if package_only(options) => {
+            fields.push(("backend".to_string(), scalar(one)));
+            if let Some(package) = options.get(PACKAGE_OPTION) {
+                fields.push(("package".to_string(), scalar(package)));
+            }
+        }
+        _ => fields.push((
             "backends".to_string(),
-            Value::Seq(many.iter().map(|b| scalar(b)).collect()),
+            Value::Map(
+                block
+                    .backends
+                    .iter()
+                    .map(|(backend, options)| (backend.clone(), options_value(options)))
+                    .collect(),
+            ),
         )),
     }
     if let Some(package) = &block.package {
@@ -108,20 +157,6 @@ fn block_value(block: &InstallBlock) -> Value {
     if let Some(spec) = &block.spec {
         fields.push(("spec".to_string(), scalar(spec)));
     }
-    if !block.ext.is_empty() {
-        let sections = block
-            .ext
-            .iter()
-            .map(|(backend, settings)| {
-                let settings = settings
-                    .iter()
-                    .map(|(k, v)| (k.clone(), scalar(v)))
-                    .collect();
-                (backend.clone(), Value::Map(settings))
-            })
-            .collect();
-        fields.push(("ext".to_string(), Value::Map(sections)));
-    }
     Value::Map(fields)
 }
 
@@ -129,13 +164,14 @@ fn block_value(block: &InstallBlock) -> Value {
 mod tests {
     use std::collections::BTreeMap;
 
+    use bosun_core::manifest::Backends;
+
     use super::*;
     use crate::manifest::load_manifest;
 
     const MANIFEST: &str = "\
 # bosun's own toolbelt.
-version: 1
-targets: [linux/amd64]
+version: 2
 
 packages:
   # Any Debian revision of upstream 1.7.1.
@@ -149,44 +185,58 @@ packages:
         Path::new("bosun.yaml")
     }
 
-    fn gum() -> ManifestEntry {
-        let block = InstallBlock {
-            backends: vec!["github-release".to_string()],
-            package: Some("charmbracelet/gum".to_string()),
-            spec: None,
-            ext: BTreeMap::from([(
-                "github-release".to_string(),
-                BTreeMap::from([(
-                    "asset".to_string(),
-                    "{{ binary }}_{{ version }}_{{ os | title }}_{{ arch_goreleaser }}.tar.gz"
-                        .to_string(),
-                )]),
-            )]),
-        };
+    fn options(pairs: &[(&str, &str)]) -> Options {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    fn entry(name: &str, selector: Selector, backends: Backends) -> ManifestEntry {
         ManifestEntry {
-            name: "gum".to_string(),
+            name: name.to_string(),
             spec: Some(">=2.0.2|<3.0.0".to_string()),
             formerly: Vec::new(),
-            install: BTreeMap::from([("linux".parse().unwrap(), block)]),
+            install: BTreeMap::from([(
+                selector,
+                InstallBlock {
+                    backends,
+                    ..InstallBlock::default()
+                },
+            )]),
         }
     }
+
+    fn gum() -> ManifestEntry {
+        entry(
+            "gum",
+            "linux".parse().unwrap(),
+            Backends::from([(
+                "github-release".to_string(),
+                options(&[
+                    ("package", "charmbracelet/gum"),
+                    (
+                        "asset",
+                        "{{ binary }}_{{ version }}_{{ os | title }}_{{ arch_goreleaser }}.tar.gz",
+                    ),
+                ]),
+            )]),
+        )
+    }
+
+    const GUM_TEXT: &str = "  - name: gum
+    spec: \">=2.0.2|<3.0.0\"
+    install:
+      linux:
+        backends:
+          github-release: {package: charmbracelet/gum, asset: \"{{ binary }}_{{ version }}_{{ os | title }}_{{ arch_goreleaser }}.tar.gz\"}
+";
 
     #[test]
     fn add_appends_the_entry_and_keeps_the_rest_as_written() {
         let out = add_entry(MANIFEST, path(), &gum()).unwrap();
         assert!(out.starts_with(MANIFEST), "existing text changed:\n{out}");
-        assert_eq!(
-            &out[MANIFEST.len()..],
-            "  - name: gum
-    spec: \">=2.0.2|<3.0.0\"
-    install:
-      linux:
-        backend: github-release
-        package: charmbracelet/gum
-        ext:
-          github-release: {asset: \"{{ binary }}_{{ version }}_{{ os | title }}_{{ arch_goreleaser }}.tar.gz\"}
-"
-        );
+        assert_eq!(&out[MANIFEST.len()..], GUM_TEXT);
     }
 
     #[test]
@@ -197,51 +247,79 @@ packages:
     }
 
     #[test]
-    fn a_preference_list_is_written_as_backends() {
-        let mut entry = gum();
-        let block = entry.install.values_mut().next().unwrap();
-        block.backends = vec!["cargo".to_string(), "apt".to_string()];
-        block.package = Some("fd-find".to_string());
-        block.ext.clear();
-        entry.name = "fd".to_string();
-        entry.formerly = vec!["fdfind".to_string()];
-        let out = add_entry(MANIFEST, path(), &entry).unwrap();
-        // A list inside the block keeps the block itself in block style.
-        assert!(
-            out.ends_with(
-                "  - name: fd
-    spec: \">=2.0.2|<3.0.0\"
-    formerly: [fdfind]
-    install:
-      linux:
-        backends: [cargo, apt]
-        package: fd-find
-"
-            ),
-            "got:\n{out}"
+    fn one_backend_with_only_a_package_is_the_shorthand() {
+        let fd = entry(
+            "fd",
+            "linux:debian".parse().unwrap(),
+            Backends::from([("apt".to_string(), options(&[("package", "fd-find")]))]),
         );
-        let m = load_manifest(&out, path()).unwrap();
-        assert_eq!(m.packages.last(), Some(&entry));
+        let out = add_entry(MANIFEST, path(), &fd).unwrap();
+        assert_eq!(
+            &out[MANIFEST.len()..],
+            "  - name: fd\n    spec: \">=2.0.2|<3.0.0\"\n    install:\n      linux:debian: {backend: apt, package: fd-find}\n"
+        );
+        assert_eq!(
+            load_manifest(&out, path()).unwrap().packages.last(),
+            Some(&fd)
+        );
     }
 
     #[test]
-    fn a_block_of_plain_settings_goes_on_one_line() {
-        let entry = ManifestEntry {
-            name: "just".to_string(),
-            spec: Some(">=1.40|<1.41~".to_string()),
-            formerly: Vec::new(),
-            install: BTreeMap::from([(
-                "linux:debian".parse().unwrap(),
-                InstallBlock {
-                    backends: vec!["apt".to_string()],
-                    ..InstallBlock::default()
-                },
-            )]),
-        };
-        let out = add_entry(MANIFEST, path(), &entry).unwrap();
+    fn several_backends_are_written_as_a_map() {
+        let mut fd = entry(
+            "fd",
+            "windows".parse().unwrap(),
+            Backends::from([
+                ("scoop".to_string(), Options::new()),
+                ("winget".to_string(), options(&[("package", "sharkdp.fd")])),
+            ]),
+        );
+        fd.formerly = vec!["fdfind".to_string()];
+        let out = add_entry(MANIFEST, path(), &fd).unwrap();
         assert_eq!(
             &out[MANIFEST.len()..],
-            "  - name: just\n    spec: \">=1.40|<1.41~\"\n    install:\n      linux:debian: {backend: apt}\n"
+            "  - name: fd
+    spec: \">=2.0.2|<3.0.0\"
+    formerly: [fdfind]
+    install:
+      windows:
+        backends:
+          scoop: {}
+          winget: {package: sharkdp.fd}
+"
+        );
+        assert_eq!(
+            load_manifest(&out, path()).unwrap().packages.last(),
+            Some(&fd)
+        );
+    }
+
+    #[test]
+    fn a_lone_any_block_is_written_bare() {
+        let prettier = entry(
+            "prettier",
+            Selector::Any,
+            Backends::from([("npm".to_string(), Options::new())]),
+        );
+        let out = add_entry(MANIFEST, path(), &prettier).unwrap();
+        assert_eq!(
+            &out[MANIFEST.len()..],
+            "  - name: prettier\n    spec: \">=2.0.2|<3.0.0\"\n    install: {backend: npm}\n"
+        );
+        assert_eq!(
+            load_manifest(&out, path()).unwrap().packages.last(),
+            Some(&prettier)
+        );
+    }
+
+    #[test]
+    fn a_block_naming_no_backend_writes_only_its_package() {
+        let mut fd = entry("fd", "windows".parse().unwrap(), Backends::new());
+        fd.install.values_mut().next().unwrap().package = Some("sharkdp.fd".to_string());
+        let out = add_entry(MANIFEST, path(), &fd).unwrap();
+        assert_eq!(
+            &out[MANIFEST.len()..],
+            "  - name: fd\n    spec: \">=2.0.2|<3.0.0\"\n    install:\n      windows: {package: sharkdp.fd}\n"
         );
     }
 
@@ -256,9 +334,31 @@ packages:
 
     #[test]
     fn add_to_a_manifest_with_no_packages_key_adds_it() {
-        let out = add_entry("version: 1\n", path(), &gum()).unwrap();
+        let out = add_entry("version: 2\n", path(), &gum()).unwrap();
         let m = load_manifest(&out, path()).unwrap();
         assert_eq!(m.packages, vec![gum()]);
+    }
+
+    #[test]
+    fn an_older_manifest_is_not_edited() {
+        let old = "version: 1\npackages: []\n";
+        let err = add_entry(old, path(), &gum()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                IoError::ManifestOutdated {
+                    found: 1,
+                    current: 2,
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        assert!(err.to_string().contains("bosun migrate"), "{err}");
+        assert!(matches!(
+            remove_entry(old, path(), "gum"),
+            Err(IoError::ManifestOutdated { .. })
+        ));
     }
 
     #[test]
@@ -267,21 +367,7 @@ packages:
         let out = remove_entry(&added, path(), "jq").unwrap();
         assert_eq!(
             out,
-            "\
-# bosun's own toolbelt.
-version: 1
-targets: [linux/amd64]
-
-packages:
-  - name: gum
-    spec: \">=2.0.2|<3.0.0\"
-    install:
-      linux:
-        backend: github-release
-        package: charmbracelet/gum
-        ext:
-          github-release: {asset: \"{{ binary }}_{{ version }}_{{ os | title }}_{{ arch_goreleaser }}.tar.gz\"}
-"
+            format!("# bosun's own toolbelt.\nversion: 2\n\npackages:\n{GUM_TEXT}")
         );
     }
 

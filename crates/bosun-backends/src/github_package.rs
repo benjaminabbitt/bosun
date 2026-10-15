@@ -113,7 +113,7 @@ impl BackendFactory for GithubPackageFactory {
             purl_type: "github",
             vers_type: "semver",
             platform_independent: false,
-            ext_keys: &["asset", "tag", "package_name"],
+            option_keys: &["asset", "tag", "package_name"],
         }
     }
 
@@ -633,6 +633,6 @@ mod tests {
         assert_eq!(f.id().as_str(), "github-rpm");
         let meta = f.meta();
         assert_eq!((meta.purl_type, meta.vers_type), ("github", "semver"));
-        assert_eq!(meta.ext_keys, &["asset", "tag", "package_name"]);
+        assert_eq!(meta.option_keys, &["asset", "tag", "package_name"]);
     }
 }

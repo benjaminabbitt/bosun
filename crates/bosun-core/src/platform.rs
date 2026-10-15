@@ -7,8 +7,8 @@
 //! literal `any` for platform-independent backends (cargo, go, npm, …). It is
 //! serialised as that string, so it can key a JSON object directly.
 //!
-//! [`Selector`] is the manifest `install` key: `<os>` or `<os>:<distro>`
-//! (§5.4). Matching a selector against a concrete machine (ID vs ID_LIKE
+//! [`Selector`] is the manifest `install` key: `any`, `<os>` or
+//! `<os>:<distro>` (§5.4). Matching a selector against a concrete machine (ID vs ID_LIKE
 //! precedence, distro facts) belongs to resolution, not here; this type is
 //! only the parsed key.
 
@@ -55,10 +55,13 @@ pub enum Target {
     },
 }
 
-/// A manifest `install` selector key (§5.4): an OS, optionally narrowed to a
-/// distro family.
+/// A manifest `install` selector key (§5.4): every OS, an OS, or an OS
+/// narrowed to a distro family.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Selector {
+    /// Any machine (`any`), for backends no OS ties down (npm, cargo, …); the
+    /// least specific selector.
+    Any,
     /// Any machine of this OS.
     Os(Os),
     /// This OS narrowed to a distro (its `ID` or an `ID_LIKE` family).
@@ -178,18 +181,18 @@ impl<'de> Deserialize<'de> for Target {
 }
 
 impl Selector {
-    /// The OS this selector applies to.
-    pub fn os(&self) -> Os {
+    /// The OS this selector applies to; `None` for [`Selector::Any`].
+    pub fn os(&self) -> Option<Os> {
         match self {
-            Selector::Os(os) => *os,
-            Selector::OsDistro(os, _) => *os,
+            Selector::Any => None,
+            Selector::Os(os) | Selector::OsDistro(os, _) => Some(*os),
         }
     }
 
     /// The distro family, when the selector names one.
     pub fn distro(&self) -> Option<&str> {
         match self {
-            Selector::Os(_) => None,
+            Selector::Any | Selector::Os(_) => None,
             Selector::OsDistro(_, d) => Some(d),
         }
     }
@@ -198,6 +201,7 @@ impl Selector {
 impl fmt::Display for Selector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Selector::Any => f.write_str("any"),
             Selector::Os(os) => write!(f, "{os}"),
             Selector::OsDistro(os, distro) => write!(f, "{os}:{distro}"),
         }
@@ -208,8 +212,9 @@ impl FromStr for Selector {
     type Err = PlatformError;
     fn from_str(s: &str) -> Result<Selector, PlatformError> {
         match s.split_once(':') {
+            None if s == "any" => Ok(Selector::Any),
             None => Ok(Selector::Os(s.parse()?)),
-            Some((_, "")) => Err(PlatformError::InvalidSelector(s.to_string())),
+            Some(("any", _) | (_, "")) => Err(PlatformError::InvalidSelector(s.to_string())),
             Some((os, distro)) => Ok(Selector::OsDistro(os.parse()?, distro.to_string())),
         }
     }
@@ -341,9 +346,25 @@ mod tests {
         let od = Selector::OsDistro(Os::Linux, "debian".to_string());
         assert_eq!(od.to_string(), "linux:debian");
         assert_eq!("linux:debian".parse::<Selector>().unwrap(), od);
-        assert_eq!(od.os(), Os::Linux);
+        assert_eq!(od.os(), Some(Os::Linux));
         assert_eq!(od.distro(), Some("debian"));
         assert_eq!(os.distro(), None);
+    }
+
+    #[test]
+    fn selector_any_applies_to_every_os() {
+        assert_eq!("any".parse::<Selector>().unwrap(), Selector::Any);
+        assert_eq!(Selector::Any.to_string(), "any");
+        assert_eq!(Selector::Any.os(), None);
+        assert_eq!(Selector::Any.distro(), None);
+    }
+
+    #[test]
+    fn selector_any_takes_no_distro() {
+        assert!(matches!(
+            "any:debian".parse::<Selector>(),
+            Err(PlatformError::InvalidSelector(_))
+        ));
     }
 
     #[test]

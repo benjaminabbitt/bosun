@@ -6,8 +6,7 @@ Feature: install, upgrade and cross-claim resolution at user scope (cargo)
     And cargo publishes ripgrep 14.0.0 and 14.1.1
     And the manifest:
       """
-      version: 1
-      targets: [linux/amd64]
+      version: 2
       packages:
         - name: ripgrep
           spec: ">=14.0.0|<15.0.0"

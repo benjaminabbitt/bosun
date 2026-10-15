@@ -13,17 +13,16 @@ Feature: github-release on Windows
     Given o/tool v1.2.0 publishes tool_1.2.0_windows_amd64.zip with tool.exe in tool_1.2.0_windows_amd64/
     And the manifest:
       """
-      version: 1
-      targets: [windows/amd64]
+      version: 2
       packages:
         - name: tool
           spec: ">=1.0.0|<2.0.0"
           install:
             windows:
-              backend: github-release
-              package: o/tool
-              ext:
-                github-release: {asset: "{{ binary }}_{{ version }}_{{ os }}_{{ arch }}.zip"}
+              backends:
+                github-release:
+                  package: o/tool
+                  asset: "{{ binary }}_{{ version }}_{{ os }}_{{ arch }}.zip"
       """
     When I run `bosun install . --yes`
     Then it succeeds
@@ -37,17 +36,15 @@ Feature: github-release on Windows
     Given jqlang/jq jq-1.8.2 publishes jq-windows-amd64.exe holding just the binary
     And the manifest:
       """
-      version: 1
-      targets: [windows/amd64]
+      version: 2
       packages:
         - name: jq
           spec: ">=1.8.0|<1.9.0"
           install:
             windows:
-              backend: github-release
-              package: jqlang/jq
-              ext:
+              backends:
                 github-release:
+                  package: jqlang/jq
                   tag: "jq-{{ version }}"
                   asset: "jq-{{ os }}-{{ arch }}.exe"
       """
@@ -58,8 +55,7 @@ Feature: github-release on Windows
   Scenario: a Linux-only entry does not apply on Windows
     Given the manifest:
       """
-      version: 1
-      targets: [windows/amd64]
+      version: 2
       packages:
         - name: jq
           spec: ">=1.7"
@@ -75,8 +71,7 @@ Feature: github-release on Windows
     And winget publishes sharkdp.fd 10.1.0, 10.2.0
     And the manifest:
       """
-      version: 1
-      targets: [windows/amd64]
+      version: 2
       packages:
         - name: fd
           spec: ">=10.0.0|<11.0.0"
@@ -95,8 +90,7 @@ Feature: github-release on Windows
     And choco publishes jq 1.8.1
     And the manifest:
       """
-      version: 1
-      targets: [windows/amd64]
+      version: 2
       packages:
         - name: jq
           spec: ">=1.8.0"

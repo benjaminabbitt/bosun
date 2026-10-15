@@ -17,7 +17,10 @@ pub mod state;
 
 pub use config::UserConfig;
 pub use error::IoError;
-pub use manifest::{check_ext, load_manifest, manifest_hash, BackendExtKeys, ManifestError};
+pub use manifest::{
+    check_options, load_manifest, manifest_hash, manifest_version, upgrade_manifest,
+    BackendOptionKeys, ManifestError, MANIFEST_VERSION,
+};
 pub use state::FileStateStore;
 
 use bosun_core::vers::scheme_for_type;

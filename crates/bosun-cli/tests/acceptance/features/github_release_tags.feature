@@ -14,17 +14,15 @@ Feature: github-release finds releases whose tags aren't v<version>
     And jqlang/jq jq-1.8.1 publishes jq-linux-amd64 holding just the binary
     And the manifest:
       """
-      version: 1
-      targets: [linux/amd64]
+      version: 2
       packages:
         - name: jq
           spec: ">=1.8.0|<1.9.0"
           install:
             linux:
-              backend: github-release
-              package: jqlang/jq
-              ext:
+              backends:
                 github-release:
+                  package: jqlang/jq
                   tag: "jq-{{ version }}"
                   asset: "jq-{{ os }}-{{ arch }}"
       """
@@ -38,17 +36,15 @@ Feature: github-release finds releases whose tags aren't v<version>
     And kubernetes-sigs/kustomize kyaml/v9.9.9 publishes kyaml.tar.gz with kyaml at its root
     And the manifest:
       """
-      version: 1
-      targets: [linux/amd64]
+      version: 2
       packages:
         - name: kustomize
           spec: ">=5.0.0"
           install:
             linux:
-              backend: github-release
-              package: kubernetes-sigs/kustomize
-              ext:
+              backends:
                 github-release:
+                  package: kubernetes-sigs/kustomize
                   tag: "kustomize/v{{ version }}"
                   asset: "{{ binary }}_{{ tag | replace('kustomize/', '') }}_{{ os }}_{{ arch }}.tar.gz"
       """
@@ -60,17 +56,16 @@ Feature: github-release finds releases whose tags aren't v<version>
     Given jqlang/jq jq-1.8.2 publishes jq-linux-amd64 holding just the binary
     And the manifest:
       """
-      version: 1
-      targets: [linux/amd64]
+      version: 2
       packages:
         - name: jq
           spec: ">=1.8.0"
           install:
             linux:
-              backend: github-release
-              package: jqlang/jq
-              ext:
-                github-release: {tag: "jq-latest"}
+              backends:
+                github-release:
+                  package: jqlang/jq
+                  tag: "jq-latest"
       """
     When I run `bosun lock .`
     Then it fails

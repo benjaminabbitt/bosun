@@ -46,7 +46,7 @@ impl BackendFactory for WingetFactory {
             purl_type: "winget",
             vers_type: "generic",
             platform_independent: false,
-            ext_keys: &[],
+            option_keys: &[],
         }
     }
 

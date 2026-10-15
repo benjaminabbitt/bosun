@@ -36,7 +36,7 @@ impl BackendFactory for CargoFactory {
             purl_type: "cargo",
             vers_type: "cargo",
             platform_independent: true,
-            ext_keys: &[],
+            option_keys: &[],
         }
     }
 

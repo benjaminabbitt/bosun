@@ -85,9 +85,9 @@ pub struct Env {
     /// The backend→scheme map (§6) for every compiled-in backend, present or
     /// not, so lock/state versions always read under the right scheme.
     schemes: bosun_io::BackendSchemes,
-    /// The `ext` keys (§5.4) every compiled-in backend declares, present or
+    /// The options (§5.4) every compiled-in backend declares, present or
     /// not, so a manifest checks the same on every machine.
-    ext_keys: bosun_io::BackendExtKeys,
+    option_keys: bosun_io::BackendOptionKeys,
     machine: Box<dyn Machine>,
     exec: Exec,
 }
@@ -160,9 +160,9 @@ impl Env {
         self.schemes.clone()
     }
 
-    /// The `ext` keys each known backend declares, for checking a manifest.
-    pub fn ext_keys(&self) -> &bosun_io::BackendExtKeys {
-        &self.ext_keys
+    /// The options each known backend declares, for checking a manifest.
+    pub fn option_keys(&self) -> &bosun_io::BackendOptionKeys {
+        &self.option_keys
     }
 
     /// The vers type of a backend, for parsing claim specs (§5.6).
@@ -306,13 +306,13 @@ fn factory_schemes(factories: &[Box<dyn BackendFactory>]) -> bosun_io::BackendSc
         .collect()
 }
 
-/// The `ext` keys each compiled-in backend declares, from factory metadata
+/// The options each compiled-in backend declares, from factory metadata
 /// alone (no probe), like [`factory_schemes`].
-fn factory_ext_keys(factories: &[Box<dyn BackendFactory>]) -> bosun_io::BackendExtKeys {
+fn factory_option_keys(factories: &[Box<dyn BackendFactory>]) -> bosun_io::BackendOptionKeys {
     factories
         .iter()
         .map(|f| {
-            let keys = f.meta().ext_keys.iter().map(|k| k.to_string()).collect();
+            let keys = f.meta().option_keys.iter().map(|k| k.to_string()).collect();
             (f.id().as_str().to_string(), keys)
         })
         .collect()
@@ -392,7 +392,7 @@ fn from_host() -> Result<Env, CliError> {
     // must be known for every compiled-in backend — not only those present this
     // run — so state recorded for an absent backend still reads correctly.
     let schemes = factory_schemes(&factories);
-    let ext_keys = factory_ext_keys(&factories);
+    let option_keys = factory_option_keys(&factories);
 
     let info = HostInfo {
         os,
@@ -432,7 +432,7 @@ fn from_host() -> Result<Env, CliError> {
         backends,
         skipped,
         schemes,
-        ext_keys,
+        option_keys,
         machine,
         exec: Exec::Host { runner, fetcher },
     })
@@ -553,7 +553,7 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
     // backend the build doesn't have declares none.
     let fake_runner: Arc<dyn CommandRunner> =
         Arc::new(bosun_ports::testing::FakeCommandRunner::new());
-    let mut ext_keys = factory_ext_keys(&compiled_in_factories(
+    let mut option_keys = factory_option_keys(&compiled_in_factories(
         fake_runner,
         fetcher.clone(),
         bin_dir.clone(),
@@ -561,7 +561,7 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
         arch,
     ));
     for b in &backends {
-        ext_keys.entry(b.id.as_str().to_string()).or_default();
+        option_keys.entry(b.id.as_str().to_string()).or_default();
     }
     let store = FileStateStore::new(system.clone(), user.clone(), schemes.clone());
     let machine = FakeMachine {
@@ -585,7 +585,7 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
         backends,
         skipped: Vec::new(),
         schemes,
-        ext_keys,
+        option_keys,
         machine: Box::new(machine),
         exec: Exec::Fixture(Box::new(FixtureStepRunner::new(
             fx.fail_step,
@@ -723,7 +723,7 @@ mod tests {
     }
 
     #[test]
-    fn factory_ext_keys_cover_every_compiled_in_backend_without_probing() {
+    fn factory_option_keys_cover_every_compiled_in_backend_without_probing() {
         let runner: Arc<dyn CommandRunner> = Arc::new(ProcessCommandRunner);
         let fetcher: Arc<dyn HttpFetcher> = Arc::new(UreqHttpFetcher::new());
         let factories = compiled_in_factories(
@@ -733,7 +733,7 @@ mod tests {
             Os::Linux,
             Arch::Amd64,
         );
-        let keys = factory_ext_keys(&factories);
+        let keys = factory_option_keys(&factories);
         assert_eq!(
             keys.get("github-release"),
             Some(&vec!["asset".to_string(), "tag".to_string()])
@@ -743,8 +743,8 @@ mod tests {
     }
 
     #[test]
-    fn a_fixture_env_knows_compiled_in_ext_keys_and_its_own_backends() {
-        // Fake fixture backends declare no ext keys; compiled-in ones keep
+    fn a_fixture_env_knows_compiled_in_option_keys_and_its_own_backends() {
+        // Fake fixture backends declare no options; compiled-in ones keep
         // theirs, so manifests check the same way under the test seam.
         let dir = tempfile::tempdir().unwrap();
         let env = fixture_env(
@@ -753,10 +753,10 @@ mod tests {
                 {"id":"brew","version":"4.0","purl_type":"brew","vers_type":"generic"}]}"#,
         );
         assert_eq!(
-            env.ext_keys().get("github-release"),
+            env.option_keys().get("github-release"),
             Some(&vec!["asset".to_string(), "tag".to_string()])
         );
-        assert_eq!(env.ext_keys().get("brew"), Some(&vec![]));
+        assert_eq!(env.option_keys().get("brew"), Some(&vec![]));
     }
 
     #[test]

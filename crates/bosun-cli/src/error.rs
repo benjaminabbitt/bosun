@@ -89,7 +89,7 @@ mod tests {
             },
             CliError::Resolve("unsatisfiable".to_string()),
             CliError::Environment("no fixture".to_string()),
-            CliError::Usage("--ext needs a backend".to_string()),
+            CliError::Usage("--opt needs a backend".to_string()),
         ];
         for case in &cases {
             assert!(!case.to_string().is_empty(), "{case:?}");

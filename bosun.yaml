@@ -1,7 +1,6 @@
 # bosun's own toolbelt (§12). M1 dogfood: Debian first.
 # ltk, taskloom and harp are not published as release assets yet, so they are left out.
-version: 1
-targets: [linux/amd64]
+version: 2
 
 packages:
   # Any Debian revision of upstream 1.40.

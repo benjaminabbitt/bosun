@@ -1,31 +1,37 @@
-//! Manifest loading (§4.4, §5.4) and the parsed-model hash (§4.5).
+//! Manifest loading (§4.4, §5.4) and the parsed-model hash.
 //!
 //! The manifest is read through `annals_yaml::versioned`: annals enforces the
 //! strict YAML subset (anchors, tags and multiple documents are refused) and
-//! the root `version`; we only decode the already-validated tree into
-//! [`Manifest`], surfacing a [`ManifestError`] (an annals `Diagnostic`) for
-//! anything structurally wrong — an unknown key, a bad target or selector, a
-//! missing name. No `policy` key exists; specs are vers strings kept verbatim
-//! for the resolver.
+//! the root `version`, migrating older versions through the steps registered
+//! in [`loader`]; we only decode the current-version tree into [`Manifest`],
+//! surfacing a [`ManifestError`] (an annals `Diagnostic`) for anything
+//! structurally wrong — an unknown key, a bad selector, a missing name.
 //!
 //! [`manifest_hash`] hashes the *parsed model*, not the file text, so a
-//! comment-only edit leaves the hash unchanged (§4.5).
+//! comment-only edit leaves the hash unchanged.
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
 
 use annals_diagnostic::{Arg, Diagnostic};
-use annals_yaml::versioned::Migrations;
+use annals_yaml::versioned::{version_of, Loader, MigrationError, Migrations};
 use annals_yaml::Value;
-use bosun_core::manifest::{Ext, InstallBlock, Manifest, ManifestEntry, EXT_PACKAGE};
-use bosun_core::platform::{Selector, Target};
+use bosun_core::manifest::{
+    Backends, InstallBlock, Manifest, ManifestEntry, Options, PACKAGE_OPTION,
+};
+use bosun_core::platform::Selector;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::error::IoError;
 
-const MANIFEST_VERSION: u32 = 1;
+/// The manifest format version this build reads and writes.
+pub const MANIFEST_VERSION: u32 = 2;
+
+/// The keys of an install block. A mapping under `install` whose keys are all
+/// among these is a bare block, the `any` selector.
+const BLOCK_KEYS: &[&str] = &["backend", "backends", "package", "spec"];
 
 /// Why a manifest's structure is invalid (after annals accepted the YAML).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,17 +44,25 @@ pub enum ManifestError {
     NotAScalar { context: String },
     /// A key bosun does not recognise (§5.4: unknown key is an error).
     UnknownKey { context: String, key: String },
-    /// A `targets` entry that is not a valid target.
-    BadTarget { value: String },
     /// An `install` key that is not a valid selector.
     BadSelector { value: String },
     /// A package entry with no `name`.
     MissingName,
-    /// An `ext` section for a backend this build does not have.
-    UnknownExtBackend { package: String, backend: String },
-    /// An `ext` key the backend does not declare; `allowed` lists the keys it
-    /// takes, comma-separated, starting with `package`, which every backend takes.
-    UnknownExtKey {
+    /// An `install` mapping with both block keys and selector keys.
+    InstallMixed { context: String },
+    /// An install block with both `backend` and `backends`.
+    BackendAndBackends { context: String },
+    /// A block-level `package` beside a `backends` map, which names each
+    /// backend's package itself.
+    PackageBesideBackends { context: String },
+    /// A `package` in `defaults.install`, which every entry would share.
+    PackageInDefaults { context: String },
+    /// A `backends` entry for a backend this build does not have.
+    UnknownBackend { package: String, backend: String },
+    /// An option the backend does not declare; `allowed` lists the ones it
+    /// takes, comma-separated, starting with `package`, which every backend
+    /// takes.
+    UnknownOption {
         package: String,
         backend: String,
         key: String,
@@ -65,20 +79,37 @@ impl fmt::Display for ManifestError {
             ManifestError::UnknownKey { context, key } => {
                 write!(f, "unknown key {key:?} in {context}")
             }
-            ManifestError::BadTarget { value } => write!(f, "invalid target {value:?}"),
             ManifestError::BadSelector { value } => write!(f, "invalid selector {value:?}"),
             ManifestError::MissingName => f.write_str("a package entry has no `name`"),
-            ManifestError::UnknownExtBackend { package, backend } => {
-                write!(f, "{package}: `ext` names unknown backend {backend:?}")
+            ManifestError::InstallMixed { context } => write!(
+                f,
+                "{context} mixes a bare install block with selector keys; put the bare block \
+                 under `any`"
+            ),
+            ManifestError::BackendAndBackends { context } => {
+                write!(f, "{context} has both `backend` and `backends`; use one")
             }
-            ManifestError::UnknownExtKey {
+            ManifestError::PackageBesideBackends { context } => write!(
+                f,
+                "{context}: `package` beside `backends`; name each backend's package as \
+                 backends.<backend>.package"
+            ),
+            ManifestError::PackageInDefaults { context } => write!(
+                f,
+                "{context}: `package` names one package, so it belongs in that package's entry, \
+                 not defaults.install"
+            ),
+            ManifestError::UnknownBackend { package, backend } => {
+                write!(f, "{package}: `backends` names unknown backend {backend:?}")
+            }
+            ManifestError::UnknownOption {
                 package,
                 backend,
                 key,
                 allowed,
             } => write!(
                 f,
-                "{package}: unknown key {key:?} in ext.{backend} (allowed: {allowed})"
+                "{package}: unknown key {key:?} in backends.{backend} (allowed: {allowed})"
             ),
         }
     }
@@ -91,11 +122,14 @@ impl Diagnostic for ManifestError {
             ManifestError::NotASequence { .. } => "bosun.manifest.not_a_sequence",
             ManifestError::NotAScalar { .. } => "bosun.manifest.not_a_scalar",
             ManifestError::UnknownKey { .. } => "bosun.manifest.unknown_key",
-            ManifestError::BadTarget { .. } => "bosun.manifest.bad_target",
             ManifestError::BadSelector { .. } => "bosun.manifest.bad_selector",
             ManifestError::MissingName => "bosun.manifest.missing_name",
-            ManifestError::UnknownExtBackend { .. } => "bosun.manifest.unknown_ext_backend",
-            ManifestError::UnknownExtKey { .. } => "bosun.manifest.unknown_ext_key",
+            ManifestError::InstallMixed { .. } => "bosun.manifest.install_mixed",
+            ManifestError::BackendAndBackends { .. } => "bosun.manifest.backend_and_backends",
+            ManifestError::PackageBesideBackends { .. } => "bosun.manifest.package_beside_backends",
+            ManifestError::PackageInDefaults { .. } => "bosun.manifest.package_in_defaults",
+            ManifestError::UnknownBackend { .. } => "bosun.manifest.unknown_backend",
+            ManifestError::UnknownOption { .. } => "bosun.manifest.unknown_option",
         }
     }
 
@@ -103,22 +137,26 @@ impl Diagnostic for ManifestError {
         match self {
             ManifestError::NotAMapping { context }
             | ManifestError::NotASequence { context }
-            | ManifestError::NotAScalar { context } => vec![("context", context.clone().into())],
+            | ManifestError::NotAScalar { context }
+            | ManifestError::InstallMixed { context }
+            | ManifestError::BackendAndBackends { context }
+            | ManifestError::PackageBesideBackends { context }
+            | ManifestError::PackageInDefaults { context } => {
+                vec![("context", context.clone().into())]
+            }
             ManifestError::UnknownKey { context, key } => {
                 vec![
                     ("context", context.clone().into()),
                     ("key", key.clone().into()),
                 ]
             }
-            ManifestError::BadTarget { value } | ManifestError::BadSelector { value } => {
-                vec![("value", value.clone().into())]
-            }
+            ManifestError::BadSelector { value } => vec![("value", value.clone().into())],
             ManifestError::MissingName => vec![],
-            ManifestError::UnknownExtBackend { package, backend } => vec![
+            ManifestError::UnknownBackend { package, backend } => vec![
                 ("package", package.clone().into()),
                 ("backend", backend.clone().into()),
             ],
-            ManifestError::UnknownExtKey {
+            ManifestError::UnknownOption {
                 package,
                 backend,
                 key,
@@ -169,67 +207,108 @@ fn string_seq(v: &Value, context: &str) -> Result2<Vec<String>> {
         .collect()
 }
 
-/// A field that may be written as a scalar (one element) or a sequence.
-fn string_or_seq(v: &Value, context: &str) -> Result2<Vec<String>> {
-    match v.as_str() {
-        Some(s) => Ok(vec![s.to_string()]),
-        None => string_seq(v, context),
-    }
+fn scalar(v: &Value, context: &str) -> Result2<String> {
+    v.as_str()
+        .map(str::to_string)
+        .ok_or_else(|| ManifestError::NotAScalar {
+            context: context.to_string(),
+        })
 }
 
-/// `ext: {<backend>: {<key>: <scalar>}}`, kept verbatim; which backends and
-/// keys are valid is [`check_ext`]'s job, against the compiled-in backends.
-fn ext(v: &Value) -> Result2<Ext> {
-    as_map(v, "ext")?
+/// One backend's options: a mapping of scalars, or empty (`cargo:` / `{}`).
+fn options(v: &Value, context: &str) -> Result2<Options> {
+    if *v == Value::Null {
+        return Ok(Options::new());
+    }
+    as_map(v, context)?
+        .iter()
+        .map(|(key, value)| Ok((key.clone(), scalar(value, &format!("{context}.{key}"))?)))
+        .collect()
+}
+
+/// `backends: {<backend>: {<option>: <scalar>}}`, kept verbatim; which
+/// backends and options are valid is [`check_options`]'s job, against the
+/// compiled-in backends.
+fn backends_map(v: &Value) -> Result2<Backends> {
+    as_map(v, "backends")?
         .iter()
         .map(|(backend, section)| {
-            let context = format!("ext.{backend}");
-            let settings = as_map(section, &context)?
-                .iter()
-                .map(|(key, value)| {
-                    let value = value.as_str().ok_or_else(|| ManifestError::NotAScalar {
-                        context: format!("{context}.{key}"),
-                    })?;
-                    Ok((key.clone(), value.to_string()))
-                })
-                .collect::<Result2<BTreeMap<_, _>>>()?;
-            Ok((backend.clone(), settings))
+            Ok((
+                backend.clone(),
+                options(section, &format!("backends.{backend}"))?,
+            ))
         })
         .collect()
 }
 
-fn install_block(v: &Value) -> Result2<InstallBlock> {
-    let entries = as_map(v, "an install block")?;
-    check_keys(
-        entries,
-        "an install block",
-        &["backend", "backends", "package", "spec", "ext"],
-    )?;
-    // `backends:` (preferred, a list) or `backend:` (one), scalar or sequence.
-    let backends = match v.get("backends").or_else(|| v.get("backend")) {
-        Some(b) => string_or_seq(b, "backends")?,
-        None => Vec::new(),
+/// An install block: `backend` (+ `package`) for one backend, or a
+/// `backends` map; `package` alone is for an inherited backend.
+fn install_block(v: &Value, context: &str) -> Result2<InstallBlock> {
+    let entries = as_map(v, context)?;
+    check_keys(entries, context, BLOCK_KEYS)?;
+    let package = v.get("package").map(|p| scalar(p, "package")).transpose()?;
+    let (backends, package) = match (v.get("backend"), v.get("backends")) {
+        (Some(_), Some(_)) => {
+            return Err(ManifestError::BackendAndBackends {
+                context: context.to_string(),
+            })
+        }
+        (Some(one), None) => {
+            let mut opts = Options::new();
+            if let Some(p) = package {
+                opts.insert(PACKAGE_OPTION.to_string(), p);
+            }
+            (Backends::from([(scalar(one, "backend")?, opts)]), None)
+        }
+        (None, Some(map)) => {
+            if package.is_some() {
+                return Err(ManifestError::PackageBesideBackends {
+                    context: context.to_string(),
+                });
+            }
+            (backends_map(map)?, None)
+        }
+        (None, None) => (Backends::new(), package),
     };
-    let field = |k| v.get(k).and_then(Value::as_str).map(str::to_string);
     Ok(InstallBlock {
         backends,
-        package: field("package"),
-        spec: field("spec"),
-        ext: match v.get("ext") {
-            Some(e) => ext(e)?,
-            None => Ext::new(),
-        },
+        package,
+        spec: v.get("spec").map(|s| scalar(s, "spec")).transpose()?,
     })
 }
 
+/// Whether an `install` mapping is a bare block: every key a block key.
+/// Mixed keys are an error, so a typo'd selector is never read as a block.
+fn is_bare_block(entries: &[(String, Value)], context: &str) -> Result2<bool> {
+    let block_keys = entries
+        .iter()
+        .filter(|(k, _)| BLOCK_KEYS.contains(&k.as_str()))
+        .count();
+    match block_keys {
+        0 => Ok(false),
+        n if n == entries.len() => Ok(true),
+        _ => Err(ManifestError::InstallMixed {
+            context: context.to_string(),
+        }),
+    }
+}
+
+/// An `install` value: selector → block, or a bare block for `any`.
 fn selector_map(v: &Value, context: &str) -> Result2<BTreeMap<Selector, InstallBlock>> {
-    as_map(v, context)?
+    let entries = as_map(v, context)?;
+    if is_bare_block(entries, context)? {
+        return Ok(BTreeMap::from([(
+            Selector::Any,
+            install_block(v, context)?,
+        )]));
+    }
+    entries
         .iter()
         .map(|(sel, block)| {
             let selector = sel
                 .parse::<Selector>()
                 .map_err(|_| ManifestError::BadSelector { value: sel.clone() })?;
-            Ok((selector, install_block(block)?))
+            Ok((selector, install_block(block, &format!("{context}.{sel}"))?))
         })
         .collect()
 }
@@ -251,7 +330,7 @@ fn entry(v: &Value) -> Result2<ManifestEntry> {
         None => Vec::new(),
     };
     let install = match v.get("install") {
-        Some(m) => selector_map(m, "install")?,
+        Some(m) => selector_map(m, &format!("{name}.install"))?,
         None => BTreeMap::new(),
     };
     Ok(ManifestEntry {
@@ -262,32 +341,39 @@ fn entry(v: &Value) -> Result2<ManifestEntry> {
     })
 }
 
-/// Decode an already-version-validated manifest tree into the model.
+/// `defaults.install`: like an entry's, but naming no package.
+fn defaults_install(v: &Value) -> Result2<BTreeMap<Selector, InstallBlock>> {
+    let blocks = selector_map(v, "defaults.install")?;
+    for (selector, block) in &blocks {
+        let named = block.package.is_some()
+            || block
+                .backends
+                .values()
+                .any(|o| o.contains_key(PACKAGE_OPTION));
+        if named {
+            return Err(ManifestError::PackageInDefaults {
+                context: format!("defaults.install.{selector}"),
+            });
+        }
+    }
+    Ok(blocks)
+}
+
+/// Decode a current-version manifest tree into the model.
 fn decode(root: &Value) -> Result2<Manifest> {
     let entries = as_map(root, "the manifest root")?;
     check_keys(
         entries,
         "the manifest root",
-        &["version", "targets", "defaults", "packages"],
+        &["version", "defaults", "packages"],
     )?;
-
-    let targets = match root.get("targets") {
-        Some(t) => string_seq(t, "targets")?
-            .iter()
-            .map(|s| {
-                s.parse::<Target>()
-                    .map_err(|_| ManifestError::BadTarget { value: s.clone() })
-            })
-            .collect::<Result2<Vec<_>>>()?,
-        None => Vec::new(),
-    };
 
     let defaults = match root.get("defaults") {
         Some(d) => {
             let dmap = as_map(d, "defaults")?;
             check_keys(dmap, "defaults", &["install"])?;
             match d.get("install") {
-                Some(i) => selector_map(i, "defaults.install")?,
+                Some(i) => defaults_install(i)?,
                 None => BTreeMap::new(),
             }
         }
@@ -307,64 +393,202 @@ fn decode(root: &Value) -> Result2<Manifest> {
     };
 
     Ok(Manifest {
-        version: root
-            .get("version")
-            .and_then(Value::as_str)
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(MANIFEST_VERSION),
-        targets,
+        version: MANIFEST_VERSION,
         defaults,
         packages,
     })
 }
 
-/// Load a manifest from YAML text (§4.4). annals enforces the strict subset
-/// and the `version`; structural problems surface as [`IoError::Parse`]
-/// carrying the [`ManifestError`] diagnostic.
-pub fn load_manifest(text: &str, source: &Path) -> Result<Manifest, IoError> {
-    let loader = Migrations::new("bosun", MANIFEST_VERSION)
+// --- migrations ------------------------------------------------------------
+
+/// The manifest loader: version 1 and up, migrated to [`MANIFEST_VERSION`].
+fn loader() -> Loader {
+    Migrations::new("manifest", MANIFEST_VERSION)
+        .step(1, v1_to_v2)
         .build()
-        .expect("manifest migration chain has no steps");
-    loader
-        .load_as(Some(&source.display().to_string()), text, decode)
-        .map_err(|e| IoError::Parse {
-            path: source.to_path_buf(),
-            detail: e.to_string(),
-        })
+        .expect("the manifest migration chain is whole")
 }
 
-/// The `ext` keys each compiled-in backend declares, by backend id. Built by
-/// the CLI from every compiled-in backend (present this run or not), like
-/// [`crate::BackendSchemes`].
-pub type BackendExtKeys = BTreeMap<String, Vec<String>>;
+/// Version 1 → 2: `targets` goes (the lock is the machine's own), and each
+/// install block's backend list, shared `package` and `ext` sections become
+/// one `backends` map. The list's order was a manifest-side preference, which
+/// version 2 leaves to the machine, so it is dropped.
+fn v1_to_v2(root: &mut Value) -> Result<(), MigrationError> {
+    root.remove("targets");
+    if let Some(install) = root.get_mut("defaults").and_then(|d| d.get_mut("install")) {
+        migrate_selector_map(install);
+    }
+    if let Some(Value::Seq(packages)) = root.get_mut("packages") {
+        for package in packages {
+            if let Some(install) = package.get_mut("install") {
+                migrate_selector_map(install);
+            }
+        }
+    }
+    Ok(())
+}
 
-/// Check every `ext` section in `m` against the backends this build has: an
-/// unknown backend or an undeclared key is an error, never silently ignored.
-/// What a declared key's value means is the backend's to validate when it
-/// reads it.
-pub fn check_ext(m: &Manifest, known: &BackendExtKeys) -> Result<(), ManifestError> {
+fn migrate_selector_map(install: &mut Value) {
+    if let Value::Map(blocks) = install {
+        for (_, block) in blocks {
+            migrate_block(block);
+        }
+    }
+}
+
+/// One v1 block into v2. Anything not the v1 shape is left for the decoder to
+/// report.
+fn migrate_block(block: &mut Value) {
+    if block.as_map().is_none() {
+        return;
+    }
+    let listed: Vec<String> = match block.remove("backends").or_else(|| block.remove("backend")) {
+        Some(Value::Scalar(one)) => vec![one],
+        Some(Value::Seq(items)) => items
+            .iter()
+            .filter_map(|i| i.as_str().map(str::to_string))
+            .collect(),
+        Some(other) => {
+            *block.entry("backends") = other;
+            return;
+        }
+        None => Vec::new(),
+    };
+    let ext: Vec<(String, Value)> = match block.remove("ext") {
+        Some(Value::Map(sections)) => sections,
+        Some(_) | None => Vec::new(),
+    };
+    // v1 read an ext section only for the backend chosen from the list; with no
+    // list the backends came from defaults, and the sections name them.
+    let names: Vec<String> = if listed.is_empty() {
+        ext.iter().map(|(b, _)| b.clone()).collect()
+    } else {
+        listed
+    };
+    if names.is_empty() {
+        return;
+    }
+    let shared = block.remove("package");
+    let spec = block.remove("spec");
+    let section = |name: &str| -> Vec<(String, Value)> {
+        let mut opts = Vec::new();
+        let own = ext.iter().find(|(b, _)| b == name).map(|(_, s)| s);
+        let own_package = own.and_then(|s| s.get(PACKAGE_OPTION)).cloned();
+        if let Some(p) = own_package.or_else(|| shared.clone()) {
+            opts.push((PACKAGE_OPTION.to_string(), p));
+        }
+        if let Some(Value::Map(settings)) = own {
+            opts.extend(
+                settings
+                    .iter()
+                    .filter(|(k, _)| k != PACKAGE_OPTION)
+                    .cloned(),
+            );
+        }
+        opts
+    };
+    let mut fields = Vec::new();
+    match names.as_slice() {
+        [one] if section(one).iter().all(|(k, _)| k == PACKAGE_OPTION) => {
+            fields.push(("backend".to_string(), Value::scalar(one.as_str())));
+            fields.extend(section(one));
+        }
+        _ => {
+            let map = names
+                .iter()
+                .map(|name| (name.clone(), Value::Map(section(name))))
+                .collect();
+            fields.push(("backends".to_string(), Value::Map(map)));
+        }
+    }
+    if let Some(spec) = spec {
+        fields.push(("spec".to_string(), spec));
+    }
+    if let Value::Map(rest) = block {
+        fields.append(rest);
+    }
+    *block = Value::Map(fields);
+}
+
+// --- loading ---------------------------------------------------------------
+
+fn parse_error(source: &Path, e: impl fmt::Display) -> IoError {
+    IoError::Parse {
+        path: source.to_path_buf(),
+        detail: e.to_string(),
+    }
+}
+
+/// Load a manifest from YAML text (§4.4), migrating an older version in
+/// memory. annals enforces the strict subset and the `version`; structural
+/// problems surface as [`IoError::Parse`] carrying the [`ManifestError`]
+/// diagnostic.
+pub fn load_manifest(text: &str, source: &Path) -> Result<Manifest, IoError> {
+    loader()
+        .load_as(Some(&source.display().to_string()), text, decode)
+        .map_err(|e| parse_error(source, e))
+}
+
+/// The manifest's own `version`, unmigrated: edits refuse a file older than
+/// [`MANIFEST_VERSION`], since they would splice new-shape entries into it.
+pub fn manifest_version(text: &str, source: &Path) -> Result<u32, IoError> {
+    let doc = annals_yaml::parse(text).map_err(|e| parse_error(source, e))?;
+    version_of(&doc).map_err(|e| parse_error(source, e))
+}
+
+/// How deep an upgraded manifest is written in block style: down to each
+/// install block, whose scalars go on one line (`linux: {backend: apt}`).
+const UPGRADE_FLOW_DEPTH: usize = 4;
+
+/// `text` migrated to [`MANIFEST_VERSION`] and written out, or `None` when it
+/// is already current. The rewrite has no comments: annals writes the tree.
+pub fn upgrade_manifest(text: &str, source: &Path) -> Result<Option<String>, IoError> {
+    let upgraded = loader()
+        .upgrade(
+            Some(&source.display().to_string()),
+            text,
+            UPGRADE_FLOW_DEPTH,
+        )
+        .map_err(|e| parse_error(source, e))?;
+    if let Some(text) = &upgraded {
+        // The rewrite must load as written, or it is not written at all.
+        load_manifest(text, source)?;
+    }
+    Ok(upgraded)
+}
+
+/// The options each compiled-in backend declares, by backend id. Built by the
+/// CLI from every compiled-in backend (present this run or not), like
+/// [`crate::BackendSchemes`].
+pub type BackendOptionKeys = BTreeMap<String, Vec<String>>;
+
+/// Check every `backends` entry in `m` against the backends this build has: an
+/// unknown backend or an undeclared option is an error, never silently
+/// ignored. [`PACKAGE_OPTION`] is bosun's and always allowed. What a declared
+/// option's value means is the backend's to validate when it reads it.
+pub fn check_options(m: &Manifest, known: &BackendOptionKeys) -> Result<(), ManifestError> {
     let blocks = m.defaults.values().map(|b| ("defaults.install", b)).chain(
         m.packages
             .iter()
             .flat_map(|e| e.install.values().map(move |b| (e.name.as_str(), b))),
     );
     for (package, block) in blocks {
-        for (backend, settings) in &block.ext {
+        for (backend, options) in &block.backends {
             let allowed = known
                 .get(backend)
-                .ok_or_else(|| ManifestError::UnknownExtBackend {
+                .ok_or_else(|| ManifestError::UnknownBackend {
                     package: package.to_string(),
                     backend: backend.clone(),
                 })?;
-            if let Some(key) = settings
+            if let Some(key) = options
                 .keys()
-                .find(|k| k.as_str() != EXT_PACKAGE && !allowed.contains(k))
+                .find(|k| k.as_str() != PACKAGE_OPTION && !allowed.contains(k))
             {
-                return Err(ManifestError::UnknownExtKey {
+                return Err(ManifestError::UnknownOption {
                     package: package.to_string(),
                     backend: backend.clone(),
                     key: key.clone(),
-                    allowed: std::iter::once(EXT_PACKAGE)
+                    allowed: std::iter::once(PACKAGE_OPTION)
                         .chain(allowed.iter().map(String::as_str))
                         .collect::<Vec<_>>()
                         .join(", "),
@@ -380,7 +604,6 @@ pub fn check_ext(m: &Manifest, known: &BackendExtKeys) -> Result<(), ManifestErr
 #[derive(Serialize)]
 struct CanonManifest {
     version: u32,
-    targets: Vec<String>,
     defaults: BTreeMap<String, CanonBlock>,
     packages: Vec<CanonEntry>,
 }
@@ -395,12 +618,9 @@ struct CanonEntry {
 
 #[derive(Serialize)]
 struct CanonBlock {
-    backends: Vec<String>,
+    backends: Backends,
     package: Option<String>,
     spec: Option<String>,
-    // Omitted when empty, so manifests without it keep their hash.
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    ext: Ext,
 }
 
 fn canon_block(b: &InstallBlock) -> CanonBlock {
@@ -408,7 +628,6 @@ fn canon_block(b: &InstallBlock) -> CanonBlock {
         backends: b.backends.clone(),
         package: b.package.clone(),
         spec: b.spec.clone(),
-        ext: b.ext.clone(),
     }
 }
 
@@ -418,13 +637,12 @@ fn canon_selector_map(m: &BTreeMap<Selector, InstallBlock>) -> BTreeMap<String, 
         .collect()
 }
 
-/// A sha256 over a deterministic serialization of the parsed model (§4.5).
-/// Because it hashes the model (comments already stripped by annals), a
-/// comment-only edit does not change it.
+/// A sha256 over a deterministic serialization of the parsed model. Because
+/// it hashes the model (comments already stripped by annals, the backends a
+/// sorted map), a comment-only or reordering edit does not change it.
 pub fn manifest_hash(m: &Manifest) -> String {
     let canon = CanonManifest {
         version: m.version,
-        targets: m.targets.iter().map(Target::to_string).collect(),
         defaults: canon_selector_map(&m.defaults),
         packages: m
             .packages
@@ -447,10 +665,11 @@ pub fn manifest_hash(m: &Manifest) -> String {
 
 #[cfg(test)]
 mod tests {
+    use annals_yaml::versioned::Fixture;
+
     use super::*;
 
-    const SAMPLE: &str = r#"version: 1
-targets: [linux/amd64, linux/arm64]
+    const SAMPLE: &str = r#"version: 2
 defaults:
   install:
     linux: {backend: cargo}
@@ -460,6 +679,10 @@ packages:
     formerly: [fdfind]
     install:
       linux:debian: {backend: apt, package: fd-find, spec: ">=9|<10"}
+      windows:
+        backends:
+          scoop: {}
+          winget: {package: sharkdp.fd}
   - name: jq
     spec: "vers:deb/>=1.7.1|<1.7.2~"
 "#;
@@ -468,75 +691,395 @@ packages:
         load_manifest(text, Path::new("bosun.yaml")).unwrap()
     }
 
+    fn load_err(text: &str) -> String {
+        load_manifest(text, Path::new("bosun.yaml"))
+            .unwrap_err()
+            .to_string()
+    }
+
+    fn sel(s: &str) -> Selector {
+        s.parse().unwrap()
+    }
+
+    fn options(pairs: &[(&str, &str)]) -> Options {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    /// One package, `x`, with `install` written as given (indented under it).
+    fn with_install(install: &str) -> String {
+        format!("version: 2\npackages:\n  - name: x\n    install:{install}\n")
+    }
+
+    // --- the shapes ----------------------------------------------------------
+
     #[test]
-    fn loads_targets_defaults_and_packages() {
+    fn loads_defaults_and_packages() {
         let m = load(SAMPLE);
-        assert_eq!(m.version, 1);
-        assert_eq!(
-            m.targets,
-            vec![
-                "linux/amd64".parse().unwrap(),
-                "linux/arm64".parse().unwrap()
-            ]
-        );
+        assert_eq!(m.version, 2);
         assert_eq!(m.defaults.len(), 1);
         assert_eq!(m.packages.len(), 2);
         let fd = &m.packages[0];
         assert_eq!(fd.name, "fd");
         assert_eq!(fd.spec.as_deref(), Some("10.2.0"));
         assert_eq!(fd.formerly, vec!["fdfind"]);
-        let deb = &fd.install[&"linux:debian".parse::<Selector>().unwrap()];
-        assert_eq!(deb.backends, vec!["apt"]);
-        assert_eq!(deb.package.as_deref(), Some("fd-find"));
-        assert_eq!(deb.spec.as_deref(), Some(">=9|<10"));
-    }
-
-    #[test]
-    fn backends_accepts_scalar_or_sequence() {
-        let one =
-            "version: 1\npackages:\n  - name: x\n    install:\n      linux: {backend: cargo}\n";
-        let seq = "version: 1\npackages:\n  - name: x\n    install:\n      linux: {backends: [cargo, apt]}\n";
-        let sel = "linux".parse::<Selector>().unwrap();
-        assert_eq!(load(one).packages[0].install[&sel].backends, vec!["cargo"]);
         assert_eq!(
-            load(seq).packages[0].install[&sel].backends,
-            vec!["cargo", "apt"]
+            fd.install[&sel("linux:debian")].spec.as_deref(),
+            Some(">=9|<10")
         );
     }
 
     #[test]
-    fn backends_order_changes_the_hash() {
-        // Preference order is semantic: a different order is a different manifest.
-        let ab = "version: 1\npackages:\n  - name: x\n    install:\n      linux: {backends: [cargo, apt]}\n";
-        let ba = "version: 1\npackages:\n  - name: x\n    install:\n      linux: {backends: [apt, cargo]}\n";
-        assert_ne!(manifest_hash(&load(ab)), manifest_hash(&load(ba)));
+    fn backend_shorthand_is_one_backend_with_its_package() {
+        let deb = &load(SAMPLE).packages[0].install[&sel("linux:debian")];
+        assert_eq!(
+            deb.backends,
+            Backends::from([("apt".to_string(), options(&[("package", "fd-find")]))])
+        );
+        assert_eq!(deb.package, None);
+    }
+
+    #[test]
+    fn backends_map_names_each_backend_with_its_options() {
+        let windows = &load(SAMPLE).packages[0].install[&sel("windows")];
+        assert_eq!(
+            windows.backends,
+            Backends::from([
+                ("scoop".to_string(), Options::new()),
+                ("winget".to_string(), options(&[("package", "sharkdp.fd")])),
+            ])
+        );
+    }
+
+    #[test]
+    fn a_backend_with_no_options_may_be_written_empty() {
+        let m = load(&with_install(
+            "\n      linux:\n        backends:\n          cargo:\n          apt: {}",
+        ));
+        let block = &m.packages[0].install[&sel("linux")];
+        assert_eq!(block.backends.len(), 2);
+        assert!(block.backends["cargo"].is_empty());
+    }
+
+    #[test]
+    fn a_package_without_a_backend_is_for_the_inherited_backend() {
+        let m = load(&with_install(" {windows: {package: sharkdp.fd}}"));
+        let block = &m.packages[0].install[&sel("windows")];
+        assert!(block.backends.is_empty());
+        assert_eq!(block.package.as_deref(), Some("sharkdp.fd"));
+    }
+
+    #[test]
+    fn the_any_selector_is_read() {
+        let m = load(&with_install(
+            " {any: {backend: npm}, windows: {backend: scoop}}",
+        ));
+        assert_eq!(m.packages[0].install.len(), 2);
+        assert!(m.packages[0].install[&Selector::Any]
+            .backends
+            .contains_key("npm"));
+    }
+
+    #[test]
+    fn a_bare_install_block_is_the_any_selector() {
+        let m = load(&with_install(" {backend: npm, spec: ^3}"));
+        let install = &m.packages[0].install;
+        assert_eq!(install.keys().collect::<Vec<_>>(), vec![&Selector::Any]);
+        assert!(install[&Selector::Any].backends.contains_key("npm"));
+        assert_eq!(install[&Selector::Any].spec.as_deref(), Some("^3"));
+    }
+
+    #[test]
+    fn a_bare_install_block_in_defaults_is_the_any_selector() {
+        let m = load("version: 2\ndefaults:\n  install: {backend: cargo}\n");
+        assert!(m.defaults[&Selector::Any].backends.contains_key("cargo"));
+    }
+
+    // --- refusals ------------------------------------------------------------
+
+    #[test]
+    fn a_bare_block_mixed_with_selectors_is_refused() {
+        let err = load_err(&with_install(" {backend: npm, windows: {backend: scoop}}"));
+        assert!(err.contains("mixes"), "message: {err}");
+    }
+
+    #[test]
+    fn backend_and_backends_together_are_refused() {
+        let err = load_err(&with_install(
+            " {linux: {backend: apt, backends: {cargo: {}}}}",
+        ));
+        assert!(
+            err.contains("both `backend` and `backends`"),
+            "message: {err}"
+        );
+    }
+
+    #[test]
+    fn a_shared_package_beside_a_backends_map_is_refused() {
+        let err = load_err(&with_install(
+            " {linux: {package: fd-find, backends: {apt: {}, cargo: {}}}}",
+        ));
+        assert!(err.contains("backends.<backend>.package"), "message: {err}");
+    }
+
+    #[test]
+    fn a_package_in_defaults_is_refused() {
+        let shorthand =
+            "version: 2\ndefaults:\n  install:\n    linux: {backend: apt, package: fd-find}\n";
+        let in_map = "version: 2\ndefaults:\n  install:\n    linux:\n      backends: {apt: {package: fd-find}}\n";
+        let bare = "version: 2\ndefaults:\n  install:\n    linux: {package: fd-find}\n";
+        for text in [shorthand, in_map, bare] {
+            let err = load_err(text);
+            assert!(err.contains("defaults.install"), "message: {err}");
+        }
+    }
+
+    #[test]
+    fn a_backends_list_is_refused_at_version_2() {
+        let err = load_err(&with_install(" {linux: {backends: [cargo, apt]}}"));
+        assert!(err.contains("backends must be a mapping"), "message: {err}");
+    }
+
+    #[test]
+    fn ext_and_targets_are_unknown_at_version_2() {
+        let ext = load_err(&with_install(" {linux: {backend: x, ext: {x: {a: b}}}}"));
+        assert!(ext.contains("\"ext\""), "message: {ext}");
+        let targets = load_err("version: 2\ntargets: [linux/amd64]\n");
+        assert!(targets.contains("\"targets\""), "message: {targets}");
+    }
+
+    #[test]
+    fn an_option_value_must_be_a_scalar() {
+        let err = load_err(&with_install(
+            " {linux: {backends: {github-release: {asset: [a, b]}}}}",
+        ));
+        assert!(
+            err.contains("backends.github-release.asset"),
+            "message: {err}"
+        );
+    }
+
+    #[test]
+    fn a_backends_entry_must_be_a_mapping() {
+        let err = load_err(&with_install(
+            " {linux: {backends: {github-release: a.tar.gz}}}",
+        ));
+        assert!(err.contains("backends.github-release"), "message: {err}");
     }
 
     #[test]
     fn unknown_key_is_rejected() {
-        // `policy` was removed; any unknown key is an error.
-        let text = "version: 1\npackages:\n  - name: fd\n    policy: exact\n";
-        let err = load_manifest(text, Path::new("bosun.yaml")).unwrap_err();
-        assert!(matches!(err, IoError::Parse { .. }));
-        assert!(format!("{err}").contains("policy"), "message: {err}");
+        let err = load_err("version: 2\npackages:\n  - name: fd\n    policy: exact\n");
+        assert!(err.contains("policy"), "message: {err}");
     }
 
     #[test]
     fn non_subset_yaml_is_refused_by_annals() {
-        let text = "version: 1\ntargets: &a [linux/amd64]\n";
-        assert!(matches!(
-            load_manifest(text, Path::new("bosun.yaml")),
-            Err(IoError::Parse { .. })
-        ));
+        assert!(load_manifest("version: 2\npackages: &a []\n", Path::new("m")).is_err());
     }
 
     #[test]
-    fn bad_target_and_selector_are_rejected() {
-        assert!(load_manifest("version: 1\ntargets: [not/an/arch]\n", Path::new("m")).is_err());
-        let bad_sel =
-            "version: 1\npackages:\n  - name: x\n    install:\n      plan9: {backend: cargo}\n";
-        assert!(load_manifest(bad_sel, Path::new("m")).is_err());
+    fn bad_selector_is_rejected() {
+        assert!(
+            load_manifest(&with_install(" {plan9: {backend: cargo}}"), Path::new("m")).is_err()
+        );
+        assert!(load_manifest(
+            &with_install(" {any:debian: {backend: cargo}}"),
+            Path::new("m")
+        )
+        .is_err());
     }
+
+    #[test]
+    fn a_newer_manifest_is_refused() {
+        let err = load_err("version: 3\n");
+        assert!(err.contains("newer"), "message: {err}");
+    }
+
+    // --- migration -----------------------------------------------------------
+
+    #[test]
+    fn version_1_manifests_migrate_to_version_2() {
+        loader().assert_fixtures(&[
+            Fixture {
+                name: "current",
+                input: SAMPLE,
+                expected: None,
+            },
+            Fixture {
+                name: "targets dropped, shorthand kept",
+                input: "version: 1\ntargets: [linux/amd64]\npackages:\n  - name: fd\n    install:\n      linux: {backend: apt, package: fd-find}\n",
+                expected: Some("version: 2\npackages:\n  - name: fd\n    install:\n      linux: {backend: apt, package: fd-find}\n"),
+            },
+            Fixture {
+                name: "a one-element list is the shorthand",
+                input: "version: 1\npackages:\n  - name: x\n    install:\n      linux: {backends: [cargo]}\n",
+                expected: Some("version: 2\npackages:\n  - name: x\n    install:\n      linux: {backend: cargo}\n"),
+            },
+            Fixture {
+                name: "a list becomes a map, the shared package copied to each",
+                input: "version: 1\npackages:\n  - name: fd\n    install:\n      linux: {backends: [apt, cargo], package: fd-find, spec: \"9\"}\n",
+                expected: Some("version: 2\npackages:\n  - name: fd\n    install:\n      linux:\n        backends: {apt: {package: fd-find}, cargo: {package: fd-find}}\n        spec: \"9\"\n"),
+            },
+            Fixture {
+                name: "ext folds into its backend, a per-backend package winning",
+                input: "version: 1\npackages:\n  - name: fd\n    install:\n      windows:\n        backends: [scoop, winget]\n        package: fd\n        ext: {winget: {package: sharkdp.fd}}\n",
+                expected: Some("version: 2\npackages:\n  - name: fd\n    install:\n      windows:\n        backends: {scoop: {package: fd}, winget: {package: sharkdp.fd}}\n"),
+            },
+            Fixture {
+                name: "ext on one backend needs the map",
+                input: "version: 1\npackages:\n  - name: gum\n    install:\n      linux:\n        backend: github-release\n        package: charmbracelet/gum\n        ext: {github-release: {asset: gum.tar.gz}}\n",
+                expected: Some("version: 2\npackages:\n  - name: gum\n    install:\n      linux:\n        backends: {github-release: {package: charmbracelet/gum, asset: gum.tar.gz}}\n"),
+            },
+            Fixture {
+                name: "ext for an inherited backend names that backend",
+                input: "version: 1\npackages:\n  - name: duf\n    install:\n      linux:\n        package: muesli/duf\n        ext: {github-release: {asset: duf.tar.gz}}\n",
+                expected: Some("version: 2\npackages:\n  - name: duf\n    install:\n      linux:\n        backends: {github-release: {package: muesli/duf, asset: duf.tar.gz}}\n"),
+            },
+            Fixture {
+                name: "ext for a backend the list doesn't name is dropped, as v1 ignored it",
+                input: "version: 1\npackages:\n  - name: x\n    install:\n      linux: {backend: cargo, ext: {github-release: {asset: a}}}\n",
+                expected: Some("version: 2\npackages:\n  - name: x\n    install:\n      linux: {backend: cargo}\n"),
+            },
+            Fixture {
+                name: "defaults migrate too",
+                input: "version: 1\ndefaults:\n  install:\n    darwin: {backends: [brew]}\n    linux: {ext: {github-release: {tag: \"v{{ version }}\"}}}\n",
+                expected: Some("version: 2\ndefaults:\n  install:\n    darwin: {backend: brew}\n    linux:\n      backends: {github-release: {tag: \"v{{ version }}\"}}\n"),
+            },
+        ]);
+    }
+
+    #[test]
+    fn a_version_1_manifest_loads_as_version_2() {
+        let m = load("version: 1\ntargets: [linux/amd64]\npackages:\n  - name: fd\n    install:\n      linux: {backends: [apt, cargo], package: fd-find}\n");
+        assert_eq!(m.version, 2);
+        let block = &m.packages[0].install[&sel("linux")];
+        assert_eq!(block.package_for("cargo"), Some("fd-find"));
+        assert_eq!(block.package_for("apt"), Some("fd-find"));
+    }
+
+    #[test]
+    fn a_manifest_without_a_version_is_too_old() {
+        let err = load_err("packages: []\n");
+        assert!(err.contains("older"), "message: {err}");
+    }
+
+    #[test]
+    fn manifest_version_reads_the_stamp_without_migrating() {
+        assert_eq!(
+            manifest_version("version: 1\n", Path::new("m")).ok(),
+            Some(1)
+        );
+        assert_eq!(
+            manifest_version("version: 2\n", Path::new("m")).ok(),
+            Some(2)
+        );
+        assert!(manifest_version("version: x\n", Path::new("m")).is_err());
+    }
+
+    #[test]
+    fn upgrade_rewrites_an_old_manifest_and_leaves_a_current_one() {
+        let old =
+            "version: 1\npackages:\n  - name: x\n    install:\n      linux: {backends: [cargo]}\n";
+        let upgraded = upgrade_manifest(old, Path::new("m")).unwrap().unwrap();
+        assert_eq!(
+            upgraded,
+            "version: 2\npackages:\n  - name: x\n    install:\n      linux: {backend: cargo}\n"
+        );
+        assert_eq!(upgrade_manifest(SAMPLE, Path::new("m")).unwrap(), None);
+    }
+
+    // --- option checking -----------------------------------------------------
+
+    fn known() -> BackendOptionKeys {
+        BackendOptionKeys::from([
+            ("apt".to_string(), vec![]),
+            ("github-release".to_string(), vec!["asset".to_string()]),
+        ])
+    }
+
+    const GUM: &str = r#"version: 2
+packages:
+  - name: gum
+    spec: ">=2.0.0|<3.0.0"
+    install:
+      linux:
+        backends:
+          github-release:
+            package: charmbracelet/gum
+            asset: "{{ binary }}_{{ version }}_{{ os | title }}_{{ arch_goreleaser }}.tar.gz"
+"#;
+
+    #[test]
+    fn options_are_kept_verbatim_per_backend_and_hashed() {
+        let m = load(GUM);
+        let options = &m.packages[0].install[&sel("linux")].backends["github-release"];
+        assert_eq!(
+            options["asset"],
+            "{{ binary }}_{{ version }}_{{ os | title }}_{{ arch_goreleaser }}.tar.gz"
+        );
+        let other = GUM.replace("os | title", "os");
+        assert_ne!(manifest_hash(&m), manifest_hash(&load(&other)));
+    }
+
+    #[test]
+    fn check_options_accepts_declared_keys_and_package() {
+        assert_eq!(check_options(&load(GUM), &known()), Ok(()));
+        let text = with_install(" {linux: {backends: {apt: {package: fd-find}, github-release: {package: sharkdp/fd}}}}");
+        assert_eq!(check_options(&load(&text), &known()), Ok(()));
+    }
+
+    #[test]
+    fn check_options_rejects_a_backend_this_build_does_not_know() {
+        let m = load(&GUM.replace("          github-release:", "          gihtub-release:"));
+        assert_eq!(
+            check_options(&m, &known()),
+            Err(ManifestError::UnknownBackend {
+                package: "gum".into(),
+                backend: "gihtub-release".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn check_options_rejects_a_key_the_backend_does_not_declare_and_lists_the_allowed() {
+        let m = load(&GUM.replace("            asset:", "            aset:"));
+        let err = check_options(&m, &known()).unwrap_err();
+        assert_eq!(
+            err,
+            ManifestError::UnknownOption {
+                package: "gum".into(),
+                backend: "github-release".into(),
+                key: "aset".into(),
+                allowed: "package, asset".into(),
+            }
+        );
+        assert!(
+            err.to_string()
+                .contains("in backends.github-release (allowed: package, asset)"),
+            "message: {err}"
+        );
+    }
+
+    #[test]
+    fn check_options_covers_defaults_install() {
+        let text =
+            "version: 2\ndefaults:\n  install:\n    linux:\n      backends: {apt: {asset: a}}\n";
+        let err = check_options(&load(text), &known()).unwrap_err();
+        assert_eq!(
+            err,
+            ManifestError::UnknownOption {
+                package: "defaults.install".into(),
+                backend: "apt".into(),
+                key: "asset".into(),
+                allowed: "package".into(),
+            }
+        );
+    }
+
+    // --- hash ----------------------------------------------------------------
 
     #[test]
     fn hash_ignores_comments_but_not_content() {
@@ -546,151 +1089,27 @@ packages:
             manifest_hash(&load(&with_comments)),
             "comment-only edits must not change the hash"
         );
-        // A real content change does change it.
         let changed = SAMPLE.replace("10.2.0", "10.3.0");
         assert_ne!(manifest_hash(&load(SAMPLE)), manifest_hash(&load(&changed)));
     }
 
     #[test]
-    fn hash_of_a_manifest_without_ext_is_unchanged() {
-        // The `ext` key must not move the hash of a manifest that doesn't use
-        // it, or every existing lock would read as stale.
-        assert_eq!(
-            manifest_hash(&load(SAMPLE)),
-            "sha256:28b16b8a3b8a2a7fd51534e1b2e60c1c212e49e91fea39ee7dd104007e6a37ee"
-        );
-    }
-
-    const GUM: &str = r#"version: 1
-packages:
-  - name: gum
-    spec: ">=2.0.0|<3.0.0"
-    install:
-      linux:
-        backend: github-release
-        package: charmbracelet/gum
-        ext:
-          github-release:
-            asset: "{{ binary }}_{{ version }}_{{ os | title }}_{{ arch_goreleaser }}.tar.gz"
-"#;
-
-    #[test]
-    fn ext_settings_are_kept_verbatim_per_backend_and_hashed() {
-        let m = load(GUM);
-        let sel = "linux".parse::<Selector>().unwrap();
-        let ext = &m.packages[0].install[&sel].ext;
-        assert_eq!(
-            ext["github-release"]["asset"],
-            "{{ binary }}_{{ version }}_{{ os | title }}_{{ arch_goreleaser }}.tar.gz"
-        );
-        let other = GUM.replace("os | title", "os");
-        assert_ne!(manifest_hash(&m), manifest_hash(&load(&other)));
-    }
-
-    #[test]
-    fn ext_in_defaults_install_is_read() {
-        let text = "version: 1\ndefaults:\n  install:\n    linux:\n      ext: {github-release: {asset: a.tar.gz}}\n";
-        let sel = "linux".parse::<Selector>().unwrap();
-        assert_eq!(
-            load(text).defaults[&sel].ext["github-release"]["asset"],
-            "a.tar.gz"
-        );
-    }
-
-    #[test]
-    fn asset_outside_ext_is_an_unknown_key() {
-        let text = "version: 1\npackages:\n  - name: x\n    install:\n      linux: {backend: github-release, asset: a.tar.gz}\n";
-        let err = load_manifest(text, Path::new("bosun.yaml")).unwrap_err();
-        assert!(format!("{err}").contains("\"asset\""), "message: {err}");
-    }
-
-    #[test]
-    fn an_ext_value_must_be_a_scalar() {
-        let text = "version: 1\npackages:\n  - name: x\n    install:\n      linux:\n        ext: {github-release: {asset: [a, b]}}\n";
-        let err = load_manifest(text, Path::new("bosun.yaml")).unwrap_err();
-        assert!(
-            format!("{err}").contains("ext.github-release.asset"),
-            "message: {err}"
-        );
-    }
-
-    #[test]
-    fn an_ext_section_must_be_a_mapping() {
-        let text = "version: 1\npackages:\n  - name: x\n    install:\n      linux:\n        ext: {github-release: a.tar.gz}\n";
-        let err = load_manifest(text, Path::new("bosun.yaml")).unwrap_err();
-        assert!(
-            format!("{err}").contains("ext.github-release"),
-            "message: {err}"
-        );
-    }
-
-    fn known() -> BackendExtKeys {
-        BackendExtKeys::from([
-            ("apt".to_string(), vec![]),
-            ("github-release".to_string(), vec!["asset".to_string()]),
-        ])
-    }
-
-    #[test]
-    fn check_ext_accepts_declared_keys() {
-        assert_eq!(check_ext(&load(GUM), &known()), Ok(()));
-    }
-
-    #[test]
-    fn check_ext_rejects_a_backend_this_build_does_not_know() {
-        let m = load(&GUM.replace("          github-release:", "          gihtub-release:"));
-        assert_eq!(
-            check_ext(&m, &known()),
-            Err(ManifestError::UnknownExtBackend {
-                package: "gum".into(),
-                backend: "gihtub-release".into(),
-            })
-        );
-    }
-
-    #[test]
-    fn check_ext_rejects_a_key_the_backend_does_not_declare_and_lists_the_allowed() {
-        let m = load(&GUM.replace("            asset:", "            aset:"));
-        let err = check_ext(&m, &known()).unwrap_err();
-        assert_eq!(
-            err,
-            ManifestError::UnknownExtKey {
-                package: "gum".into(),
-                backend: "github-release".into(),
-                key: "aset".into(),
-                allowed: "package, asset".into(),
-            }
-        );
-        assert!(err.to_string().contains("asset"), "message: {err}");
-    }
-
-    #[test]
-    fn check_ext_accepts_package_for_every_backend() {
-        // `package` names the backend's own package id; it is bosun's key, not
-        // the backend's, so even a backend that declares no keys takes it.
-        let text = "version: 1\npackages:\n  - name: fd\n    install:\n      linux:\n        backends: [github-release, apt]\n        ext: {apt: {package: fd-find}, github-release: {package: sharkdp/fd}}\n";
-        assert_eq!(check_ext(&load(text), &known()), Ok(()));
-    }
-
-    #[test]
-    fn check_ext_covers_defaults_install() {
-        let text = "version: 1\ndefaults:\n  install:\n    linux:\n      ext: {apt: {asset: a}}\n";
-        let err = check_ext(&load(text), &known()).unwrap_err();
-        assert_eq!(
-            err,
-            ManifestError::UnknownExtKey {
-                package: "defaults.install".into(),
-                backend: "apt".into(),
-                key: "asset".into(),
-                allowed: "package".into(),
-            }
-        );
+    fn hash_ignores_how_the_backends_are_written() {
+        // The backends are a set: shorthand or map, any order, same manifest.
+        let shorthand = with_install(" {linux: {backend: apt, package: fd-find}}");
+        let map = with_install(" {linux: {backends: {apt: {package: fd-find}}}}");
+        let ab = with_install(" {linux: {backends: {apt: {}, cargo: {}}}}");
+        let ba = with_install(" {linux: {backends: {cargo: {}, apt: {}}}}");
+        assert_eq!(manifest_hash(&load(&shorthand)), manifest_hash(&load(&map)));
+        assert_eq!(manifest_hash(&load(&ab)), manifest_hash(&load(&ba)));
     }
 
     #[test]
     fn hash_is_sha256_prefixed() {
         assert!(manifest_hash(&load(SAMPLE)).starts_with("sha256:"));
     }
+
+    // --- diagnostics ---------------------------------------------------------
 
     #[test]
     fn diagnostic_codes_are_stable_per_variant() {

@@ -17,8 +17,7 @@
 //! A platform-independent backend (cargo, go, npm, …) resolves under the `any`
 //! target; every other backend under the current platform (§4.7). [`resolve`]
 //! covers only the targets resolved this run; [`merge_lock`] folds that into an
-//! existing multi-platform `bosun.lock` per target key, and [`check_targets`]
-//! reports declared targets that are missing or stale (`lock --check`).
+//! existing `bosun.lock` per target key.
 //!
 //! Where one install scope holds a package claimed by several manifests (§4.6),
 //! [`select_across_claims`] intersects every claim's vers set — refusing when
@@ -29,7 +28,7 @@ mod errmsg;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use bosun_core::manifest::{Ext, InstallBlock, Manifest, ManifestEntry, EXT_PACKAGE};
+use bosun_core::manifest::{Backends, InstallBlock, Manifest, ManifestEntry, PACKAGE_OPTION};
 use bosun_core::platform::{Arch, Distro, Os, Selector, Target};
 use bosun_core::record::{LockDocument, LockLeaf, LockPackage, Package, Placement, TargetLock};
 use bosun_core::spec::{SelectError, Spec, SpecError};
@@ -242,7 +241,7 @@ fn resolve_entry(
     let Some(chosen) = choose_backend(&block.backends, backends, preference) else {
         return Ok((
             Outcome::NotApplicable(NotApplicable::NoRegisteredBackend {
-                candidates: block.backends.iter().map(BackendId::new).collect(),
+                candidates: block.backends.keys().map(BackendId::new).collect(),
             }),
             None,
         ));
@@ -262,12 +261,12 @@ fn resolve_entry(
     })?;
     let native = block.package_for(chosen.id.as_str()).unwrap_or(&entry.name);
     let mut qualifiers = block
-        .ext
+        .backends
         .get(chosen.id.as_str())
         .cloned()
         .unwrap_or_default();
-    // The per-backend package is already the identity's name, not a setting.
-    qualifiers.remove(EXT_PACKAGE);
+    // The package is already the identity's name, not a qualifier.
+    qualifiers.remove(PACKAGE_OPTION);
     let purl = build_purl(&entry.name, &chosen.purl_type, native, qualifiers, host)?;
 
     // §4.7: platform-independent backends resolve under `any`.
@@ -347,25 +346,27 @@ fn effective_block(
         (None, None) => None,
         (Some(block), None) | (None, Some(block)) => Some(block),
         (Some(defaults), Some(entry)) => Some(InstallBlock {
-            backends: if entry.backends.is_empty() {
-                defaults.backends
-            } else {
-                entry.backends
-            },
+            backends: merge_backends(defaults.backends, entry.backends),
             package: entry.package.or(defaults.package),
             spec: entry.spec.or(defaults.spec),
-            ext: merge_ext(defaults.ext, entry.ext),
         }),
     }
 }
 
-/// `entry`'s ext settings over `defaults`', per backend and per key: a key the
-/// entry sets wins, the rest inherit.
-fn merge_ext(mut defaults: Ext, entry: Ext) -> Ext {
-    for (backend, settings) in entry {
-        defaults.entry(backend).or_default().extend(settings);
+/// The entry's backends, each inheriting its `defaults` options per key (an
+/// option the entry sets wins); the defaults' set when the entry names none.
+fn merge_backends(mut defaults: Backends, entry: Backends) -> Backends {
+    if entry.is_empty() {
+        return defaults;
     }
-    defaults
+    entry
+        .into_iter()
+        .map(|(backend, options)| {
+            let mut merged = defaults.remove(&backend).unwrap_or_default();
+            merged.extend(options);
+            (backend, merged)
+        })
+        .collect()
 }
 
 /// The most specific selector in `map` that applies to `host`, by the §5.4
@@ -380,8 +381,10 @@ fn most_specific(map: &BTreeMap<Selector, InstallBlock>, host: &Host<'_>) -> Opt
 /// How specifically `sel` applies to `host`: higher is more specific. `None`
 /// when it does not apply (wrong OS, or a distro family the host is not in).
 fn specificity(sel: &Selector, host: &Host<'_>) -> Option<u8> {
-    if sel.os() != host.os {
-        return None;
+    match sel.os() {
+        None => return Some(0), // any
+        Some(os) if os != host.os => return None,
+        Some(_) => {}
     }
     match sel.distro() {
         None => Some(1), // plain OS
@@ -398,19 +401,20 @@ fn specificity(sel: &Selector, host: &Host<'_>) -> Option<u8> {
     }
 }
 
-/// Choose a backend among `candidates` (manifest order), restricted to the
-/// `registered` set, by installer preference (§5.3). A single explicit
-/// candidate is used as-is and never reordered; otherwise the registered
-/// candidate highest in `preference` wins, falling back to manifest order when
-/// none appear in the preference list. `None` when no candidate is registered.
+/// Choose a backend among `candidates` (a set: the manifest says which are
+/// acceptable, never in what order), restricted to the `registered` ones, by
+/// installer preference (§5.3). A single candidate is used as-is; otherwise
+/// the registered candidate highest in `preference` wins, falling back to the
+/// order backends are registered in when none is preferred. `None` when no
+/// candidate is registered.
 fn choose_backend<'b>(
-    candidates: &[String],
+    candidates: &Backends,
     registered: &'b [ResolvableBackend<'b>],
     preference: &[BackendId],
 ) -> Option<&'b ResolvableBackend<'b>> {
-    let available: Vec<&ResolvableBackend> = candidates
+    let available: Vec<&ResolvableBackend> = registered
         .iter()
-        .filter_map(|c| registered.iter().find(|b| b.id.as_str() == c))
+        .filter(|b| candidates.contains_key(b.id.as_str()))
         .collect();
     if candidates.len() == 1 {
         // A single explicit backend is never overridden by preference (§5.3).
@@ -440,11 +444,10 @@ fn choose_backend<'b>(
 ///   name so `- name: ltk` with `package: owner/repo` selects the `ltk` binary.
 /// - anything else: `pkg:<type>/<name>` (cargo, generic, …).
 ///
-/// `qualifiers` are the chosen backend's `ext` settings, already narrowed to
-/// that backend and without its package, kept verbatim for the backend to read
-/// and validate (github-release's `asset` template). Another backend's section
-/// never reaches this identity. The qualifiers above are set after them, so an
-/// ext key can't replace one.
+/// `qualifiers` are the chosen backend's options, without its package, kept
+/// verbatim for the backend to read and validate (github-release's `asset`
+/// template). Another backend's options never reach this identity. The qualifiers above are set after them, so an
+/// option can't replace one.
 fn build_purl(
     name: &str,
     purl_type: &str,
@@ -689,57 +692,11 @@ pub fn merge_lock(existing: &LockDocument, fresh: &LockDocument) -> LockDocument
 
 /// `lock` without the packages `manifest` no longer lists, on every target
 /// (§4.5): a removed entry leaves the lock everywhere at once, not one
-/// platform's `bosun lock` at a time. Target headers are kept; whether a
-/// target is still fresh is [`check_targets`]'s to judge.
+/// platform's `bosun lock` at a time. Target headers are kept.
 pub fn retain_listed(mut lock: LockDocument, manifest: &Manifest) -> LockDocument {
     lock.packages
         .retain(|p| manifest.packages.iter().any(|e| e.name == p.name));
     lock
-}
-
-/// Whether a declared target is recorded in the lock and current (§4.5).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Freshness {
-    /// The target has no entry in the lock.
-    Missing,
-    /// The target is locked against a different manifest hash.
-    Stale,
-    /// The target is locked against the current manifest hash.
-    Fresh,
-}
-
-/// One declared target's freshness against the lock.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TargetFreshness {
-    /// The declared target.
-    pub target: Target,
-    /// Its freshness.
-    pub freshness: Freshness,
-}
-
-/// Report each declared target's freshness against `lock` (`lock --check`,
-/// §4.5): a target the lock omits is [`Freshness::Missing`]; one locked against
-/// a different `manifest_hash` is [`Freshness::Stale`]. The command treats any
-/// non-[`Freshness::Fresh`] target as a failure; this only classifies.
-pub fn check_targets(
-    declared: &[Target],
-    manifest_hash: &str,
-    lock: &LockDocument,
-) -> Vec<TargetFreshness> {
-    declared
-        .iter()
-        .map(|target| {
-            let freshness = match lock.targets.get(target) {
-                None => Freshness::Missing,
-                Some(header) if header.manifest_hash == manifest_hash => Freshness::Fresh,
-                Some(_) => Freshness::Stale,
-            };
-            TargetFreshness {
-                target: *target,
-                freshness,
-            }
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -747,6 +704,7 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
+    use bosun_core::manifest::Options;
     use bosun_core::version::Scheme;
 
     /// An index that returns a fixed version list and records the last query.
@@ -796,15 +754,17 @@ mod tests {
 
     fn block(backends: &[&str], package: Option<&str>, spec: Option<&str>) -> InstallBlock {
         InstallBlock {
-            backends: backends.iter().map(|s| s.to_string()).collect(),
+            backends: backends
+                .iter()
+                .map(|s| (s.to_string(), Options::new()))
+                .collect(),
             package: package.map(str::to_string),
             spec: spec.map(str::to_string),
-            ext: Default::default(),
         }
     }
 
-    fn with_ext(mut b: InstallBlock, backend: &str, key: &str, value: &str) -> InstallBlock {
-        b.ext
+    fn with_option(mut b: InstallBlock, backend: &str, key: &str, value: &str) -> InstallBlock {
+        b.backends
             .entry(backend.to_string())
             .or_default()
             .insert(key.to_string(), value.to_string());
@@ -812,7 +772,7 @@ mod tests {
     }
 
     fn with_asset(b: InstallBlock, asset: &str) -> InstallBlock {
-        with_ext(b, "github-release", "asset", asset)
+        with_option(b, "github-release", "asset", asset)
     }
 
     fn entry(name: &str, spec: Option<&str>, install: &[(&str, InstallBlock)]) -> ManifestEntry {
@@ -827,7 +787,6 @@ mod tests {
     fn manifest(defaults: &[(&str, InstallBlock)], packages: Vec<ManifestEntry>) -> Manifest {
         Manifest {
             version: 1,
-            targets: Vec::new(),
             defaults: defaults.iter().map(|(s, b)| (sel(s), b.clone())).collect(),
             packages,
         }
@@ -1082,7 +1041,7 @@ mod tests {
             arch: Arch::Amd64,
             distro: None,
         };
-        let defaults = with_ext(
+        let defaults = with_option(
             with_asset(block(&["github-release"], None, None), "default.tar.gz"),
             "github-release",
             "tag",
@@ -1123,7 +1082,7 @@ mod tests {
                 Some(">=0.8.0"),
                 &[(
                     "linux",
-                    with_ext(block(&["cargo"], None, None), "cargo", "features", "x"),
+                    with_option(block(&["cargo"], None, None), "cargo", "features", "x"),
                 )],
             )],
         );
@@ -1134,10 +1093,10 @@ mod tests {
         assert_eq!(queried.purl.to_string(), "pkg:cargo/duf?features=x");
     }
 
-    /// `backends: [github-release, cargo]` with a shared `package` and cargo's
-    /// own under `ext.cargo.package`.
+    /// `github-release` and `cargo` both acceptable, a shared `package`, and
+    /// cargo's own under `backends.cargo.package`.
     fn fallback_with_per_backend_package() -> Manifest {
-        let b = with_ext(
+        let b = with_option(
             block(&["github-release", "cargo"], Some("muesli/duf"), None),
             "cargo",
             "package",
@@ -1199,7 +1158,7 @@ mod tests {
             arch: Arch::Amd64,
             distro: None,
         };
-        let b = with_ext(block(&["cargo"], None, None), "cargo", "package", "duf-cli");
+        let b = with_option(block(&["cargo"], None, None), "cargo", "package", "duf-cli");
         let m = manifest(&[], vec![entry("duf", Some(">=0.8.0"), &[("linux", b)])]);
 
         resolve(&m, "sha256:h", &host, &[cargo_backend(&index)], &[]).unwrap();
@@ -1323,11 +1282,17 @@ mod tests {
             )],
         );
 
-        // No preference: manifest order wins → apt.
+        // No preference: the order the backends are registered in → apt.
         let default = resolve(&m, "h", &host, &backends, &[]).unwrap();
         assert!(matches!(
             &default.outcomes[0].outcome,
             Outcome::Resolved { backend, .. } if *backend == BackendId::new("apt")
+        ));
+        let swapped = [cargo_backend(&cargo), deb_backend(&apt)];
+        let default = resolve(&m, "h", &host, &swapped, &[]).unwrap();
+        assert!(matches!(
+            &default.outcomes[0].outcome,
+            Outcome::Resolved { backend, .. } if *backend == BackendId::new("cargo")
         ));
 
         // Preference for cargo reorders → cargo.
@@ -1363,6 +1328,128 @@ mod tests {
             &r.outcomes[0].outcome,
             Outcome::Resolved { backend, .. } if *backend == BackendId::new("apt")
         ));
+    }
+
+    #[test]
+    fn the_any_selector_applies_on_every_os() {
+        let index = FakeIndex::new(Scheme::Semver, &["1.0.0"]);
+        let m = manifest(
+            &[],
+            vec![entry(
+                "fd",
+                Some(">=1.0.0"),
+                &[("any", block(&["cargo"], None, None))],
+            )],
+        );
+        for os in [Os::Linux, Os::Macos, Os::Windows] {
+            let host = Host {
+                os,
+                arch: Arch::Amd64,
+                distro: None,
+            };
+            let r = resolve(&m, "h", &host, &[cargo_backend(&index)], &[]).unwrap();
+            assert!(
+                matches!(&r.outcomes[0].outcome, Outcome::Resolved { .. }),
+                "{os}: {:?}",
+                r.outcomes[0].outcome
+            );
+        }
+    }
+
+    #[test]
+    fn an_os_selector_beats_any() {
+        let apt = FakeIndex::new(Scheme::Debian, &["1.0.0"]);
+        let cargo = FakeIndex::new(Scheme::Semver, &["1.0.0"]);
+        let backends = [deb_backend(&apt), cargo_backend(&cargo)];
+        let distro = debian();
+        let host = Host {
+            os: Os::Linux,
+            arch: Arch::Amd64,
+            distro: Some(&distro),
+        };
+        let m = manifest(
+            &[],
+            vec![entry(
+                "fd",
+                Some(">=1.0.0"),
+                &[
+                    ("any", block(&["cargo"], None, None)),
+                    ("linux", block(&["apt"], None, None)),
+                ],
+            )],
+        );
+
+        let r = resolve(&m, "h", &host, &backends, &[]).unwrap();
+        assert!(matches!(
+            &r.outcomes[0].outcome,
+            Outcome::Resolved { backend, .. } if *backend == BackendId::new("apt")
+        ));
+    }
+
+    #[test]
+    fn an_entrys_any_block_beats_a_defaults_os_block() {
+        // Entry fields win over defaults, whatever the selectors: `prettier`
+        // asks for npm everywhere, so a defaults `linux: apt` doesn't apply.
+        let apt = FakeIndex::new(Scheme::Debian, &["1.0.0"]);
+        let cargo = FakeIndex::new(Scheme::Semver, &["1.0.0"]);
+        let backends = [deb_backend(&apt), cargo_backend(&cargo)];
+        let distro = debian();
+        let host = Host {
+            os: Os::Linux,
+            arch: Arch::Amd64,
+            distro: Some(&distro),
+        };
+        let m = manifest(
+            &[("linux", block(&["apt"], None, None))],
+            vec![entry(
+                "fd",
+                Some(">=1.0.0"),
+                &[("any", block(&["cargo"], None, None))],
+            )],
+        );
+
+        let r = resolve(&m, "h", &host, &backends, &[]).unwrap();
+        assert!(matches!(
+            &r.outcomes[0].outcome,
+            Outcome::Resolved { backend, .. } if *backend == BackendId::new("cargo")
+        ));
+    }
+
+    #[test]
+    fn a_named_backend_inherits_its_defaults_options_per_key() {
+        let index = FakeIndex::new(Scheme::Semver, &["0.8.1"]);
+        let host = Host {
+            os: Os::Linux,
+            arch: Arch::Amd64,
+            distro: None,
+        };
+        // defaults: github-release's tag template; the entry names github-release
+        // with its own asset and package.
+        let defaults = with_option(
+            block(&[], None, None),
+            "github-release",
+            "tag",
+            "v{{ version }}",
+        );
+        let own = with_option(
+            with_asset(block(&[], None, None), "duf.tar.gz"),
+            "github-release",
+            "package",
+            "muesli/duf",
+        );
+        let m = manifest(
+            &[("linux", defaults)],
+            vec![entry("duf", Some(">=0.8.0"), &[("linux", own)])],
+        );
+
+        resolve(&m, "sha256:h", &host, &[github_backend(&index)], &[]).unwrap();
+
+        let (queried, _) = index.last.borrow().clone().unwrap();
+        assert_eq!(queried.purl.name(), "duf");
+        let q = queried.purl.qualifiers();
+        assert_eq!(q.get("asset").map(String::as_str), Some("duf.tar.gz"));
+        assert_eq!(q.get("tag").map(String::as_str), Some("v{{ version }}"));
+        assert_eq!(q.get("package"), None);
     }
 
     #[test]
@@ -1902,28 +1989,5 @@ mod tests {
         assert!(merged.packages.iter().any(|p| p.name == "linux-tool"));
         assert_eq!(merged.targets[&DARWIN].manifest_hash, "h-mac");
         assert_eq!(merged.targets[&AMD64].manifest_hash, "h-new");
-    }
-
-    #[test]
-    fn check_targets_flags_missing_and_stale_against_the_current_hash() {
-        let lock = lock_doc(&[(AMD64, "cur"), (ARM64, "old")], vec![]);
-        let report = check_targets(&[AMD64, ARM64, DARWIN], "cur", &lock);
-        assert_eq!(
-            report,
-            vec![
-                TargetFreshness {
-                    target: AMD64,
-                    freshness: Freshness::Fresh,
-                },
-                TargetFreshness {
-                    target: ARM64,
-                    freshness: Freshness::Stale,
-                },
-                TargetFreshness {
-                    target: DARWIN,
-                    freshness: Freshness::Missing,
-                },
-            ]
-        );
     }
 }

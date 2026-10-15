@@ -1,5 +1,5 @@
 //! Asset-name templates: the `asset` qualifier (from the manifest's
-//! `ext.github-release.asset`) is a minijinja template rendered against a
+//! `backends.github-release.asset`) is a minijinja template rendered against a
 //! fixed set of precomputed variables, so one manifest line names the right
 //! archive for each host.
 //!

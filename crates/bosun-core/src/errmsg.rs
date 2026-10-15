@@ -40,4 +40,4 @@ pub const PLATFORM_UNKNOWN_ARCH: &str = "unknown architecture";
 /// A target string not of the form `os/arch` (or the literal `any`).
 pub const PLATFORM_INVALID_TARGET: &str = "invalid target (expected os/arch or any)";
 /// A selector string not of the form `os` or `os:distro`.
-pub const PLATFORM_INVALID_SELECTOR: &str = "invalid selector (expected os or os:distro)";
+pub const PLATFORM_INVALID_SELECTOR: &str = "invalid selector (expected any, os or os:distro)";

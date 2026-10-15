@@ -2,7 +2,7 @@
   "lockfileVersion": 1,
   "targets": {
     "linux/amd64": {
-      "manifestHash": "sha256:651cf728a4b5e500c6c50495a79a056fbf46e3cf5a4234f6c7c97cf853329d44"
+      "manifestHash": "sha256:c2814ee50f646020c0bef35b1eaab7c82d01f659f673c3f13439becf139929b1"
     }
   },
   "packages": [
