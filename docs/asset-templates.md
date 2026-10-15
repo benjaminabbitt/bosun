@@ -110,6 +110,29 @@ release assets spell it: `{{ binary }}_{{ version }}_{{ os }}_{{ arch }}.zip` fi
 `tool_1.2.0_windows_amd64.zip`, and bosun looks for `tool.exe` inside it. A release that
 ships the `.exe` itself is installed as it is.
 
+## Windows installers: github-installer
+
+`github-installer` runs the `.msi` or `.exe` installer a release attaches, machine-wide (from
+an Administrator terminal). It needs `asset` and `display_name`, the program's name in
+Windows' installed-programs list (end it with `*` to match a name that includes its
+version). An `.exe` also needs `silent_args`, since installers disagree on them (NSIS `/S`,
+Inno Setup `/VERYSILENT /SUPPRESSMSGBOXES`); an uninstaller without a quiet form takes
+`uninstall_args`.
+
+```yaml
+- name: app
+  spec: ">=2.0.0|<3.0.0"
+  install:
+    windows:
+      backend: github-installer
+      package: owner/app
+      ext:
+        github-installer:
+          asset: "{{ binary }}-setup-{{ version }}.exe"
+          display_name: "App*"
+          silent_args: "/VERYSILENT /SUPPRESSMSGBOXES"
+```
+
 ## OS packages from a release: github-deb and github-rpm
 
 `github-deb` and `github-rpm` install the `.deb` or `.rpm` a release attaches, through

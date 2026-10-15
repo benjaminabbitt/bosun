@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use bosun_apply::{ApplyReport, Driver, HostApplier, Plan};
 use bosun_backends::{
-    AptFactory, CargoFactory, ChocoFactory, GithubPackageFactory, GithubReleaseFactory,
-    PackageKind, ScoopFactory, WingetFactory,
+    AptFactory, CargoFactory, ChocoFactory, GithubInstallerFactory, GithubPackageFactory,
+    GithubReleaseFactory, PackageKind, ScoopFactory, WingetFactory,
 };
 use bosun_core::vers::scheme_for_type;
 use bosun_core::version::Scheme;
@@ -237,9 +237,17 @@ fn backend_schemes(backends: &[BackendEntry]) -> bosun_io::BackendSchemes {
     )
 }
 
-/// Where system-scope backends cache downloads (github-deb, github-rpm):
-/// root-owned, beside the other package caches.
-const SYSTEM_CACHE: &str = "/var/cache/bosun";
+/// Where system-scope backends cache downloads (github-deb, github-rpm,
+/// github-installer): `/var/cache/bosun`, beside the other package caches;
+/// on Windows `%ProgramData%\bosun\cache`.
+fn system_cache() -> PathBuf {
+    if cfg!(windows) {
+        let data = std::env::var_os("ProgramData").unwrap_or_else(|| r"C:\ProgramData".into());
+        PathBuf::from(data).join("bosun").join("cache")
+    } else {
+        PathBuf::from("/var/cache/bosun")
+    }
+}
 
 /// Every compiled-in backend factory, built (not probed). The schemes map is
 /// taken from these so a backend absent this run is still known (§6).
@@ -255,7 +263,7 @@ fn compiled_in_factories(
             kind,
             runner.clone(),
             fetcher.clone(),
-            PathBuf::from(SYSTEM_CACHE),
+            system_cache(),
             os,
             arch,
         )) as Box<dyn BackendFactory>
@@ -274,6 +282,13 @@ fn compiled_in_factories(
         Box::new(WingetFactory::new(runner.clone())),
         Box::new(ScoopFactory::new(runner.clone())),
         Box::new(ChocoFactory::new(runner.clone())),
+        Box::new(GithubInstallerFactory::new(
+            runner.clone(),
+            fetcher.clone(),
+            system_cache(),
+            os,
+            arch,
+        )),
     ]
 }
 

@@ -34,3 +34,9 @@ pub const NOT_A_DEB: &str = "not a .deb package";
 
 /// The asset an OS-package backend was pointed at is not its kind of package.
 pub const NOT_AN_RPM: &str = "not an .rpm package";
+
+/// github-installer was not given a setting it needs.
+pub const INSTALLER_NEEDS: &str = "github-installer needs";
+
+/// The asset github-installer was pointed at is not an installer.
+pub const NOT_AN_INSTALLER: &str = "not an .msi or .exe installer";
