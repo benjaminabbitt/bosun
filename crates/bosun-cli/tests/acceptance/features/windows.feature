@@ -69,3 +69,42 @@ Feature: github-release on Windows
     When I run `bosun --format text install . --plan`
     Then it succeeds
     And it says "not applicable"
+
+  Scenario: winget installs the exact version and pins it
+    Given winget 1.9.25200 is available
+    And winget publishes sharkdp.fd 10.1.0, 10.2.0
+    And the manifest:
+      """
+      version: 1
+      targets: [windows/amd64]
+      packages:
+        - name: fd
+          spec: ">=10.0.0|<11.0.0"
+          install:
+            windows: {backend: winget, package: sharkdp.fd}
+      """
+    When I run `bosun --format json install . --plan`
+    Then it says "install"
+    And it says "hold"
+    When I run `bosun install . --yes`
+    Then it succeeds
+    And bosun has recorded fd 10.2.0
+
+  Scenario: choco installs machine-wide, so it needs an Administrator terminal
+    Given choco 2.4.3 is available
+    And choco publishes jq 1.8.1
+    And the manifest:
+      """
+      version: 1
+      targets: [windows/amd64]
+      packages:
+        - name: jq
+          spec: ">=1.8.0"
+          install:
+            windows: {backend: choco}
+      """
+    When I run `bosun --format text install . --yes`
+    Then it fails
+    And it reports "open a terminal as Administrator"
+    And bosun has recorded nothing about jq
+

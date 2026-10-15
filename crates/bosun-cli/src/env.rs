@@ -12,7 +12,8 @@ use std::sync::Arc;
 
 use bosun_apply::{ApplyReport, Driver, HostApplier, Plan};
 use bosun_backends::{
-    AptFactory, CargoFactory, GithubPackageFactory, GithubReleaseFactory, PackageKind,
+    AptFactory, CargoFactory, ChocoFactory, GithubPackageFactory, GithubReleaseFactory,
+    PackageKind, ScoopFactory, WingetFactory,
 };
 use bosun_core::vers::scheme_for_type;
 use bosun_core::version::Scheme;
@@ -270,6 +271,9 @@ fn compiled_in_factories(
         )),
         package(PackageKind::Deb),
         package(PackageKind::Rpm),
+        Box::new(WingetFactory::new(runner.clone())),
+        Box::new(ScoopFactory::new(runner.clone())),
+        Box::new(ChocoFactory::new(runner.clone())),
     ]
 }
 

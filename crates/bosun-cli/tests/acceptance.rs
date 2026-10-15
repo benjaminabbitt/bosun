@@ -70,6 +70,20 @@ fn known_backend(id: &str) -> BackendMeta {
             scope: "user",
             supports_hold: false,
         },
+        "winget" | "scoop" => BackendMeta {
+            purl_type: if id == "winget" { "winget" } else { "scoop" },
+            vers_type: "generic",
+            platform_independent: false,
+            scope: "user",
+            supports_hold: true,
+        },
+        "choco" => BackendMeta {
+            purl_type: "choco",
+            vers_type: "generic",
+            platform_independent: false,
+            scope: "system",
+            supports_hold: true,
+        },
         "github-deb" | "github-rpm" => BackendMeta {
             purl_type: "github",
             vers_type: "semver",

@@ -1264,6 +1264,7 @@ scenario in the real-backend tier (skipped for compile time).
 | M2-2 | github-release archive formats (tar gz/xz/zst/bz2, zip, single compressed, raw); `tag` template | landed |
 | M2-3 | github-deb / github-rpm: a release's `.deb` / `.rpm` through apt-get / dnf, system scope, cache `/var/cache/bosun`; presence verified with dpkg-query / rpm -q; apt holds, dnf doesn't claim one | landed hermetically; real apt/dnf run not done (github-rpm unverified: no Fedora host) |
 | M3-1 | WindowsMachine (Administrator = High/System integrity label in `whoami /groups`; state `%ProgramData%` / `%LOCALAPPDATA%`, config `%APPDATA%`); github-release on Windows (`<binary>.exe` into `%USERPROFILE%\.local\bin`, `;`-separated case-insensitive PATH check); `Step::Remove` replaces `rm -f`; `just check-win` (zig cc as MinGW) | landed hermetically; workspace type-checks for x86_64-pc-windows-gnu; **unverified on a real Windows host** |
+| M3-2 | winget (user), scoop (user), choco (system) backends; probe only on Windows | landed hermetically (argv and output parsing unit-tested, fixture scenarios); **unverified on a real Windows host** |
 
 **First real-host smoke run (2026-10-14, release build, Debian 13, read-only `--plan` and
 `lock` in a scratch dir).** `backends` found apt 3.0.3, cargo 1.96.1 and github-release; jq
@@ -1347,6 +1348,24 @@ Command-level reference for the four researched backends. (apt, dnf, uv, npm.)
   lock; errors on mismatch; never writes package.json/lock; wipes node_modules).
 - Install exact: `npm i <name>@<version>`; downgrade is just an install of a lower version.
 - Global tools: `npm i -g pkg@version` — **no lockfile, no durable pin** (weakest tier).
+
+### winget, scoop, Chocolatey (Windows; built 2026-10-15, unverified on a real host)
+
+- **winget** (user scope): versions `winget show --id <id> --exact --versions`; install
+  `winget install --id <id> --exact --version <v> --silent --accept-package-agreements`;
+  installed version = the word after the id in `winget list --id <id> --exact`; hold = a
+  gating pin `winget pin add --id <id> --exact --version <v> --force`; downgrade = install with
+  `--force`; every call adds `--accept-source-agreements --disable-interactivity`. A
+  machine-wide installer raises its own UAC prompt. Uninstall leaves the pin (`pin remove`
+  fails when there is none). Sources (URL + type) are configured outside bosun.
+- **scoop** (user scope, run as `scoop.cmd`): the bucket manifest's `version` (`scoop cat`)
+  is the only version listed; install `scoop install <bucket/app>@<v>`; installed version from
+  `scoop list <app>`; hold `scoop hold`; no downgrade (the bucket has no older version);
+  buckets are sources (`scoop bucket add`).
+- **Chocolatey** (system scope): versions `choco search <id> --exact --all-versions
+  --limit-output` (`id|version`); installed `choco list <id> --exact --limit-output` (local
+  only since v2); install `choco install <id> --version <v> -y --no-progress`; hold
+  `choco pin add --name=<id> --version=<v>`; downgrade adds `--allow-downgrade`.
 
 ### Cross-cutting
 - True lockfiles: only uv (`uv.lock`) and npm (`package-lock.json`). apt/dnf = policy/list only;
