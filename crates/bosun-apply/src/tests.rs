@@ -6,7 +6,8 @@ use std::path::PathBuf;
 use bosun_core::record::{Package, Placement, StateDocument, StateLeaf};
 use bosun_core::version::Scheme;
 use bosun_core::{
-    Arch, Capabilities, Distro, HoldSupport, Installed, Origin, Os, Ref, Source, Target, Version,
+    Arch, Capabilities, Checksum, Distro, HoldSupport, Installed, Origin, Os, Ref, Source, Target,
+    Version,
 };
 use bosun_ports::step::{Step, Steps};
 use bosun_ports::{Elevation, Installer, Machine, Privilege, User};
@@ -125,7 +126,87 @@ fn managed<'a>(
         claims,
         current,
         installer,
+        checksum: None,
     }
+}
+
+/// An installer whose install is one download carrying `sha256` (`None`: the
+/// release published none).
+struct FetchInstaller {
+    sha256: Option<&'static str>,
+}
+
+impl Installer for FetchInstaller {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            supports_exact_version: true,
+            hold: HoldSupport::NotNeeded,
+            supports_downgrade: true,
+        }
+    }
+    fn scope(&self) -> Scope {
+        Scope::User
+    }
+    fn ensure_source(&self, _source: &Source) -> Result<Steps, PortError> {
+        Ok(Vec::new())
+    }
+    fn install_exact(&self, _pkg: &Ref, _version: &Version) -> Result<Steps, PortError> {
+        Ok(vec![Step::Fetch {
+            url: "https://dl/tool.tar.gz".to_string(),
+            sha256: self.sha256.map(str::to_string),
+            dest: PathBuf::from("/tmp/tool.tar.gz"),
+        }])
+    }
+    fn verify_installed(&self, _pkg: &Ref) -> Result<Installed, PortError> {
+        Ok(Installed::Absent)
+    }
+    fn hold(&self, _pkg: &Ref, _version: &Version) -> Result<Steps, PortError> {
+        Ok(Vec::new())
+    }
+    fn downgrade(&self, pkg: &Ref, version: &Version) -> Result<Steps, PortError> {
+        self.install_exact(pkg, version)
+    }
+    fn uninstall(&self, _pkg: &Ref) -> Result<Steps, PortError> {
+        Ok(Vec::new())
+    }
+}
+
+fn fetched_sha(plan: &Plan) -> Option<String> {
+    match &plan.actions[0].steps[0] {
+        Step::Fetch { sha256, .. } => sha256.clone(),
+        other => panic!("not a fetch: {other:?}"),
+    }
+}
+
+#[test]
+fn a_download_is_verified_against_the_checksum_the_lock_recorded() {
+    // Trust on first use: the release publishes none, the lock has one.
+    let installer = FetchInstaller { sha256: None };
+    let mut m = managed("tool", "1.0.0", Current::Absent, &installer, vec![]);
+    m.checksum = Some(Checksum("locked".to_string()));
+    let plan = build_install_plan(&[m], vec![]).unwrap();
+    assert_eq!(fetched_sha(&plan), Some("locked".to_string()));
+}
+
+#[test]
+fn the_locked_checksum_wins_over_one_published_since() {
+    let installer = FetchInstaller {
+        sha256: Some("published-now"),
+    };
+    let mut m = managed("tool", "1.0.0", Current::Absent, &installer, vec![]);
+    m.checksum = Some(Checksum("locked".to_string()));
+    let plan = build_install_plan(&[m], vec![]).unwrap();
+    assert_eq!(fetched_sha(&plan), Some("locked".to_string()));
+}
+
+#[test]
+fn without_a_locked_checksum_the_backends_own_stands() {
+    let installer = FetchInstaller {
+        sha256: Some("published"),
+    };
+    let m = managed("tool", "1.0.0", Current::Absent, &installer, vec![]);
+    let plan = build_install_plan(&[m], vec![]).unwrap();
+    assert_eq!(fetched_sha(&plan), Some("published".to_string()));
 }
 
 fn kinds(plan: &Plan) -> Vec<ActionKind> {
@@ -346,6 +427,7 @@ fn an_unsupported_hold_warns_and_skips_the_hold() {
         claims: vec![],
         current: Current::Absent,
         installer: &brew,
+        checksum: None,
     };
     let plan = build_install_plan(&[m], vec![]).unwrap();
     // The install still stands; the hold degrades to a warning (§5.2).
@@ -372,6 +454,7 @@ fn a_not_needed_hold_is_silent() {
         claims: vec![],
         current: Current::Absent,
         installer: &cargo,
+        checksum: None,
     };
     let plan = build_install_plan(&[m], vec![]).unwrap();
     assert_eq!(kinds(&plan), vec![ActionKind::Install]);
@@ -399,6 +482,7 @@ fn an_unsupported_downgrade_is_an_error_that_skips_the_action() {
             origin: Origin::Installed,
         },
         installer: &frozen,
+        checksum: None,
     };
     let plan = build_install_plan(&[m], vec![]).unwrap();
 
@@ -467,6 +551,7 @@ fn user_install_plan() -> Plan {
         claims: vec![],
         current: Current::Absent,
         installer: cargo,
+        checksum: None,
     };
     build_install_plan(&[m], vec![]).unwrap()
 }
@@ -522,6 +607,7 @@ fn a_mixed_plan_without_a_scope_is_refused() {
         claims: vec![],
         current: Current::Absent,
         installer: cargo,
+        checksum: None,
     };
     let plan = build_install_plan(&[sys, usr], vec![]).unwrap();
     let machine = FakeMachine {
@@ -1058,6 +1144,7 @@ fn apply_records_the_resolved_version_when_verify_has_none() {
         claims: vec![claim("/w/a", ">=0.6")],
         current: Current::Absent,
         installer: &gh,
+        checksum: None,
     };
     let plan = build_install_plan(&[m], vec![]).unwrap();
 
@@ -1125,6 +1212,7 @@ fn apply_isolates_a_failed_backend_and_continues_others() {
         claims: vec![],
         current: Current::Absent,
         installer: &apt,
+        checksum: None,
     };
     let ripgrep = Managed {
         name: "ripgrep".to_string(),
@@ -1135,6 +1223,7 @@ fn apply_isolates_a_failed_backend_and_continues_others() {
         claims: vec![],
         current: Current::Absent,
         installer: &cargo,
+        checksum: None,
     };
     let plan = build_install_plan(&[boom, ripgrep], vec![]).unwrap();
 
@@ -1367,6 +1456,7 @@ fn apply_checkpoints_each_confirmed_action_so_progress_survives_a_crash() {
         claims: vec![],
         current: Current::Absent,
         installer: &inst_a,
+        checksum: None,
     };
     let b = Managed {
         name: "B".to_string(),
@@ -1377,6 +1467,7 @@ fn apply_checkpoints_each_confirmed_action_so_progress_survives_a_crash() {
         claims: vec![],
         current: Current::Absent,
         installer: &inst_b,
+        checksum: None,
     };
     let plan = build_install_plan(&[a, b], vec![]).unwrap();
 

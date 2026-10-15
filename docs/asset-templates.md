@@ -216,7 +216,21 @@ Upper and lower case are the same (`RCLONE.ZIP` is a zip).
 
   Signature files (`.asc`, `.sig`, `.minisig`, `.sigstore.json`, `.pem`) are never read as
   sums. If the release publishes no checksum, or its sums file doesn't list the asset, bosun
-  installs anyway, prints a warning naming the repo and asset, and records no checksum.
+  trusts it on first use: `bosun lock` downloads the asset, records its sha256 in this
+  machine's lock and warns, naming the repo and asset. Every later install of that version is
+  verified against the recorded sha256, so an asset replaced on the release page fails to
+  install. `bosun upgrade` records afresh.
+- **Root or Administrator installs need consent.** `github-deb`, `github-rpm` and
+  `github-installer` install as root or Administrator, so a release that publishes no checksum
+  for their file is refused unless the entry allows it:
+
+  ```yaml
+  backends:
+    github-deb:
+      package: owner/tool
+      asset: "{{ binary }}_{{ version }}_{{ arch }}.deb"
+      unverified: allow    # this release publishes no checksum; trust it on first use
+  ```
 
 ## Open
 

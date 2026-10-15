@@ -462,6 +462,9 @@ fn release_archive(asset: &str, binary: &str, dir: Option<&str>) -> Vec<u8> {
 #[given(
     regex = r"^(\S+/\S+) (\S+) publishes (\S+\.(?:tar(?:\.\w+)?|zip)) with (\S+) (?:at its root|in (\S+)/)$"
 )]
+#[when(
+    regex = r"^(\S+/\S+) (\S+) publishes (\S+\.(?:tar(?:\.\w+)?|zip)) with (\S+) (?:at its root|in (\S+)/)$"
+)]
 fn release_publishes(
     world: &mut BosunWorld,
     repo: String,
@@ -472,7 +475,10 @@ fn release_publishes(
 ) {
     let dir = (!dir.is_empty()).then_some(dir.as_str());
     let archive = release_archive(&asset, &binary, dir);
-    world.release_mut(&repo, &tag).assets.push((asset, archive));
+    // Publishing an asset again replaces it, as re-uploading to a release does.
+    let assets = &mut world.release_mut(&repo, &tag).assets;
+    assets.retain(|(name, _)| *name != asset);
+    assets.push((asset, archive));
 }
 
 /// A release asset that is the binary itself, or the binary alone compressed
@@ -864,6 +870,15 @@ fn lock_pins(world: &mut BosunWorld, pkg: String, version: String) {
         lock_leaves(&doc)
             .any(|(name, leaf)| name == pkg.as_str() && leaf["resolved"] == version.as_str()),
         "want {pkg} {version} in the lock:\n{text}"
+    );
+}
+
+#[then(regex = r"^the lock records a checksum for (\S+)$")]
+fn lock_has_checksum(world: &mut BosunWorld, pkg: String) {
+    let (text, doc) = world.lock();
+    assert!(
+        lock_leaves(&doc).any(|(name, leaf)| name == pkg.as_str() && leaf["checksum"].is_string()),
+        "want a checksum for {pkg} in the lock:\n{text}"
     );
 }
 

@@ -320,21 +320,19 @@ fn resolve_entry(
             && available.contains(&leaf.resolved)
             && spec.range().contains(&leaf.resolved)
     });
-    let (version, checksum) = match kept {
-        Some(leaf) => (leaf.resolved.clone(), leaf.checksum.clone()),
-        // §12: record the backend's enforced checksum when it has one
-        // (github-release reads it from the release's checksums.txt; apt/cargo
-        // have none).
-        None => {
-            let checksum = chosen
-                .index
-                .checksum(&Ref::new(purl.clone()), &version, &target)
-                .map_err(|source| ResolveError::Query {
-                    name: entry.name.clone(),
-                    source,
-                })?;
-            (version, checksum)
-        }
+    let version = kept.map_or(version, |leaf| leaf.resolved.clone());
+    // §12: the checksum recorded for a kept pin stands; otherwise record the
+    // backend's (github-release: the published one, else the download's on
+    // first use; apt/cargo have none).
+    let checksum = match kept.and_then(|leaf| leaf.checksum.clone()) {
+        Some(recorded) => Some(recorded),
+        None => chosen
+            .index
+            .checksum(&Ref::new(purl.clone()), &version, &target)
+            .map_err(|source| ResolveError::Query {
+                name: entry.name.clone(),
+                source,
+            })?,
     };
 
     let package: LockPackage = Package {
@@ -1014,6 +1012,44 @@ mod tests {
         .unwrap();
         let leaf = &r.lock.packages[0].targets[&Target::Any];
         assert_eq!(leaf.checksum, Some(Checksum("sha256:pinned".into())));
+    }
+
+    /// An index that reports a checksum for every version.
+    struct SummedIndex(FakeIndex);
+    impl Index for SummedIndex {
+        fn refresh(&self) -> Result<(), PortError> {
+            Ok(())
+        }
+        fn query_available(&self, pkg: &Ref, target: &Target) -> Result<Vec<Version>, PortError> {
+            self.0.query_available(pkg, target)
+        }
+        fn checksum(
+            &self,
+            _pkg: &Ref,
+            version: &Version,
+            _target: &Target,
+        ) -> Result<Option<Checksum>, PortError> {
+            Ok(Some(Checksum(format!("sum-of-{}", version.as_str()))))
+        }
+    }
+
+    #[test]
+    fn a_kept_pin_with_no_recorded_checksum_gets_one() {
+        // A lock written before checksums were recorded for every release.
+        let index = SummedIndex(FakeIndex::new(Scheme::Semver, &["14.0.0", "14.1.1"]));
+        let locked = ripgrep_locked("pkg:cargo/ripgrep", "14.0.0", None);
+        let r = resolve_with_lock(
+            &ripgrep_manifest(">=14.0.0|<15.0.0", None),
+            "h",
+            &any_host(),
+            &[cargo_backend(&index)],
+            &[],
+            Some(&locked),
+        )
+        .unwrap();
+        let leaf = &r.lock.packages[0].targets[&Target::Any];
+        assert_eq!(leaf.resolved.as_str(), "14.0.0");
+        assert_eq!(leaf.checksum, Some(Checksum("sum-of-14.0.0".into())));
     }
 
     #[test]

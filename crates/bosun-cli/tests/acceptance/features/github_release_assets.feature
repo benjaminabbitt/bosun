@@ -29,7 +29,7 @@ Feature: github-release names the archive by template and finds the binary insid
     Then it succeeds
     And duf is installed from duf_0.8.1_linux_x86_64.tar.gz
     And bosun has recorded duf 0.8.1
-    And it does not warn "installing unverified"
+    And it does not warn "publishes no checksum"
     When I run `bosun uninstall . --yes`
     Then it succeeds
     And duf is not installed
@@ -61,7 +61,7 @@ Feature: github-release names the archive by template and finds the binary insid
     And gum is not installed
     And bosun has recorded nothing about gum
 
-  Scenario: a release that publishes no checksums installs with a warning
+  Scenario: a release that publishes no checksums installs, locking the sha256 it has now
     Given muesli/duf v0.8.1 publishes duf_0.8.1_linux_x86_64.tar.gz with duf at its root
     And the manifest:
       """
@@ -79,8 +79,31 @@ Feature: github-release names the archive by template and finds the binary insid
     When I run `bosun install . --yes`
     Then it succeeds
     And duf is installed from duf_0.8.1_linux_x86_64.tar.gz
-    And it warns "installing unverified"
+    And it warns "locking the sha256 it has now"
     And it warns "duf_0.8.1_linux_x86_64.tar.gz"
+    And the lock records a checksum for duf
+
+  Scenario: a release asset replaced after it was locked fails to install
+    Given muesli/duf v0.8.1 publishes duf_0.8.1_linux_x86_64.tar.gz with duf at its root
+    And the manifest:
+      """
+      version: 2
+      packages:
+        - name: duf
+          spec: ">=0.8.0|<0.9.0"
+          install:
+            linux:
+              backends:
+                github-release:
+                  package: muesli/duf
+                  asset: "{{ binary }}_{{ version }}_{{ os }}_{{ arch_goreleaser }}.tar.gz"
+      """
+    When I run `bosun lock .`
+    And muesli/duf v0.8.1 publishes duf_0.8.1_linux_x86_64.tar.gz with duf in duf_0.8.1/
+    And I run `bosun install . --yes`
+    Then it fails
+    And it reports "checksum"
+    And duf is not installed
 
   Scenario: a template naming an unknown variable installs nothing
     Given muesli/duf v0.8.1 publishes duf_0.8.1_linux_x86_64.tar.gz with duf at its root

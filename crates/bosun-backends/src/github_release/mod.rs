@@ -30,6 +30,7 @@ use bosun_ports::{
     ArchiveFormat, Backend, BackendFactory, HostInfo, HttpFetcher, HttpRequest, HttpResponse,
     Index, Installer, PortError, Probe, Step, Steps,
 };
+use sha2::{Digest, Sha256};
 use tracing::warn;
 
 use crate::{errmsg, logmsg};
@@ -189,6 +190,46 @@ impl ReleaseLookup {
         refusal: &str,
     ) -> Result<ReleaseFile, PortError> {
         self.0.release_file(pkg, version, None, accept, refusal)
+    }
+
+    /// The sha256 the lock records for `file`: the published one, else the
+    /// download's as it is now (trust on first use).
+    pub(crate) fn recorded_sha256(
+        &self,
+        pkg: &Ref,
+        file: &ReleaseFile,
+    ) -> Result<String, PortError> {
+        self.0.recorded_sha256(pkg, file)
+    }
+
+    /// For a backend that installs `file` as root or Administrator
+    /// (`backend`): a release without a published checksum is refused unless
+    /// the entry consents with `unverified: allow`. Only the first download
+    /// would be unverified; the lock pins its sha256 from then on.
+    pub(crate) fn require_verifiable(
+        pkg: &Ref,
+        file: &ReleaseFile,
+        backend: &str,
+    ) -> Result<(), PortError> {
+        let consent = pkg.purl.qualifiers().get("unverified").map(String::as_str);
+        match (&file.sha256, consent) {
+            (_, Some(other)) if other != "allow" => Err(PortError::Backend {
+                detail: format!(
+                    "{}: {} {other:?}",
+                    pkg.purl.native_id(),
+                    errmsg::UNVERIFIED_VALUE
+                ),
+            }),
+            (None, None) => Err(PortError::Backend {
+                detail: format!(
+                    "{}: {}: {}; to install it anyway, set backends.{backend}.unverified: allow",
+                    pkg.purl.native_id(),
+                    file.name,
+                    errmsg::UNVERIFIED_ELEVATED
+                ),
+            }),
+            _ => Ok(()),
+        }
     }
 
     /// The binary name, also the default OS package name: the `binary`
@@ -363,6 +404,28 @@ impl GithubReleaseBackend {
         Ok(None)
     }
 
+    /// The sha256 the lock records for `file`: the release's published one,
+    /// else (trust on first use) the sha256 of the file as it downloads now,
+    /// so a later install of this version fails if the asset was replaced.
+    fn recorded_sha256(&self, pkg: &Ref, file: &ReleaseFile) -> Result<String, PortError> {
+        if let Some(sha) = &file.sha256 {
+            return Ok(sha.clone());
+        }
+        let resp = self.fetcher.fetch(&HttpRequest::get(&file.url))?;
+        check_status(&file.url, &resp)?;
+        let sha: String = Sha256::digest(&resp.body)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        warn!(
+            message = logmsg::FIRST_USE_CHECKSUM,
+            repo = %pkg.purl.native_id(),
+            asset = %file.name,
+            sha256 = %sha,
+        );
+        Ok(sha)
+    }
+
     /// Resolve the archive for this host at `version` and its published
     /// sha256, when the release publishes one. Returns `(download_url,
     /// archive_name, format, sha256)`. Shared by `install_exact` (which
@@ -489,8 +552,9 @@ impl Index for GithubReleaseBackend {
         version: &Version,
         _target: &Target,
     ) -> Result<Option<Checksum>, PortError> {
-        let (_, _, _, sha256) = self.archive_and_checksum(pkg, version)?;
-        Ok(sha256.map(Checksum))
+        let (url, name, _, sha256) = self.archive_and_checksum(pkg, version)?;
+        let file = ReleaseFile { url, name, sha256 };
+        Ok(Some(Checksum(self.recorded_sha256(pkg, &file)?)))
     }
 }
 
@@ -1069,6 +1133,57 @@ mod tests {
         );
     }
 
+    /// o/tool v1.0.0 with the default-named archive and no sums file; the
+    /// archive's bytes are `body`.
+    fn unsummed_release(body: &[u8]) -> Arc<FakeHttpFetcher> {
+        let name = "tool_1.0.0_linux_amd64.tar.gz";
+        let release = serde_json::json!({
+            "tag_name": "v1.0.0",
+            "assets": [{"name": name, "browser_download_url": format!("https://dl/{name}")}],
+        });
+        Arc::new(
+            FakeHttpFetcher::new()
+                .with_body(
+                    "https://api.github.com/repos/o/tool/releases/tags/v1.0.0",
+                    release.to_string(),
+                )
+                .with_body(format!("https://dl/{name}"), body.to_vec()),
+        )
+    }
+
+    #[test]
+    fn checksum_of_a_release_without_sums_is_what_was_downloaded() {
+        // Trust on first use: the lock records the sha256 of the archive as
+        // it is now, so a later install of this version must match it.
+        let b = backend(unsummed_release(b"the archive"), PathBuf::from("/b"));
+        let got = b
+            .checksum(
+                &gh("pkg:github/o/tool?binary=tool"),
+                &sem("1.0.0"),
+                &"linux/amd64".parse().unwrap(),
+            )
+            .unwrap();
+        let want: String = Sha256::digest(b"the archive")
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(got, Some(Checksum(want)));
+    }
+
+    #[test]
+    fn install_of_a_release_without_sums_leaves_the_fetch_to_the_lock() {
+        // No published sha: the Fetch carries none, and the planner fills in the
+        // one the lock recorded.
+        let b = backend(unsummed_release(b"the archive"), PathBuf::from("/b"));
+        let steps = b
+            .install_exact(&gh("pkg:github/o/tool?binary=tool"), &sem("1.0.0"))
+            .unwrap();
+        assert!(
+            matches!(&steps[0], Step::Fetch { sha256: None, .. }),
+            "{steps:?}"
+        );
+    }
+
     /// Re-serialize a parsed Release as the tag-endpoint JSON body.
     fn json_of(release: &Release) -> serde_json::Value {
         serde_json::json!({
@@ -1115,19 +1230,11 @@ mod tests {
     }
 
     #[test]
-    fn no_published_checksum_installs_unverified() {
+    fn no_published_checksum_fetches_with_none_of_its_own() {
+        // What the lock recorded on first use is filled in by the planner
+        // (see checksum_of_a_release_without_sums_is_what_was_downloaded).
         let b = release_with(&[]);
         assert_eq!(fetch_sha(&b), None);
-        assert_eq!(
-            b.checksum(
-                &gh("pkg:github/o/r"),
-                &sem("0.7.0"),
-                &"linux/amd64".parse().unwrap()
-            )
-            .unwrap(),
-            None,
-            "nothing is recorded in the lock"
-        );
     }
 
     #[test]

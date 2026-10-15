@@ -862,6 +862,9 @@ fn managed_from_resolution<'a>(
                 } else {
                     version.clone() // accepted: bosun does not install it
                 };
+                let checksum = (resolved == leaf.resolved)
+                    .then(|| leaf.checksum.clone())
+                    .flatten();
                 managed.push(Managed {
                     name: entry.name.clone(),
                     purl,
@@ -871,6 +874,9 @@ fn managed_from_resolution<'a>(
                     claims,
                     current,
                     installer,
+                    // The lock's checksum is for its version; another one (a claim's
+                    // intersection chose elsewhere) is the backend's to verify.
+                    checksum,
                 });
             }
             Outcome::NotApplicable(na) => carried.push(not_applicable_diagnostic(&entry.name, na)),
@@ -942,6 +948,7 @@ fn managed_from_lock<'a>(
             claims,
             current,
             installer,
+            checksum: leaf.checksum.clone(),
         });
     }
     Ok((managed, diagnostics))

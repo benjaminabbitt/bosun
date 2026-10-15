@@ -113,7 +113,7 @@ impl BackendFactory for GithubPackageFactory {
             purl_type: "github",
             vers_type: "semver",
             platform_independent: false,
-            option_keys: &["asset", "tag", "package_name"],
+            option_keys: &["asset", "tag", "package_name", "unverified"],
         }
     }
 
@@ -191,13 +191,17 @@ impl GithubPackageBackend {
             .unwrap_or_else(|| ReleaseLookup::binary_of(pkg))
     }
 
+    /// The release file to install, refused when it can't be verified and
+    /// the entry hasn't allowed that (it installs as root).
     fn file(&self, pkg: &Ref, version: &Version) -> Result<ReleaseFile, PortError> {
-        self.releases.file(
+        let file = self.releases.file(
             pkg,
             version,
             |name| self.kind.accepts(name),
             self.kind.refusal(),
-        )
+        )?;
+        ReleaseLookup::require_verifiable(pkg, &file, self.kind.id())?;
+        Ok(file)
     }
 
     fn run(&self, parts: &[&str]) -> Step {
@@ -255,7 +259,8 @@ impl Index for GithubPackageBackend {
         version: &Version,
         _target: &Target,
     ) -> Result<Option<Checksum>, PortError> {
-        Ok(self.file(pkg, version)?.sha256.map(Checksum))
+        let file = self.file(pkg, version)?;
+        Ok(Some(Checksum(self.releases.recorded_sha256(pkg, &file)?)))
     }
 }
 
@@ -338,6 +343,7 @@ mod tests {
     use super::*;
     use bosun_ports::testing::{FakeCommandRunner, FakeHttpFetcher};
     use bosun_ports::Output;
+    use sha2::Digest;
 
     const TAG_URL: &str = "https://api.github.com/repos/sharkdp/bat/releases/tags/v0.26.1";
     const RELEASE: &str = r#"{"tag_name":"v0.26.1","assets":[
@@ -345,7 +351,16 @@ mod tests {
         {"name":"bat-0.26.1-1.x86_64.rpm","browser_download_url":"https://x/bat.rpm"},
         {"name":"bat-v0.26.1-x86_64-unknown-linux-musl.tar.gz","browser_download_url":"https://x/bat.tgz"}]}"#;
 
+    /// bat with the given options. The fixture release publishes no checksum,
+    /// so it also allows an unverified install; see [`strict_pkg`].
     fn pkg(pairs: &[(&str, &str)]) -> Ref {
+        let mut all = vec![("unverified", "allow")];
+        all.extend_from_slice(pairs);
+        strict_pkg(&all)
+    }
+
+    /// bat with exactly the given options.
+    fn strict_pkg(pairs: &[(&str, &str)]) -> Ref {
         let mut q = std::collections::BTreeMap::from([("binary".to_string(), "bat".to_string())]);
         for (k, v) in pairs {
             q.insert(k.to_string(), v.to_string());
@@ -357,7 +372,11 @@ mod tests {
     }
 
     fn backend(kind: PackageKind, runner: FakeCommandRunner) -> GithubPackageBackend {
-        let fetcher = Arc::new(FakeHttpFetcher::new().with_body(TAG_URL, RELEASE));
+        let fetcher = Arc::new(
+            FakeHttpFetcher::new()
+                .with_body(TAG_URL, RELEASE)
+                .with_body("https://x/bat_0.26.1_amd64.deb", "the .deb"),
+        );
         GithubPackageBackend {
             kind,
             runner: Arc::new(runner),
@@ -560,6 +579,56 @@ mod tests {
         assert_eq!(versions, vec!["0.26.1", "0.25.0"]);
     }
 
+    const DEB: &str = "{{ binary }}_{{ version }}_{{ arch }}.deb";
+
+    #[test]
+    fn a_release_without_a_checksum_is_refused_unless_the_entry_allows_it() {
+        // github-deb installs as root: an unverifiable package needs consent.
+        let b = backend(PackageKind::Deb, FakeCommandRunner::new());
+        let strict = strict_pkg(&[("asset", DEB)]);
+        let at = "linux/amd64".parse().unwrap();
+        for err in [
+            b.install_exact(&strict, &v("0.26.1")).unwrap_err(),
+            b.checksum(&strict, &v("0.26.1"), &at).unwrap_err(),
+        ] {
+            let text = err.to_string();
+            assert!(text.contains("bat_0.26.1_amd64.deb"), "{text}");
+            assert!(
+                text.contains("backends.github-deb.unverified: allow"),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_allowed_unverified_release_locks_the_sha256_it_downloads_as() {
+        let b = backend(PackageKind::Deb, FakeCommandRunner::new());
+        let got = b
+            .checksum(
+                &pkg(&[("asset", DEB)]),
+                &v("0.26.1"),
+                &"linux/amd64".parse().unwrap(),
+            )
+            .unwrap();
+        let want: String = sha2::Sha256::digest(b"the .deb")
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(got, Some(Checksum(want)));
+    }
+
+    #[test]
+    fn unverified_takes_only_allow() {
+        let b = backend(PackageKind::Deb, FakeCommandRunner::new());
+        let err = b
+            .install_exact(
+                &strict_pkg(&[("asset", DEB), ("unverified", "yes")]),
+                &v("0.26.1"),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("\"yes\""), "{err}");
+    }
+
     #[test]
     fn a_deb_holds_and_an_rpm_does_not() {
         let deb = backend(PackageKind::Deb, FakeCommandRunner::new()).capabilities();
@@ -635,6 +704,9 @@ mod tests {
         assert_eq!(f.id().as_str(), "github-rpm");
         let meta = f.meta();
         assert_eq!((meta.purl_type, meta.vers_type), ("github", "semver"));
-        assert_eq!(meta.option_keys, &["asset", "tag", "package_name"]);
+        assert_eq!(
+            meta.option_keys,
+            &["asset", "tag", "package_name", "unverified"]
+        );
     }
 }

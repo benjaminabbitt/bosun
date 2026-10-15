@@ -28,9 +28,9 @@ use std::path::Path;
 
 use bosun_core::record::StateDocument;
 use bosun_core::spec::Spec;
-use bosun_core::{BackendId, Claim, HoldSupport, Origin, Purl, Ref, Scope, Version};
+use bosun_core::{BackendId, Checksum, Claim, HoldSupport, Origin, Purl, Ref, Scope, Version};
 use bosun_ports::error::PortError;
-use bosun_ports::step::Steps;
+use bosun_ports::step::{Step, Steps};
 use bosun_ports::{Installer, Machine, Privilege};
 
 /// What an action does (§4.8). M1 covers these; `migrate`, `adopt` and
@@ -347,6 +347,10 @@ pub struct Managed<'a> {
     pub current: Current,
     /// The backend installer: scope, capabilities, and step production.
     pub installer: &'a dyn Installer,
+    /// The checksum this machine's lock recorded for `resolved` (the
+    /// published one, or the first download's), when it has one. Every
+    /// download of the install is verified against it.
+    pub checksum: Option<Checksum>,
 }
 
 /// Does `version` satisfy every claim's vers set?
@@ -440,11 +444,20 @@ pub fn build_install_plan(
             continue;
         }
 
-        let steps = if kind == ActionKind::Downgrade {
+        let mut steps = if kind == ActionKind::Downgrade {
             m.installer.downgrade(&pkg, &m.resolved)?
         } else {
             m.installer.install_exact(&pkg, &m.resolved)?
         };
+        // The lock's checksum is what this version was when it was locked, so a
+        // replaced asset fails to verify (trust on first use).
+        if let Some(locked) = &m.checksum {
+            for step in &mut steps {
+                if let Step::Fetch { sha256, .. } = step {
+                    *sha256 = Some(locked.0.clone());
+                }
+            }
+        }
         let action = Action {
             kind,
             name: m.name.clone(),

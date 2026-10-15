@@ -91,6 +91,7 @@ impl BackendFactory for GithubInstallerFactory {
                 "display_name",
                 "silent_args",
                 "uninstall_args",
+                "unverified",
             ],
         }
     }
@@ -263,6 +264,8 @@ impl GithubInstallerBackend {
         if file.name.to_ascii_lowercase().ends_with(".exe") {
             Self::need(pkg, "silent_args")?;
         }
+        // It runs as Administrator: an unverifiable installer needs consent.
+        ReleaseLookup::require_verifiable(pkg, &file, BACKEND)?;
         Ok(file)
     }
 
@@ -303,7 +306,8 @@ impl Index for GithubInstallerBackend {
         version: &Version,
         _target: &Target,
     ) -> Result<Option<Checksum>, PortError> {
-        Ok(self.file(pkg, version)?.sha256.map(Checksum))
+        let file = self.file(pkg, version)?;
+        Ok(Some(Checksum(self.releases.recorded_sha256(pkg, &file)?)))
     }
 }
 
@@ -419,6 +423,7 @@ mod tests {
     use super::*;
     use bosun_ports::testing::{FakeCommandRunner, FakeHttpFetcher};
     use bosun_ports::{OkExit, Output};
+    use sha2::Digest;
 
     const TAG_URL: &str = "https://api.github.com/repos/o/app/releases/tags/v2.0.0";
     const RELEASE: &str = r#"{"tag_name":"v2.0.0","assets":[
@@ -443,7 +448,16 @@ HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Nsis
     UninstallString    REG_SZ    "C:\Program Files\Nsis App\uninstall.exe"
 "#;
 
+    /// app with the given options. The fixture release publishes no checksum,
+    /// so it also allows an unverified install; see [`strict_pkg`].
     fn pkg(pairs: &[(&str, &str)]) -> Ref {
+        let mut all = vec![("unverified", "allow")];
+        all.extend_from_slice(pairs);
+        strict_pkg(&all)
+    }
+
+    /// app with exactly the given options.
+    fn strict_pkg(pairs: &[(&str, &str)]) -> Ref {
         let mut q = BTreeMap::from([("binary".to_string(), "app".to_string())]);
         for (k, v) in pairs {
             q.insert(k.to_string(), v.to_string());
@@ -454,7 +468,11 @@ HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Nsis
     }
 
     fn backend(runner: Arc<FakeCommandRunner>) -> GithubInstallerBackend {
-        let fetcher = Arc::new(FakeHttpFetcher::new().with_body(TAG_URL, RELEASE));
+        let fetcher = Arc::new(
+            FakeHttpFetcher::new()
+                .with_body(TAG_URL, RELEASE)
+                .with_body("https://x/app.msi", "the .msi"),
+        );
         GithubInstallerBackend {
             runner,
             releases: ReleaseLookup::new(fetcher, Os::Windows, Arch::Amd64),
@@ -791,5 +809,42 @@ HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Nsis
         assert!(probe(Os::Linux).is_none());
         assert_eq!(f.id().as_str(), "github-installer");
         assert!(f.meta().option_keys.contains(&"silent_args"));
+        assert!(f.meta().option_keys.contains(&"unverified"));
+    }
+
+    const MSI: &str = "{{ binary }}-{{ version }}-x64.msi";
+
+    #[test]
+    fn an_installer_without_a_checksum_is_refused_unless_the_entry_allows_it() {
+        let b = backend(quiet());
+        let strict = strict_pkg(&[("asset", MSI), ("display_name", "App*")]);
+        let at = "windows/amd64".parse().unwrap();
+        for err in [
+            b.install_exact(&strict, &v("2.0.0")).unwrap_err(),
+            b.checksum(&strict, &v("2.0.0"), &at).unwrap_err(),
+        ] {
+            let text = err.to_string();
+            assert!(
+                text.contains("backends.github-installer.unverified: allow"),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_allowed_unverified_installer_locks_the_sha256_it_downloads_as() {
+        let b = backend(quiet());
+        let got = b
+            .checksum(
+                &pkg(&[("asset", MSI), ("display_name", "App*")]),
+                &v("2.0.0"),
+                &"windows/amd64".parse().unwrap(),
+            )
+            .unwrap();
+        let want: String = sha2::Sha256::digest(b"the .msi")
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(got, Some(Checksum(want)));
     }
 }

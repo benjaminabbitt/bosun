@@ -27,7 +27,7 @@ Feature: github-release installs from every common archive format
     When I run `bosun install . --yes`
     Then it succeeds
     And tool is installed from <asset>
-    And it warns "installing unverified"
+    And it warns "publishes no checksum"
 
     Examples:
       | format  | asset                           |

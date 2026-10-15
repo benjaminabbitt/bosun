@@ -227,7 +227,7 @@ backends (cargo, go, npm, …). Because the backend and package ID can differ pe
 | `backend` / `purl` | which package manager, and the package's canonical purl (unversioned, with qualifiers such as `repository_url`, `arch`, `distro`) (§5.6) |
 | `resolved` | the exact version selected |
 | `indexSnapshot` | for repo-bound backends: when the index it resolved against was fetched |
-| `checksum` | recorded when the backend reports one; informational only (integrity checking is the backend's job) |
+| `checksum` | the sha256 bosun verifies a release download against: the one the release publishes, else (trust on first use) the download's own when it was first locked. A kept pin keeps it, so a replaced asset fails to install |
 
 ### 4.6 Machine state (what bosun installed, and who wants it)
 
@@ -1076,8 +1076,12 @@ What dogfooding forces into v1 (proposed):
      verification. When the release publishes a sha256 for the asset (a per-asset
      `<asset>.sha256`/`.sha256sum`, else a combined sums file such as `checksums.txt`,
      `<name>_checksums.txt` or `SHA256SUMS`), bosun verifies the download against it and records
-     it in the lock; a mismatch is an error. bosun doesn't audit releases: when none is published,
-     or the sums file doesn't list the asset, it installs anyway, warns, and records no checksum.
+     it in the lock; a mismatch is an error. bosun doesn't audit releases, but it holds them
+     still (DECIDED): when none is published, or the sums file doesn't list the asset, `lock`
+     records the sha256 of the asset as it downloads then (trust on first use) and warns, and
+     every later install of that version must match it. The backends that install a release's
+     file as root or Administrator (github-deb, github-rpm, github-installer) refuse a release
+     with no published checksum unless the entry sets `unverified: allow`.
    - **Install location exception to §9:** with no package manager to choose a prefix, bosun
      needs a default bin directory (e.g. `~/.local/bin`, `%LOCALAPPDATA%\bosun\bin`) and must
      say so when it isn't on PATH.
@@ -1281,6 +1285,7 @@ scenario in the real-backend tier (skipped for compile time).
 | M2-5 | preference is the machine's: flag > `BOSUN_INSTALLER` > config > built in (user scope before system, then registration order); a config that fails to load is an error | landed |
 | M2-6 | the lock is the machine's own: version 2, one per manifest in the user state dir (`locks/<sha256 of path>.json`), records its manifest and hash; no cross-target merge; `install --frozen` refuses a missing or stale lock; an older `bosun.lock` beside the manifest is warned about and not read; the repo's committed `bosun.lock` deleted | landed |
 | M2-7 | a locked version stays until it's upgraded: `lock` / `add` / `remove` / `install` keep pins that still fit; `bosun upgrade [pkg…]`; plain `install` prefers the pin across claims and writes the lock after a successful apply | landed |
+| M2-8 | release checksums held on first use: no published checksum → `lock` records the download's sha256 and every later install verifies against the lock's checksum; github-deb/rpm/installer refuse an unpublished checksum without `unverified: allow` | landed |
 | M3-1 | WindowsMachine (Administrator = High/System integrity label in `whoami /groups`; state `%ProgramData%` / `%LOCALAPPDATA%`, config `%APPDATA%`); github-release on Windows (`<binary>.exe` into `%USERPROFILE%\.local\bin`, `;`-separated case-insensitive PATH check); `Step::Remove` replaces `rm -f`; `just check-win` (zig cc as MinGW) | landed hermetically; workspace type-checks for x86_64-pc-windows-gnu; **unverified on a real Windows host** |
 | M3-2 | winget (user), scoop (user), choco (system) backends; probe only on Windows | landed hermetically (argv and output parsing unit-tested, fixture scenarios); **unverified on a real Windows host** |
 | M3-3 | github-installer: a release's `.msi` (`msiexec /i … /qn /norestart`) or `.exe` (manifest `silent_args`, required); found in the Uninstall registry keys (`reg query`, three views) by `display_name` (`*` suffix = prefix); uninstall `msiexec /x {ProductCode}` or the entry's quiet/plain uninstaller; msiexec's 3010 (reboot required) is success, reported; system scope, no hold, no downgrade | landed (unit tests); **unverified on a real Windows host**; no fixture scenario (the seam has no registry) |

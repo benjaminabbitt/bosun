@@ -40,3 +40,10 @@ pub const INSTALLER_NEEDS: &str = "github-installer needs";
 
 /// The asset github-installer was pointed at is not an installer.
 pub const NOT_AN_INSTALLER: &str = "not an .msi or .exe installer";
+
+/// A release publishes no checksum for a file a system-scope backend would
+/// install as root or Administrator, and the entry hasn't consented.
+pub const UNVERIFIED_ELEVATED: &str =
+    "the release publishes no checksum for it, and it would install as root or Administrator";
+/// The `unverified` option takes only `allow`.
+pub const UNVERIFIED_VALUE: &str = "unverified takes only `allow`, not";

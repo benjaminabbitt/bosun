@@ -3,13 +3,16 @@ Feature: github-deb and github-rpm install the OS package a release attaches
   Many projects attach a .deb and an .rpm to each release. github-deb and
   github-rpm find them the github-release way (tag, asset template, checksum)
   and install them through apt or dnf, machine-wide, so dependencies resolve
-  and the package manager knows the package.
+  and the package manager knows the package. They install as root, so a
+  release that publishes no checksum is refused unless the entry says
+  `unverified: allow`.
 
   Scenario: bat's .deb is installed through apt, held, and removed
     Given a Debian trixie amd64 machine, elevated
     And bosun installs release .deb packages
     And sharkdp/bat v0.26.1 publishes bat_0.26.1_amd64.deb holding just the binary
     And sharkdp/bat v0.26.1 also publishes bat-v0.26.1-x86_64-unknown-linux-musl.tar.gz
+    And sharkdp/bat v0.26.1 publishes checksums.txt
     And the manifest:
       """
       version: 2
@@ -54,6 +57,7 @@ Feature: github-deb and github-rpm install the OS package a release attaches
                   package: sharkdp/bat
                   asset: "{{ binary }}-{{ version }}-1.{{ arch_uname }}.rpm"
                   package_name: bat-cat
+                  unverified: allow
       """
     When I run `bosun --format json install . --plan`
     Then it says "dnf"
@@ -70,6 +74,7 @@ Feature: github-deb and github-rpm install the OS package a release attaches
     Given a Debian trixie amd64 machine, not elevated
     And bosun installs release .deb packages
     And sharkdp/bat v0.26.1 publishes bat_0.26.1_amd64.deb holding just the binary
+    And sharkdp/bat v0.26.1 publishes checksums.txt
     And the manifest:
       """
       version: 2
@@ -108,3 +113,26 @@ Feature: github-deb and github-rpm install the OS package a release attaches
     When I run `bosun lock .`
     Then it fails
     And it reports "not a .deb package"
+
+  Scenario: a release .deb without a checksum is refused unless the entry allows it
+    Given a Debian trixie amd64 machine, elevated
+    And bosun installs release .deb packages
+    And sharkdp/bat v0.26.1 publishes bat_0.26.1_amd64.deb holding just the binary
+    And the manifest:
+      """
+      version: 2
+      packages:
+        - name: bat
+          spec: ">=0.26.0|<0.27.0"
+          install:
+            linux:
+              backends:
+                github-deb:
+                  package: sharkdp/bat
+                  asset: "{{ binary }}_{{ version }}_{{ arch }}.deb"
+      """
+    When I run `bosun install . --yes`
+    Then it fails
+    And it reports "the release publishes no checksum for it"
+    And it reports "set backends.github-deb.unverified: allow"
+    And bosun has recorded nothing about bat
