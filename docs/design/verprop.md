@@ -109,13 +109,13 @@ real to check later):
 | `install [path] [--plan] [--scope system\|user] [--yes]` | plan → privilege check → confirm → apply: resolve each entry with the local package manager, install, record in the machine state (§4.8, §5.5). **Never uninstalls** (except the old name in a `formerly` migration, §5.4) |
 | `uninstall [path] [--plan] [--scope system\|user] [--yes]` | the inverse of `install` for one manifest: drop all of its claims, then uninstall each package bosun installed that no other manifest still claims; same plan → confirm → apply flow (§9) |
 | `prune [--plan] [--scope system\|user] [--yes]` | machine-wide cleanup: uninstall what bosun installed that no manifest claims any more, and drop claims whose manifest no longer exists (§9) |
-| `upgrade [pkg]` | re-resolve range entries for this platform, rewrite its lockfile entries, show before/after |
+| `upgrade [pkg]` | re-resolve range entries, rewrite this machine's lock, show before/after |
 | `export` | seed a manifest from the current machine |
 | `status` | what bosun manages on this machine and which manifests claim it (drift is `install --plan`'s job) |
 | `adopt <name>` | explicitly take ownership of an existing install: `accepted` → `installed` (§4.6) |
-| `lock` | resolve this machine's platform (plus platform-independent `any` entries) and merge the result into `bosun.lock`, keeping other platforms' entries (§4.5, §4.7) |
+| `lock` | resolve the manifest for this machine (its platform, plus platform-independent `any` entries) and write this machine's lock for it, replacing the last one (§4.5, §4.7). Warns when an older bosun's `bosun.lock` sits beside the manifest: it is no longer read |
 | `migrate [path] [--plan] [--yes]` | rewrite an older-version manifest as the current version (loading migrates in memory anyway; this writes it, so `add` / `remove` can edit it). annals writes the migrated tree without comments, so it shows the result and confirms first, and keeps the original as `<file>.v<N>` |
-| `install --frozen` | install exactly what `bosun.lock` records for this platform; never re-resolves, never writes the lockfile; errors if this platform is missing or stale (§7) |
+| `install --frozen` | install exactly what this machine's lock records; never re-resolves, never writes the lock; errors when there is no lock for this manifest, or the manifest changed since it was locked (§7) |
 | `render args\|env\|json` | versions for a target platform as build args, env lines, or a JSON versions file (§8.3) |
 | `backends` | registered backends, their versions, and why others were skipped (§5.3) |
 
@@ -132,7 +132,7 @@ the same fields.
 | file | format | written by | committed | purpose |
 |---|---|---|---|---|
 | `bosun.yaml` | YAML (annals-yaml subset) | people (and `add`/`remove`/`export`) | yes | the manifest: intent |
-| `bosun.lock` | JSON | bosun only (`lock`, `upgrade`; `add`/`remove` run `lock`) | yes | resolved versions, per target, built up one platform at a time; a package the manifest no longer lists is dropped from every target |
+| lock | JSON | bosun only (`lock`, `upgrade`; `add`/`remove` run `lock`) | **no** (one per manifest, in the user state dir) | what this machine resolved for one manifest (§4.5) |
 | machine state | JSON | bosun only | **no** (one per user, in `$HOME`) | what bosun installed for this user, and which manifests claim it |
 | user config | YAML (annals-yaml subset) | people | no (`<config dir>/bosun/config.yaml`) | preferences, e.g. installer order |
 | user manifest | YAML (annals-yaml subset) | people | no (`<config dir>/bosun/bosun.yaml`) | personal tools; one more claimant |
@@ -160,46 +160,39 @@ the same fields.
     `# yaml-language-server: $schema=…` comment.
   - **Errors** are `annals-diagnostic` values: a stable code and named args, matching bosun's
     structured errors (§5.5).
-- **Lockfile (JSON):** generated, never hand-edited, readable by `jq` inside a container build
-  without bosun installed. Pretty-printed, keys in fixed order, packages sorted by
-  (name, backend), target keys sorted: clean diffs and stable Docker layer caching.
-- **No bosun version is recorded anywhere** — `bosun --version` answers that, and storing it
-  would churn the lockfile whenever teammates run different bosun builds. Only the lockfile
+- **Lockfile (JSON):** generated, never hand-edited, readable by `jq`. Pretty-printed, keys in
+  fixed order, packages sorted by name, target keys sorted.
+- **No bosun version is recorded anywhere** — `bosun --version` answers that. Only each file's
   *format* version is stored.
 
 ### 4.5 Lockfile format
 
-> **In v1 — DECIDED.** Reproducible versions are a key feature, so the lockfile ships in v1.
-> It was briefly deferred because resolving every platform from one machine needs a remote
-> index per backend (§4.7); v1 avoids that by building the lockfile up one platform at a
-> time. Only `lock` and `upgrade` write it; `install` reads it (§4.6 explains how), and
-> `install --frozen` enforces it.
+> **DECIDED: the lock is the machine's own.** The manifest is about the packages and is
+> shared; the user config holds this machine's preferences; the lock records what *this
+> machine* resolved and is never shared or committed. Only `lock` and `upgrade` write it
+> (`add` / `remove` run `lock`); `install --frozen` installs it verbatim. Earlier designs
+> committed one `bosun.lock` covering every declared platform (format version 1); that file
+> is no longer read, and `lock` warns when it finds one beside the manifest.
 
-One lockfile covers every platform and architecture the manifest declares. The manifest
-declares its targets (e.g. `"targets": ["linux/amd64", "linux/arm64", "darwin/arm64",
-"windows/amd64"]`); each package records its intent once and a resolution per target. Because
-the backend and package ID can differ per platform (§5.4), they live inside each target entry.
-Target keys use Docker's platform syntax, so a build can look them up with BuildKit's
-`TARGETPLATFORM`. Platform-independent backends (cargo, go, npm, …) can resolve once, under `any`.
+**Where:** one lock per manifest, in the user state directory beside the machine state
+(§4.6): `$XDG_STATE_HOME/bosun/locks/<id>.json` (default `~/.local/state`),
+`%LOCALAPPDATA%\bosun\locks\<id>.json` on Windows. `<id>` is the first 16 hex digits of the
+sha256 of the manifest's canonical path, so every project gets its own lock without needing a
+filesystem-safe name; the lock records the path too, and a lock whose `manifest` isn't this
+one is treated as absent. Under `sudo` the user state directory is root's, so an elevated
+`install --frozen` needs a lock written elevated (`sudo bosun lock`). Moving a project leaves
+its old lock behind (harmless; a future `prune` can drop locks whose manifest is gone).
+
+Each package is locked under this machine's platform, or under `any` for platform-independent
+backends (cargo, go, npm, …). Because the backend and package ID can differ per platform
+(§5.4), they live inside the target entry.
 
 ```json
 {
-  "lockfileVersion": 1,
-  "targets": {
-    "darwin/arm64": { "manifestHash": "sha256:9f2c…" },
-    "linux/amd64":  { "manifestHash": "sha256:9f2c…" },
-    "any":          { "manifestHash": "sha256:9f2c…" }
-  },
+  "lockfileVersion": 2,
+  "manifest": "/home/me/proj/bosun.yaml",
+  "manifestHash": "sha256:9f2c…",
   "packages": [
-    {
-      "name": "bosun",
-      "spec": "vers:semver/0.3.0",
-      "targets": {
-        "darwin/arm64": { "backend": "brew", "purl": "pkg:brew/bosun", "resolved": "0.3.0" },
-        "linux/amd64":  { "backend": "github-release", "purl": "pkg:github/<owner>/bosun",
-                          "resolved": "0.3.0", "checksum": "sha256:…" }
-      }
-    },
     {
       "name": "jq",
       "spec": "vers:deb/>=1.7.1|<1.7.2~",
@@ -211,6 +204,13 @@ Target keys use Docker's platform syntax, so a build can look them up with Build
           "indexSnapshot": "2026-10-13T19:00:00Z"
         }
       }
+    },
+    {
+      "name": "ripgrep",
+      "spec": "vers:cargo/>=14.1.1|<15.0.0",
+      "targets": {
+        "any": { "backend": "cargo", "purl": "pkg:cargo/ripgrep", "resolved": "14.1.1" }
+      }
     }
   ]
 }
@@ -218,23 +218,15 @@ Target keys use Docker's platform syntax, so a build can look them up with Build
 
 | field | meaning |
 |---|---|
-| `lockfileVersion` | format version; bosun refuses a newer major it cannot read and upgrades older ones |
-| `targets.<t>.manifestHash` | per target: hash of the *parsed* manifest (comments stripped) that target was resolved against, so editing a comment doesn't invalidate the lock; `install --frozen` errors when the current target's hash doesn't match (§4.7) |
+| `lockfileVersion` | format version; bosun reads only the version it writes. A lock is regenerable, so another version is refused and `bosun lock` writes a fresh one; there is no migration |
+| `manifest` | the canonical path of the manifest this lock is for |
+| `manifestHash` | hash of the *parsed* manifest (comments stripped) it was resolved against, so editing a comment doesn't invalidate the lock; `install --frozen` refuses when it doesn't match |
 | `name` | bosun's logical name for the tool (§5.4); never has to match any backend's naming |
-| `spec` | the intent in canonical vers form (§5.6), copied from the manifest so the lockfile reads on its own; a target may carry its own `spec` where that platform's version scheme differs |
-| `backend` / `purl` | which package manager, and the package's canonical purl (unversioned, with qualifiers such as `repository_url`, `arch`, `distro`) for that target (§5.6); replaces separate `package` / `source` fields |
-| `resolved` | the exact version selected for that target |
-| `indexSnapshot` | for repo-bound backends: when the index it resolved against was fetched; pairs with base-image digest pinning for reproducible builds |
+| `spec` | the intent in canonical vers form (§5.6), copied from the manifest so the lock reads on its own; a target may carry its own `spec` where its version scheme differs |
+| `backend` / `purl` | which package manager, and the package's canonical purl (unversioned, with qualifiers such as `repository_url`, `arch`, `distro`) (§5.6) |
+| `resolved` | the exact version selected |
+| `indexSnapshot` | for repo-bound backends: when the index it resolved against was fetched |
 | `checksum` | recorded when the backend reports one; informational only (integrity checking is the backend's job) |
-
-Reading it in a Dockerfile without bosun:
-
-```dockerfile
-ARG TARGETPLATFORM
-RUN v=$(jq -r --arg p "$TARGETPLATFORM" \
-      '.packages[] | select(.name=="jq") | (.targets[$p] // .targets.any).resolved' bosun.lock) \
- && apt-get install -y "jq=$v"
-```
 
 ### 4.6 Machine state (what bosun installed, and who wants it)
 
@@ -265,10 +257,10 @@ Only the header and the per-target leaf fields differ:
 
 | | lockfile | machine state |
 |---|---|---|
-| header | `lockfileVersion`, per-target `manifestHash` | `stateVersion` |
+| header | `lockfileVersion`, `manifest`, `manifestHash` | `stateVersion` |
 | package-level `spec` | present (one manifest) | absent: each claim carries its own |
 | per-target leaf | `resolved`, `indexSnapshot`, `checksum` | `installed`, `origin`, `claimedBy` |
-| targets present | every declared target | only this machine's target |
+| targets present | this machine's target and `any` | this machine's target and `any` |
 
 ```json
 {
@@ -353,34 +345,31 @@ its user.
 runs under `sudo bosun …` (Linux/macOS) or from an Administrator terminal (Windows). bosun
 checks privilege against the computed plan and fails fast before changing anything (§5.5).
 
-### 4.7 Cross-target resolution
+### 4.7 Resolution is per machine
 
-**v1 — DECIDED: build the lockfile up per platform.** `bosun lock` resolves:
+`bosun lock` resolves:
 
 - **the current machine's platform**, using its local package managers, and
 - **platform-independent backends** (cargo, go, npm, uv, pipx, gem) under `any`, from their
-  public registries over HTTP, so one machine resolves these for every platform. This covers
-  most developer tools.
+  public registries over HTTP.
 
-It merges the result into the shared `bosun.lock`, leaving other platforms' entries untouched.
-OS package managers for other platforms (brew on macOS, winget on Windows, apt on a different
-distro) are filled in by running `bosun lock` on each platform, by hand or as a CI matrix job;
-the merge is per target key, so two platforms never write the same entry.
+and writes this machine's lock, replacing the last one: the lock is the machine's own, so
+there is no merge and nothing for another machine to fill in. Two machines sharing a manifest
+agree on the *specs*, not on exact versions; a team that needs one exact version everywhere
+writes an exact spec.
 
-**Freshness is per target.** Each target in the lockfile records the `manifestHash` it was
-resolved against. Editing the manifest makes every target stale; `install --frozen` refuses
-a stale or missing target, and `lock --check` (a CI gate) fails until every declared target
-has been re-locked.
+**Freshness:** the lock records the `manifestHash` it was resolved against. Editing the
+manifest (not just its comments) makes it stale, and `install --frozen` refuses a stale or
+missing lock.
 
-**Later: remote indexes**, added backend by backend, so one machine can resolve every platform.
-Resolution is already split from installation for this:
+**Later: remote indexes**, added backend by backend, so one machine can resolve for another
+platform (for `render --target`, §8.3, and container builds). Resolution is already split from
+installation for this:
 
 - **`Index`** (query side): answers "which versions exist for this target" from each source's
   index over HTTP: Homebrew's formula API, the winget-pkgs repo, scoop bucket repos, apt
   `Packages` / dnf repodata files, crates.io, the npm registry, PyPI. Runs anywhere.
 - **`Installer`** (mutation side): runs the local package manager. Runs only on a matching host.
-
-Backends without a practical remote index keep the per-platform `bosun lock` path.
 
 ### 4.8 Plan and apply
 
@@ -842,9 +831,10 @@ Consequences:
 - A pin that the configured sources no longer carry is unsatisfiable. The remedy is to widen
   the range (e.g. `>=1.7.1|<1.7.2~` for "any Debian revision of 1.7.1"), not a fallback mode.
 - Ranges **break reproducibility by design**, so bosun inherits uv/npm's frozen-vs-update split:
-  - `bosun lock` — resolve and record versions for this platform (§4.7).
-  - `bosun install --frozen` — apply the lock verbatim for this platform, no re-resolve, no
-    lockfile write. **Container builds and CI must use this.**
+  - `bosun lock` — resolve and record versions for this machine (§4.7).
+  - `bosun install --frozen` — apply this machine's lock verbatim, no re-resolve, no lock
+    write. A container build or CI job runs `bosun lock` then `install --frozen` in the same
+    environment, or relies on exact specs.
   - `bosun upgrade` — re-resolve ranges, rewrite the lock, show a before/after diff.
   - plain `bosun install` — reads the lock as a preference across claims (§4.6), never writes
     it.
@@ -868,8 +858,10 @@ image builds are the same mechanism. Both of the first two shapes are supported 
 - **build-args / env** — the Dockerfile takes versions as `ARG`s (or `ENV`) and bosun supplies
   them with `bosun render` (§8.3). Simplest; stable build args give clean layer-cache
   behaviour. The author writes the `RUN` lines.
-- **in-build execution** — `COPY bosun + bosun.yaml + bosun.lock` then
-  `RUN bosun install --frozen --yes`. Single source of truth; needs the
+- **in-build execution** — `COPY bosun + bosun.yaml` then `RUN bosun install --yes`. The lock
+  is the machine's own (§4.5), so the image resolves against its own repositories; exact
+  versions across builds come from exact specs plus a pinned base-image digest. Single source
+  of truth; needs the
   bosun binary in the build stage — this is where the **static musl binary pays off**
   (`COPY --from` into scratch/distroless, no runtime deps).
 - **generated bosun layer (`Containerfile.bosun`)** — bosun renders a whole file it owns,
@@ -879,11 +871,12 @@ image builds are the same mechanism. Both of the first two shapes are supported 
   edited. Chain it with `docker build --build-arg BASE=<image>` or a bake file that uses the
   base as a named build context. A tool bump rebuilds only the tool layer, not the base.
   Rendering needs the base image's distro (for selectors and purl namespace): declared per
-  target (`--distro debian@12`), or read once from the image's `/etc/os-release`. A `--check`
-  mode fails when the file is out of date with the lockfile (a CI gate).
+  target (`--distro debian@12`), or read once from the image's `/etc/os-release`. Versions
+  for a platform other than the rendering machine's need remote indexes (§4.7); until then
+  this is rendered inside the base image, or from exact specs.
 - **in-build execution inside that layer** is the alternative when the distro can't be known
   ahead of time: the generated layer `COPY`s the static bosun binary and runs
-  `bosun install --frozen --yes`, which reads the real base's os-release.
+  `bosun install --yes`, which reads the real base's os-release.
 - **Not a Dev Container Feature (DECIDED).** Features are consumed only by devcontainer-aware
   tooling (the devcontainer CLI, VS Code, Codespaces), not by plain `docker build` / `podman
   build` / `buildah` or CI; ctxloom, for one, builds `.devcontainer/Dockerfile` directly.
@@ -910,7 +903,7 @@ output styles so they don't collide with the global `--format` flag:
 |---|---|---|
 | `bosun render args --target linux/amd64` | `--build-arg FD_PACKAGE=fd-find --build-arg FD_VERSION=9.0.0-1 …` | `docker build $(bosun render args --target linux/amd64) .` |
 | `bosun render env --target linux/amd64` | `FD_PACKAGE=fd-find` / `FD_VERSION=9.0.0-1` lines | compose `.env`, `devcontainer.json` `build.args` via `${localEnv:FD_VERSION}`, `set -a; . ./versions.env` |
-| `bosun render json --targets linux/amd64,linux/arm64` | plain-JSON versions file, lockfile-shaped, per target | multi-arch builds: the Dockerfile reads it with `jq` and `TARGETPLATFORM` |
+| `bosun render json --targets linux/amd64,linux/arm64` | plain-JSON versions file, lockfile-shaped, per target | multi-arch builds: the Dockerfile reads it with `jq` and `TARGETPLATFORM` (needs remote indexes for the platforms that aren't this machine's, §4.7) |
 
 ```dockerfile
 ARG FD_PACKAGE
@@ -926,11 +919,10 @@ RUN apt-get install -y "${FD_PACKAGE}=${FD_VERSION}"
   `install` command (§5.3, §5.4), for the requested target rather than the current machine.
 - **`render json` covers multi-arch:** build args are the same for every platform in a
   multi-platform build, so where versions or package IDs differ per platform the Dockerfile
-  looks them up by `TARGETPLATFORM` instead. (The lockfile itself is also plain JSON that a
-  Dockerfile can read with `jq`, §4.5.)
-- **Versions come from the lockfile:** every entry renders its locked version for the
-  requested target. If the target isn't locked
-  (or is stale), render errors and names the platform to run `bosun lock` on.
+  looks them up by `TARGETPLATFORM` instead.
+- **Versions come from this machine's lock** for this machine's platform (§4.5); a stale or
+  missing lock is an error naming `bosun lock`. Another platform's versions are resolved
+  through remote indexes when the backend has one (§4.7), else rendering for it is an error.
 
 Future driver: CI.
 
@@ -955,7 +947,7 @@ Future driver: CI.
     so it belongs to `prune`, which reads every claim in the machine state, drops claims whose
     manifest no longer exists, and uninstalls only `installed`-origin packages left with none.
 - **`uninstall` — DECIDED: explicit removal of one manifest's contents.** `bosun uninstall`
-  takes a directory (its `bosun.yaml` and `bosun.lock`) or a path to either file,
+  takes a directory (its `bosun.yaml`) or a path to the file,
   defaulting to the current directory, the same way `install` does.
   - It works from the machine state, not the file: it drops every claim recorded under that
     manifest's path, so it still works after the manifest has been edited, or deleted with its
@@ -1040,10 +1032,8 @@ Future driver: CI.
 - `install` confirmation (§4.8): prompt on a terminal, `--yes` to skip, refuse without a
   terminal unless `--yes` (proposed), or proceed automatically when non-interactive?
 - Remote `Index` per backend (§4.7, later): confirm which are feasible (Homebrew API,
-  winget-pkgs, apt `Packages`, dnf repodata), and which stay on per-platform `bosun lock`.
-- Lockfile merge conflicts in git: two branches re-locking different platforms touch different
-  target keys, but both rewrite the same file. Confirm the sorted, per-target layout keeps
-  these as clean textual merges, or provide a `bosun lock --merge` helper.
+  winget-pkgs, apt `Packages`, dnf repodata), which `render --target` and container builds
+  for another platform need now that the lock is per machine.
 - Dogfood (§12): how do ltk, taskloom and harp install, given that only `ctxloom` is published
   as a release asset? Confirm the `github-release` backend and its two exceptions to §9 (bosun
   verifies checksums; bosun picks a bin directory); decide how a family of entries shares one
@@ -1102,8 +1092,10 @@ What dogfooding forces into v1 (proposed):
 hand-built bosun: one file pinning ~20 build tools (Go, just, buf, golangci-lint, goreleaser,
 gitleaks, node, …) with per-arch sha256 pins, consumed as devcontainer `--build-arg`s, loaded
 into `$GITHUB_ENV` by workflows, used by a Windows CI job and a host install, and guarded by
-drift tests. Replacing it with `bosun.yaml` + `bosun.lock` + `bosun render` exercises the
-container driver (§8), multi-arch checksums, and CI consumers on a real project.
+drift tests. Replacing it with `bosun.yaml` + `bosun render` exercises the container driver
+(§8), multi-arch checksums, and CI consumers on a real project. Its per-arch pins are for
+platforms other than the machine rendering them, so with the lock per machine (§4.5) this
+waits on remote indexes (§4.7).
 
 ## 13. Implementation status (recovery log)
 
@@ -1283,6 +1275,7 @@ scenario in the real-backend tier (skipped for compile time).
 | M2-3 | github-deb / github-rpm: a release's `.deb` / `.rpm` through apt-get / dnf, system scope, cache `/var/cache/bosun`; presence verified with dpkg-query / rpm -q; apt holds, dnf doesn't claim one | landed hermetically; real apt/dnf run not done (github-rpm unverified: no Fedora host) |
 | M2-4 | manifest version 2: `backends` map (acceptable set + options, `package` per backend), no order and no `targets`; `any` selector and bare-block shorthand; 1 → 2 migration; config `version` (0 → 1); `bosun migrate`; `lock --check` removed | landed |
 | M2-5 | preference is the machine's: flag > `BOSUN_INSTALLER` > config > built in (user scope before system, then registration order); a config that fails to load is an error | landed |
+| M2-6 | the lock is the machine's own: version 2, one per manifest in the user state dir (`locks/<sha256 of path>.json`), records its manifest and hash; no cross-target merge; `install --frozen` refuses a missing or stale lock; an older `bosun.lock` beside the manifest is warned about and not read; the repo's committed `bosun.lock` deleted | landed |
 | M3-1 | WindowsMachine (Administrator = High/System integrity label in `whoami /groups`; state `%ProgramData%` / `%LOCALAPPDATA%`, config `%APPDATA%`); github-release on Windows (`<binary>.exe` into `%USERPROFILE%\.local\bin`, `;`-separated case-insensitive PATH check); `Step::Remove` replaces `rm -f`; `just check-win` (zig cc as MinGW) | landed hermetically; workspace type-checks for x86_64-pc-windows-gnu; **unverified on a real Windows host** |
 | M3-2 | winget (user), scoop (user), choco (system) backends; probe only on Windows | landed hermetically (argv and output parsing unit-tested, fixture scenarios); **unverified on a real Windows host** |
 | M3-3 | github-installer: a release's `.msi` (`msiexec /i … /qn /norestart`) or `.exe` (manifest `silent_args`, required); found in the Uninstall registry keys (`reg query`, three views) by `display_name` (`*` suffix = prefix); uninstall `msiexec /x {ProductCode}` or the entry's quiet/plain uninstaller; system scope, no hold, no downgrade | landed (unit tests); **unverified on a real Windows host**; no fixture scenario (the seam has no registry) |

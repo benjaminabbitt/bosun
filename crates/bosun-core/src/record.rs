@@ -87,21 +87,19 @@ pub type LockPackage = Package<Spec, LockLeaf>;
 /// target.
 pub type StatePackage = Package<(), StateLeaf>;
 
-/// Per-target lock header entry (§4.5): the hash of the parsed manifest this
-/// target was resolved against, so editing a comment does not invalidate it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TargetLock {
-    /// Hash of the parsed (comment-stripped) manifest for this target.
-    pub manifest_hash: String,
-}
-
-/// The whole lockfile (§4.5): one file covering every declared target.
+/// One machine's lock for one manifest (§4.5): what this machine resolved,
+/// kept in its own state directory, never shared. Each package is locked under
+/// this platform's target or `any`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LockDocument {
-    /// Format version; bosun refuses a newer major it cannot read.
+    /// Format version; bosun reads only the version it writes.
     pub lockfile_version: u32,
-    /// Per-target manifest hashes, sorted by target.
-    pub targets: BTreeMap<Target, TargetLock>,
+    /// The manifest this lock is for (its canonical path), so a lock is never
+    /// read for another manifest whose path hashes the same.
+    pub manifest: String,
+    /// Hash of the parsed (comment-stripped) manifest it was resolved against,
+    /// so editing a comment does not make it stale.
+    pub manifest_hash: String,
     /// The locked packages.
     pub packages: Vec<LockPackage>,
 }
@@ -204,20 +202,16 @@ mod tests {
     #[test]
     fn documents_carry_their_version_headers() {
         let lock = LockDocument {
-            lockfile_version: 1,
-            targets: BTreeMap::from([(
-                target(Os::Linux, Arch::Amd64),
-                TargetLock {
-                    manifest_hash: "sha256:9f2c".into(),
-                },
-            )]),
+            lockfile_version: 2,
+            manifest: "/p/bosun.yaml".into(),
+            manifest_hash: "sha256:9f2c".into(),
             packages: vec![],
         };
         let state = StateDocument {
             state_version: 1,
             packages: vec![],
         };
-        assert_eq!(lock.lockfile_version, 1);
+        assert_eq!(lock.lockfile_version, 2);
         assert_eq!(state.state_version, 1);
     }
 }

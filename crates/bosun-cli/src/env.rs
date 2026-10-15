@@ -6,7 +6,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -88,6 +88,8 @@ pub struct Env {
     /// The options (§5.4) every compiled-in backend declares, present or
     /// not, so a manifest checks the same on every machine.
     option_keys: bosun_io::BackendOptionKeys,
+    /// Where this user's locks live (§4.5): beside the user machine state.
+    lock_dir: PathBuf,
     machine: Box<dyn Machine>,
     exec: Exec,
 }
@@ -158,6 +160,11 @@ impl Env {
     /// and covers every compiled-in backend whether or not it is present.
     pub fn schemes(&self) -> bosun_io::BackendSchemes {
         self.schemes.clone()
+    }
+
+    /// This machine's lock for the manifest at `manifest` (its canonical path).
+    pub fn lock_path(&self, manifest: &Path) -> PathBuf {
+        bosun_io::paths::lock_file(&self.lock_dir, manifest)
     }
 
     /// The options each known backend declares, for checking a manifest.
@@ -427,12 +434,14 @@ fn from_host() -> Result<Env, CliError> {
         .collect();
 
     let machine = host_machine(arch, distro, system.clone(), user.clone(), runner.as_ref());
+    let lock_dir = bosun_io::paths::locks_beside(&user);
     Ok(Env {
         state: FileStateStore::new(system, user, schemes.clone()),
         backends,
         skipped,
         schemes,
         option_keys,
+        lock_dir,
         machine,
         exec: Exec::Host { runner, fetcher },
     })
@@ -564,6 +573,7 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
         option_keys.entry(b.id.as_str().to_string()).or_default();
     }
     let store = FileStateStore::new(system.clone(), user.clone(), schemes.clone());
+    let lock_dir = bosun_io::paths::locks_beside(&user);
     let machine = FakeMachine {
         os,
         arch,
@@ -586,6 +596,7 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
         skipped: Vec::new(),
         schemes,
         option_keys,
+        lock_dir,
         machine: Box::new(machine),
         exec: Exec::Fixture(Box::new(FixtureStepRunner::new(
             fx.fail_step,

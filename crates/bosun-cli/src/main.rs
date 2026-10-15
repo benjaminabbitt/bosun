@@ -8,6 +8,7 @@ mod edit;
 mod env;
 mod error;
 mod fixture;
+mod logmsg;
 mod migrate;
 mod output;
 

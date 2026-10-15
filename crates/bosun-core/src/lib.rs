@@ -20,8 +20,7 @@ pub use model::{
 pub use platform::{Arch, Distro, Os, PlatformError, Selector, Target};
 pub use purl::{Purl, PurlError};
 pub use record::{
-    LockDocument, LockLeaf, LockPackage, Package, Placement, StateDocument, StateLeaf,
-    StatePackage, TargetLock,
+    LockDocument, LockLeaf, LockPackage, Package, Placement, StateDocument, StateLeaf, StatePackage,
 };
 pub use spec::{default_spec, Entry, SelectError, Spec, SpecError};
 pub use vers::{VersConstraint, VersError, VersOp, VersRange};

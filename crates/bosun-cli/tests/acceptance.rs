@@ -279,10 +279,22 @@ impl BosunWorld {
     }
 
     fn lock(&mut self) -> (String, Value) {
-        let p = self.path();
-        let text = fs::read_to_string(p.join("bosun.lock")).expect("read bosun.lock");
-        let doc = serde_json::from_str(&text).expect("bosun.lock is JSON");
+        let files = lock_files(&self.path());
+        let [file] = files.as_slice() else {
+            panic!("want one lock, found {files:?}");
+        };
+        let text = fs::read_to_string(file).expect("read the lock");
+        let doc = serde_json::from_str(&text).expect("the lock is JSON");
         (text, doc)
+    }
+}
+
+/// The locks this machine holds: in the user state dir, never the project.
+fn lock_files(project: &Path) -> Vec<PathBuf> {
+    let dir = project.join("state").join("user").join("locks");
+    match fs::read_dir(&dir) {
+        Ok(entries) => entries.map(|e| e.unwrap().path()).collect(),
+        Err(_) => Vec::new(),
     }
 }
 
@@ -500,6 +512,7 @@ fn release_publishes_checksums(world: &mut BosunWorld, repo: String, tag: String
 }
 
 #[given(regex = r"^(\S+) publishes (\S+) (.+)$")]
+#[when(regex = r"^(\S+) publishes (\S+) (.+)$")]
 fn publishes(world: &mut BosunWorld, id: String, pkg: String, list: String) {
     world
         .backend_mut(&id)
@@ -570,6 +583,17 @@ fn bosun_recorded(
     let dir = p.join("state").join(scope);
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("state.json"), doc.to_string()).unwrap();
+}
+
+#[given("the project has a bosun.lock from an older bosun")]
+fn old_project_lock(world: &mut BosunWorld) {
+    let old = r#"{"lockfileVersion": 1, "targets": {}, "packages": []}"#;
+    fs::write(world.path().join("bosun.lock"), old).unwrap();
+}
+
+#[when("the manifest is replaced by:")]
+fn replace_manifest(world: &mut BosunWorld, step: &Step) {
+    the_manifest(world, step);
 }
 
 #[given("the manifest:")]
@@ -799,20 +823,24 @@ fn lock_omits(world: &mut BosunWorld, pkg: String) {
     let (text, doc) = world.lock();
     assert!(
         !lock_leaves(&doc).any(|(name, _)| name == pkg.as_str()),
-        "{pkg} in bosun.lock:\n{text}"
+        "{pkg} in the lock:\n{text}"
     );
 }
 
 #[then("a lock is written")]
 fn lock_written(world: &mut BosunWorld) {
     let p = world.path();
-    assert!(p.join("bosun.lock").exists(), "no bosun.lock");
+    assert_eq!(lock_files(&p).len(), 1, "no lock in the state dir");
+    assert!(
+        !p.join("bosun.lock").exists(),
+        "a lock was written into the project"
+    );
 }
 
 #[then("no lock is written")]
 fn lock_absent(world: &mut BosunWorld) {
     let p = world.path();
-    assert!(!p.join("bosun.lock").exists(), "bosun.lock exists");
+    assert!(lock_files(&p).is_empty(), "a lock was written");
 }
 
 fn lock_leaves(doc: &Value) -> impl Iterator<Item = (&Value, &Value)> {
@@ -835,7 +863,7 @@ fn lock_pins(world: &mut BosunWorld, pkg: String, version: String) {
     assert!(
         lock_leaves(&doc)
             .any(|(name, leaf)| name == pkg.as_str() && leaf["resolved"] == version.as_str()),
-        "want {pkg} {version} in bosun.lock:\n{text}"
+        "want {pkg} {version} in the lock:\n{text}"
     );
 }
 
@@ -844,7 +872,7 @@ fn lock_checksum(world: &mut BosunWorld, checksum: String) {
     let (text, doc) = world.lock();
     assert!(
         lock_leaves(&doc).any(|(_, leaf)| leaf["checksum"] == checksum.as_str()),
-        "want checksum {checksum} in bosun.lock:\n{text}"
+        "want checksum {checksum} in the lock:\n{text}"
     );
 }
 

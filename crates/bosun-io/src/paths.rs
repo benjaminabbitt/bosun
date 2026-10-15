@@ -3,10 +3,11 @@
 //! folders: `%ProgramData%` (system state), `%LOCALAPPDATA%` (user state),
 //! `%APPDATA%` (config).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use bosun_core::Scope;
 use etcetera::base_strategy::{BaseStrategy, Xdg};
+use sha2::{Digest, Sha256};
 
 use crate::error::IoError;
 
@@ -72,6 +73,26 @@ pub fn config_path() -> Result<PathBuf, IoError> {
         return windows_config_path(env_var);
     }
     Ok(xdg()?.config_dir().join("bosun").join("config.yaml"))
+}
+
+/// Where a user's locks live (§4.5): `locks/` in the directory holding their
+/// machine state file. A lock is the machine's own, so it is never in the
+/// project; under `sudo` the user state is root's, so an elevated
+/// `install --frozen` reads a lock written elevated.
+pub fn locks_beside(state_file: &Path) -> PathBuf {
+    state_file
+        .parent()
+        .map_or_else(|| PathBuf::from("locks"), |dir| dir.join("locks"))
+}
+
+/// The lock for the manifest at `manifest` (its canonical path) in `dir`:
+/// named by a hash of the path, so every project gets its own and none needs
+/// a name that is safe on every filesystem. The lock records the path too,
+/// so a lock is never read for a manifest it wasn't written for.
+pub fn lock_file(dir: &Path, manifest: &Path) -> PathBuf {
+    let digest = Sha256::digest(manifest.to_string_lossy().as_bytes());
+    let name: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
+    dir.join(format!("{name}.json"))
 }
 
 #[cfg(test)]
@@ -141,6 +162,27 @@ mod tests {
         let err = windows_state_path(Scope::User, |_| None).unwrap_err();
         assert!(err.to_string().contains("LOCALAPPDATA"), "{err}");
         assert!(windows_config_path(|_| None).is_err());
+    }
+
+    #[test]
+    fn locks_sit_beside_the_user_state() {
+        assert_eq!(
+            locks_beside(Path::new("/s/bosun/state.json")),
+            PathBuf::from("/s/bosun/locks")
+        );
+    }
+
+    #[test]
+    fn each_manifest_path_has_its_own_lock_file_and_the_same_path_the_same_one() {
+        let dir = Path::new("/s/locks");
+        let a = lock_file(dir, Path::new("/home/me/a/bosun.yaml"));
+        let b = lock_file(dir, Path::new("/home/me/b/bosun.yaml"));
+        assert_ne!(a, b);
+        assert_eq!(a, lock_file(dir, Path::new("/home/me/a/bosun.yaml")));
+        assert_eq!(a.parent(), Some(dir));
+        let name = a.file_name().unwrap().to_string_lossy().to_string();
+        assert_eq!(name.len(), "0123456789abcdef.json".len(), "{name}");
+        assert!(name.ends_with(".json"));
     }
 
     #[test]

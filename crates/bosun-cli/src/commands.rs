@@ -8,7 +8,7 @@ use bosun_core::record::{LockDocument, StateDocument};
 use bosun_core::{BackendId, Manifest, Scope};
 use bosun_io::{check_options, load_manifest, lock, manifest_hash};
 use bosun_ports::{Installer, StateStore};
-use bosun_resolve::{merge_lock, resolve, retain_listed, NotApplicable, Outcome, Resolution};
+use bosun_resolve::{resolve, NotApplicable, Outcome, Resolution};
 use serde::Serialize;
 
 use crate::env::Env;
@@ -345,6 +345,8 @@ pub struct LockOutput {
     error: bool,
     resolved: Vec<ResolvedInfo>,
     diagnostics: Vec<String>,
+    /// The lock written; `None` when nothing was.
+    lock: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -355,16 +357,15 @@ struct ResolvedInfo {
     version: String,
 }
 
-/// Resolve this platform (and `any`) and merge into `bosun.lock`.
+/// Resolve the manifest for this machine (its platform and `any`) and write
+/// this machine's lock for it (§4.5), replacing the last one.
 pub fn lock(env: &Env, path: Option<PathBuf>, pref: &[BackendId]) -> Result<LockOutput, CliError> {
     let file = manifest_file(path)?;
     let manifest = load(env, &file)?;
     let hash = manifest_hash(&manifest);
-    let lock_path = file
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("bosun.lock");
-    let existing = read_lock(&lock_path, &env.schemes())?;
+    let claim_path = canonical_manifest(&file);
+    let lock_path = env.lock_path(&claim_path);
+    warn_of_a_project_lock(&file, &lock_path);
 
     let resolution = resolve(&manifest, &hash, &env.host(), &env.resolvables(), pref)
         .map_err(|e| CliError::Resolve(e.to_string()))?;
@@ -377,20 +378,38 @@ pub fn lock(env: &Env, path: Option<PathBuf>, pref: &[BackendId]) -> Result<Lock
         .iter()
         .any(|o| matches!(o.outcome, Outcome::Unsatisfiable { .. }));
     if has_error {
-        return Ok(lock_output(resolution));
+        return Ok(lock_output(resolution, None));
     }
-    let merged = match existing {
-        Some(prev) => retain_listed(merge_lock(&prev, &resolution.lock), &manifest),
-        None => resolution.lock.clone(),
-    };
-    fs::write(&lock_path, lock::to_json(&merged)).map_err(|e| CliError::Io {
+    let mut doc = resolution.lock.clone();
+    doc.manifest = claim_path.display().to_string();
+    let io_err = |e: std::io::Error| CliError::Io {
         path: lock_path.clone(),
         detail: e.to_string(),
-    })?;
-    Ok(lock_output(resolution))
+    };
+    if let Some(dir) = lock_path.parent() {
+        fs::create_dir_all(dir).map_err(io_err)?;
+    }
+    fs::write(&lock_path, lock::to_json(&doc)).map_err(io_err)?;
+    Ok(lock_output(resolution, Some(&lock_path)))
 }
 
-fn lock_output(resolution: Resolution) -> LockOutput {
+/// A `bosun.lock` beside the manifest is the shared lock of older bosun
+/// builds, which this one no longer reads; say so, and where the lock is now.
+fn warn_of_a_project_lock(manifest: &Path, lock_path: &Path) {
+    let old = manifest
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("bosun.lock");
+    if old.exists() {
+        tracing::warn!(
+            message = crate::logmsg::PROJECT_LOCK_IGNORED,
+            path = %old.display(),
+            lock = %lock_path.display()
+        );
+    }
+}
+
+fn lock_output(resolution: Resolution, written: Option<&Path>) -> LockOutput {
     let mut resolved = Vec::new();
     let mut diagnostics = Vec::new();
     let mut error = false;
@@ -422,6 +441,7 @@ fn lock_output(resolution: Resolution) -> LockOutput {
         error,
         resolved,
         diagnostics,
+        lock: written.map(|p| p.display().to_string()),
     }
 }
 
@@ -437,7 +457,13 @@ impl Render for LockOutput {
         for d in &self.diagnostics {
             lines.push(d.clone());
         }
-        lines.push(format!("Locked: {} resolved", self.resolved.len()));
+        match &self.lock {
+            Some(path) => lines.push(format!(
+                "Locked: {} resolved, in {path}",
+                self.resolved.len()
+            )),
+            None => lines.push(format!("Locked: {} resolved", self.resolved.len())),
+        }
         lines.join("\n")
     }
 
@@ -529,13 +555,7 @@ pub fn install_plan(env: &Env, opts: InstallOpts, pref: &[BackendId]) -> Result<
     let claim_path = canonical_manifest(&file);
 
     let (managed, carried) = if opts.frozen {
-        let lock_path = lock_path(&file);
-        let lock = read_lock(&lock_path, &env.schemes())?.ok_or_else(|| {
-            CliError::Resolve(format!(
-                "--frozen needs a lockfile at {}",
-                lock_path.display()
-            ))
-        })?;
+        let lock = frozen_lock(env, &file, &claim_path, &hash)?;
         managed_from_lock(env, &claim_path, &lock, &mut state)?
     } else {
         let resolution = resolve(&manifest, &hash, &env.host(), &env.resolvables(), pref)
@@ -824,11 +844,31 @@ pub(crate) fn combined_state(env: &Env) -> Result<StateDocument, CliError> {
     })
 }
 
-fn lock_path(manifest_file: &Path) -> PathBuf {
-    manifest_file
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("bosun.lock")
+/// This machine's lock for the manifest, for `install --frozen` (§7): it must
+/// exist, be for this manifest, and be locked against the manifest as it is
+/// now, or there is nothing to install verbatim.
+fn frozen_lock(
+    env: &Env,
+    file: &Path,
+    claim_path: &Path,
+    hash: &str,
+) -> Result<LockDocument, CliError> {
+    let lock_path = env.lock_path(claim_path);
+    let lock = read_lock(&lock_path, &env.schemes())?
+        .filter(|l| Path::new(&l.manifest) == claim_path)
+        .ok_or_else(|| {
+            CliError::Resolve(format!(
+                "--frozen needs this machine's lock for {}; run `bosun lock`",
+                file.display()
+            ))
+        })?;
+    if lock.manifest_hash != hash {
+        return Err(CliError::Resolve(format!(
+            "--frozen: {} changed since it was locked; run `bosun lock`",
+            file.display()
+        )));
+    }
+    Ok(lock)
 }
 
 /// Resolve the manifest path for a claim without requiring the file to exist
@@ -916,6 +956,14 @@ mod tests {
 
     fn registered(v: &[(&str, Scope)]) -> Vec<(BackendId, Scope)> {
         v.iter().map(|(id, s)| (BackendId::new(*id), *s)).collect()
+    }
+
+    #[test]
+    fn the_resolver_stamps_the_lock_version_bosun_io_reads() {
+        assert_eq!(
+            bosun_resolve::LOCKFILE_VERSION,
+            bosun_io::lock::LOCKFILE_VERSION
+        );
     }
 
     #[test]

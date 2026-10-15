@@ -46,8 +46,27 @@ fn bosun(dir: &Path) -> Command {
     // is captured (cargo_bin's own resolution would miss it).
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_bosun"));
     cmd.env("BOSUN_FIXTURE", dir.join("fixture.json"))
-        .env("BOSUN_STATE_DIR", dir.join("state"));
+        .env("BOSUN_STATE_DIR", dir.join("state"))
+        // The user config is the test's own, never the developer's.
+        .env("XDG_CONFIG_HOME", dir.join("config"))
+        .env("APPDATA", dir.join("config"));
     cmd
+}
+
+/// The machine's locks, in the user state dir (never the project).
+fn lock_files(dir: &Path) -> Vec<PathBuf> {
+    match fs::read_dir(dir.join("state").join("user").join("locks")) {
+        Ok(entries) => entries.map(|e| e.unwrap().path()).collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// The one lock `bosun lock` wrote for this project.
+fn the_lock(dir: &Path) -> String {
+    let files = lock_files(dir);
+    assert_eq!(files.len(), 1, "locks: {files:?}");
+    assert!(!dir.join("bosun.lock").exists(), "a lock in the project");
+    fs::read_to_string(&files[0]).unwrap()
 }
 
 fn stdout_json(output: &[u8]) -> Value {
@@ -100,8 +119,8 @@ fn lock_resolves_and_writes_the_lockfile() {
     let json = stdout_json(&assert.get_output().stdout);
     let resolved = json["resolved"].as_array().unwrap();
     assert_eq!(resolved.len(), 2);
-    // The lockfile is written next to the manifest with the resolved versions.
-    let lock = fs::read_to_string(dir.path().join("bosun.lock")).unwrap();
+    // The machine's lock holds the resolved versions.
+    let lock = the_lock(dir.path());
     assert!(lock.contains("\"resolved\": \"1.7.1-3\""), "lock: {lock}");
     assert!(
         lock.contains("pkg:deb/debian/jq?arch=amd64&distro=bookworm"),
@@ -666,7 +685,7 @@ fn lock_refuses_to_write_an_incomplete_target() {
         .assert()
         .code(1);
     assert_eq!(stdout_json(&assert.get_output().stdout)["error"], true);
-    assert!(!dir.path().join("bosun.lock").exists(), "no partial lock");
+    assert!(lock_files(dir.path()).is_empty(), "no partial lock");
 }
 
 #[test]
@@ -914,7 +933,7 @@ fn lock_records_the_github_release_checksum() {
         .arg(dir.path())
         .assert()
         .success();
-    let lock = fs::read_to_string(dir.path().join("bosun.lock")).unwrap();
+    let lock = the_lock(dir.path());
     assert!(
         lock.contains("89a356c697c9458929ecf851bc85da3a9548d19aa978837b54c0b0b27100810f"),
         "lock records the checksum: {lock}"
@@ -976,10 +995,12 @@ fn frozen_refuses_an_accepted_package_at_a_different_version_than_the_lock() {
         "available":{"jq":["1.7.1-6+deb13u1","1.7.1-6+deb13u2"]},"installed":{"jq":"1.7.1-6+deb13u1"}}]}"#;
     let manifest = "version: 2\npackages:\n  - name: jq\n    spec: \">=1.6\"\n    install:\n      linux:debian: {backend: apt}\n";
     let dir = write_project(fixture, manifest);
-    let lock = r#"{"lockfileVersion":1,"targets":{"linux/amd64":{"manifestHash":"sha256:x"}},
-      "packages":[{"name":"jq","spec":"vers:deb/>=1.6","targets":{"linux/amd64":{
-        "backend":"apt","purl":"pkg:deb/debian/jq?arch=amd64&distro=trixie","resolved":"1.7.1-6+deb13u2"}}}]}"#;
-    fs::write(dir.path().join("bosun.lock"), lock).unwrap();
+    // The lock pins the newest, u2.
+    bosun(dir.path())
+        .arg("lock")
+        .arg(dir.path())
+        .assert()
+        .success();
     let assert = bosun(dir.path())
         .args(["--format", "json", "install"])
         .arg(dir.path())

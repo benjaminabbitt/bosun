@@ -16,8 +16,8 @@
 //!
 //! A platform-independent backend (cargo, go, npm, …) resolves under the `any`
 //! target; every other backend under the current platform (§4.7). [`resolve`]
-//! covers only the targets resolved this run; [`merge_lock`] folds that into an
-//! existing `bosun.lock` per target key.
+//! gives this machine's whole lock: the lock is the machine's own, so there is
+//! nothing to merge.
 //!
 //! Where one install scope holds a package claimed by several manifests (§4.6),
 //! [`select_across_claims`] intersects every claim's vers set — refusing when
@@ -26,18 +26,19 @@
 
 mod errmsg;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use bosun_core::manifest::{Backends, InstallBlock, Manifest, ManifestEntry, PACKAGE_OPTION};
 use bosun_core::platform::{Arch, Distro, Os, Selector, Target};
-use bosun_core::record::{LockDocument, LockLeaf, LockPackage, Package, Placement, TargetLock};
+use bosun_core::record::{LockDocument, LockLeaf, LockPackage, Package, Placement};
 use bosun_core::spec::{SelectError, Spec, SpecError};
 use bosun_core::{BackendId, Claim, Purl, PurlError, Ref, Version};
 use bosun_ports::backend::Index;
 use bosun_ports::error::PortError;
 
-/// The lockfile format version this resolver writes (§4.5).
-const LOCKFILE_VERSION: u32 = 1;
+/// The lockfile format version this resolver writes (§4.5); bosun-io's
+/// `LOCKFILE_VERSION`, which reads and writes the file, is the same number.
+pub const LOCKFILE_VERSION: u32 = 2;
 
 /// The host facts resolution matches selectors and builds identities against.
 /// A narrow view of the `Machine` port: resolution needs only these, never the
@@ -195,14 +196,10 @@ pub fn resolve(
 ) -> Result<Resolution, ResolveError> {
     let mut outcomes = Vec::with_capacity(manifest.packages.len());
     let mut packages = Vec::new();
-    let mut targets: BTreeMap<Target, TargetLock> = BTreeMap::new();
 
     for entry in &manifest.packages {
         let (outcome, resolved) = resolve_entry(entry, manifest, host, backends, preference)?;
-        if let Some((target, package)) = resolved {
-            targets.entry(target).or_insert_with(|| TargetLock {
-                manifest_hash: manifest_hash.to_string(),
-            });
+        if let Some((_, package)) = resolved {
             packages.push(package);
         }
         outcomes.push(EntryOutcome {
@@ -214,7 +211,9 @@ pub fn resolve(
     Ok(Resolution {
         lock: LockDocument {
             lockfile_version: LOCKFILE_VERSION,
-            targets,
+            // The caller knows which file this is for; the resolver doesn't.
+            manifest: String::new(),
+            manifest_hash: manifest_hash.to_string(),
             packages,
         },
         outcomes,
@@ -622,83 +621,6 @@ pub fn frozen_select(
     }
 }
 
-// --- lock merge and freshness (§4.5, §4.7) ---------------------------------
-
-/// Fold a freshly resolved lockfile into an existing one per target key (§4.7):
-/// the targets `fresh` resolved are replaced wholesale (their headers and all
-/// their package leaves), and every other target in `existing` is left
-/// untouched, so one platform's `bosun lock` never disturbs another's. A
-/// package whose only leaves were at re-resolved targets and is absent from
-/// `fresh` is dropped from those targets.
-pub fn merge_lock(existing: &LockDocument, fresh: &LockDocument) -> LockDocument {
-    let fresh_targets: BTreeSet<Target> = fresh.targets.keys().copied().collect();
-
-    // Target headers: fresh overwrites its own keys; the rest stay (§4.7).
-    let mut targets = existing.targets.clone();
-    for (target, header) in &fresh.targets {
-        targets.insert(*target, header.clone());
-    }
-
-    // Package names in a stable order: existing first, then new ones from fresh.
-    let mut names: Vec<&str> = Vec::new();
-    for package in existing.packages.iter().chain(&fresh.packages) {
-        if !names.contains(&package.name.as_str()) {
-            names.push(&package.name);
-        }
-    }
-    let find =
-        |packages: &[LockPackage], name: &str| packages.iter().find(|p| p.name == name).cloned();
-
-    let mut packages = Vec::new();
-    for name in names {
-        let existing_pkg = find(&existing.packages, name);
-        let fresh_pkg = find(&fresh.packages, name);
-        let mut leaves: BTreeMap<Target, LockLeaf> = BTreeMap::new();
-        // Keep existing leaves at targets this run did not re-resolve.
-        if let Some(package) = &existing_pkg {
-            for (target, leaf) in &package.targets {
-                if !fresh_targets.contains(target) {
-                    leaves.insert(*target, leaf.clone());
-                }
-            }
-        }
-        // Overlay the freshly resolved leaves (all at fresh target keys).
-        if let Some(package) = &fresh_pkg {
-            for (target, leaf) in &package.targets {
-                leaves.insert(*target, leaf.clone());
-            }
-        }
-        if leaves.is_empty() {
-            continue; // re-resolved away for every target it held
-        }
-        // Package-level spec follows the fresh resolution when present.
-        let meta = fresh_pkg
-            .or(existing_pkg)
-            .map(|p| p.meta)
-            .expect("a contributing package exists");
-        packages.push(Package {
-            name: name.to_string(),
-            meta,
-            targets: leaves,
-        });
-    }
-
-    LockDocument {
-        lockfile_version: fresh.lockfile_version,
-        targets,
-        packages,
-    }
-}
-
-/// `lock` without the packages `manifest` no longer lists, on every target
-/// (§4.5): a removed entry leaves the lock everywhere at once, not one
-/// platform's `bosun lock` at a time. Target headers are kept.
-pub fn retain_listed(mut lock: LockDocument, manifest: &Manifest) -> LockDocument {
-    lock.packages
-        .retain(|p| manifest.packages.iter().any(|e| e.name == p.name));
-    lock
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -878,8 +800,8 @@ mod tests {
             "pkg:deb/debian/jq?arch=amd64&distro=bookworm"
         );
         assert_eq!(leaf.resolved.as_str(), "1.7.1-3");
-        // The target header records the manifest hash.
-        assert_eq!(r.lock.targets[&AMD64].manifest_hash, "sha256:abc");
+        // The lock records the manifest hash it was resolved against.
+        assert_eq!(r.lock.manifest_hash, "sha256:abc");
     }
 
     #[test]
@@ -909,7 +831,6 @@ mod tests {
                 version: Version::parse("14.1.1", Scheme::Semver).unwrap(),
             }
         );
-        assert!(r.lock.targets.contains_key(&Target::Any));
         assert_eq!(
             r.lock.packages[0].targets[&Target::Any]
                 .placement
@@ -1475,7 +1396,6 @@ mod tests {
             Outcome::NotApplicable(NotApplicable::NoSelector)
         );
         assert!(r.lock.packages.is_empty());
-        assert!(r.lock.targets.is_empty());
     }
 
     #[test]
@@ -1723,16 +1643,7 @@ mod tests {
         assert!(matches!(err, ResolveError::Query { name, .. } if name == "fd"));
     }
 
-    // --- 8-2: multi-claim, frozen, merge, freshness ------------------------
-
-    const ARM64: Target = Target::Platform {
-        os: Os::Linux,
-        arch: Arch::Arm64,
-    };
-    const DARWIN: Target = Target::Platform {
-        os: Os::Macos,
-        arch: Arch::Arm64,
-    };
+    // --- multi-claim and frozen ----------------------------------------------
 
     fn claim(manifest: &str, spec: &str, user: Option<&str>) -> Claim {
         Claim {
@@ -1748,45 +1659,6 @@ mod tests {
 
     fn deb_versions(raw: &[&str]) -> Vec<Version> {
         raw.iter().map(|v| deb(v)).collect()
-    }
-
-    fn lock_leaf(resolved: &str) -> LockLeaf {
-        LockLeaf {
-            placement: Placement {
-                backend: BackendId::new("apt"),
-                purl: "pkg:deb/debian/x".parse().unwrap(),
-            },
-            spec: None,
-            resolved: deb(resolved),
-            index_snapshot: None,
-            checksum: None,
-        }
-    }
-
-    fn lock_pkg(name: &str, leaves: &[(Target, &str)]) -> LockPackage {
-        Package {
-            name: name.to_string(),
-            meta: Spec::new(">=0", "deb").unwrap(),
-            targets: leaves.iter().map(|(t, v)| (*t, lock_leaf(v))).collect(),
-        }
-    }
-
-    fn lock_doc(targets: &[(Target, &str)], packages: Vec<LockPackage>) -> LockDocument {
-        LockDocument {
-            lockfile_version: 1,
-            targets: targets
-                .iter()
-                .map(|(t, h)| {
-                    (
-                        *t,
-                        TargetLock {
-                            manifest_hash: h.to_string(),
-                        },
-                    )
-                })
-                .collect(),
-            packages,
-        }
     }
 
     #[test]
@@ -1899,95 +1771,5 @@ mod tests {
             }
             other => panic!("expected frozen clash, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn merge_lock_replaces_fresh_targets_and_leaves_others_untouched() {
-        let existing = lock_doc(
-            &[(AMD64, "h-old"), (ARM64, "h-arm")],
-            vec![lock_pkg("jq", &[(AMD64, "1.7.1-3"), (ARM64, "1.7.1-2")])],
-        );
-        let fresh = lock_doc(
-            &[(AMD64, "h-new")],
-            vec![
-                lock_pkg("jq", &[(AMD64, "1.7.1-4")]),
-                lock_pkg("fd", &[(AMD64, "9.0.0-1")]),
-            ],
-        );
-
-        let merged = merge_lock(&existing, &fresh);
-
-        // Headers: amd64 overwritten, arm64 untouched.
-        assert_eq!(merged.targets[&AMD64].manifest_hash, "h-new");
-        assert_eq!(merged.targets[&ARM64].manifest_hash, "h-arm");
-        // jq: amd64 re-resolved, arm64 kept from the old lock.
-        let jq = merged.packages.iter().find(|p| p.name == "jq").unwrap();
-        assert_eq!(jq.targets[&AMD64].resolved.as_str(), "1.7.1-4");
-        assert_eq!(jq.targets[&ARM64].resolved.as_str(), "1.7.1-2");
-        // fd is new this run.
-        assert!(merged.packages.iter().any(|p| p.name == "fd"));
-    }
-
-    #[test]
-    fn a_package_gone_from_the_manifest_leaves_the_lock_on_every_target() {
-        let lock = lock_doc(
-            &[(AMD64, "h"), (ARM64, "h-arm"), (DARWIN, "h-mac")],
-            vec![
-                lock_pkg("jq", &[(AMD64, "1.7.1-3"), (ARM64, "1.7.1-2")]),
-                lock_pkg("gone", &[(ARM64, "1.0.0-1"), (DARWIN, "1.0.0-1")]),
-            ],
-        );
-        let m = manifest(&[], vec![entry("jq", Some("1.7.1-3"), &[])]);
-
-        let kept = retain_listed(lock, &m);
-
-        let names: Vec<&str> = kept.packages.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, vec!["jq"]);
-        assert_eq!(kept.packages[0].targets.len(), 2);
-        // Target headers are untouched: freshness is lock --check's to judge.
-        assert_eq!(kept.targets.len(), 3);
-    }
-
-    #[test]
-    fn merge_lock_drops_a_package_absent_from_a_reresolved_target() {
-        let existing = lock_doc(
-            &[(AMD64, "h-old")],
-            vec![lock_pkg("old", &[(AMD64, "1.0.0-1")])],
-        );
-        let fresh = lock_doc(
-            &[(AMD64, "h-new")],
-            vec![lock_pkg("new", &[(AMD64, "2.0.0-1")])],
-        );
-
-        let merged = merge_lock(&existing, &fresh);
-
-        // `old` had only an amd64 leaf, amd64 was re-resolved without it → gone.
-        assert!(!merged.packages.iter().any(|p| p.name == "old"));
-        assert!(merged.packages.iter().any(|p| p.name == "new"));
-    }
-
-    #[test]
-    fn merge_lock_keeps_a_package_whose_target_was_not_reresolved() {
-        let existing = lock_doc(
-            &[(DARWIN, "h-mac")],
-            vec![lock_pkg("mac-tool", &[(DARWIN, "1.0.0-1")])],
-        );
-        let fresh = lock_doc(
-            &[(AMD64, "h-new")],
-            vec![lock_pkg("linux-tool", &[(AMD64, "2.0.0-1")])],
-        );
-
-        let merged = merge_lock(&existing, &fresh);
-
-        // darwin/arm64 was not re-resolved, so mac-tool survives untouched.
-        let mac = merged
-            .packages
-            .iter()
-            .find(|p| p.name == "mac-tool")
-            .unwrap();
-        assert_eq!(mac.targets[&DARWIN].resolved.as_str(), "1.0.0-1");
-        assert!(merged.packages.iter().any(|p| p.name == "linux-tool"));
-        assert_eq!(merged.targets[&DARWIN].manifest_hash, "h-mac");
-        assert_eq!(merged.targets[&AMD64].manifest_hash, "h-new");
     }
 }
