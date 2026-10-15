@@ -186,7 +186,8 @@ pub enum ResolveError {
 /// hash the targets record (computed by the caller via bosun-io, so the
 /// resolver stays free of file concerns, §4.5). `preference` is the merged
 /// installer preference (flag then env then config, §5.3); the manifest's own
-/// order is appended per entry.
+/// order is appended per entry. Every entry gets the newest version its spec
+/// admits; [`resolve_with_lock`] keeps versions a lock already pins.
 pub fn resolve(
     manifest: &Manifest,
     manifest_hash: &str,
@@ -194,11 +195,29 @@ pub fn resolve(
     backends: &[ResolvableBackend<'_>],
     preference: &[BackendId],
 ) -> Result<Resolution, ResolveError> {
+    resolve_with_lock(manifest, manifest_hash, host, backends, preference, None)
+}
+
+/// [`resolve`], keeping each version `locked` pins while it still fits (§7):
+/// the same backend and package identity, still available, still in the
+/// entry's spec. An entry the lock doesn't pin, or whose pin no longer fits,
+/// gets the newest version its spec admits. Moving a pin forward is
+/// `upgrade`'s job, which resolves without the pins it releases.
+pub fn resolve_with_lock(
+    manifest: &Manifest,
+    manifest_hash: &str,
+    host: &Host<'_>,
+    backends: &[ResolvableBackend<'_>],
+    preference: &[BackendId],
+    locked: Option<&LockDocument>,
+) -> Result<Resolution, ResolveError> {
     let mut outcomes = Vec::with_capacity(manifest.packages.len());
     let mut packages = Vec::new();
 
     for entry in &manifest.packages {
-        let (outcome, resolved) = resolve_entry(entry, manifest, host, backends, preference)?;
+        let pinned = locked.and_then(|l| l.packages.iter().find(|p| p.name == entry.name));
+        let (outcome, resolved) =
+            resolve_entry(entry, manifest, host, backends, preference, pinned)?;
         if let Some((_, package)) = resolved {
             packages.push(package);
         }
@@ -228,6 +247,7 @@ fn resolve_entry(
     host: &Host<'_>,
     backends: &[ResolvableBackend<'_>],
     preference: &[BackendId],
+    pinned: Option<&LockPackage>,
 ) -> Result<(Outcome, Option<(Target, LockPackage)>), ResolveError> {
     // §5.4: the most specific install block that applies here, defaults merged.
     let Some(block) = effective_block(entry, manifest, host) else {
@@ -293,15 +313,29 @@ fn resolve_entry(
         }
     };
 
-    // §12: record the backend's enforced checksum when it has one (github-release
-    // reads it from the release's checksums.txt; apt/cargo have none).
-    let checksum = chosen
-        .index
-        .checksum(&Ref::new(purl.clone()), &version, &target)
-        .map_err(|source| ResolveError::Query {
-            name: entry.name.clone(),
-            source,
-        })?;
+    // §7: a pin that still fits is kept, with the checksum recorded for it.
+    let kept = pinned.and_then(|p| p.targets.get(&target)).filter(|leaf| {
+        leaf.placement.backend == chosen.id
+            && leaf.placement.purl == purl
+            && available.contains(&leaf.resolved)
+            && spec.range().contains(&leaf.resolved)
+    });
+    let (version, checksum) = match kept {
+        Some(leaf) => (leaf.resolved.clone(), leaf.checksum.clone()),
+        // §12: record the backend's enforced checksum when it has one
+        // (github-release reads it from the release's checksums.txt; apt/cargo
+        // have none).
+        None => {
+            let checksum = chosen
+                .index
+                .checksum(&Ref::new(purl.clone()), &version, &target)
+                .map_err(|source| ResolveError::Query {
+                    name: entry.name.clone(),
+                    source,
+                })?;
+            (version, checksum)
+        }
+    };
 
     let package: LockPackage = Package {
         name: entry.name.clone(),
@@ -628,6 +662,7 @@ mod tests {
 
     use bosun_core::manifest::Options;
     use bosun_core::version::Scheme;
+    use bosun_core::Checksum;
 
     /// An index that returns a fixed version list and records the last query.
     struct FakeIndex {
@@ -838,6 +873,162 @@ mod tests {
                 .to_string(),
             "pkg:cargo/ripgrep"
         );
+    }
+
+    // --- keeping locked versions ---------------------------------------------
+
+    fn ripgrep_manifest(spec: &str, package: Option<&str>) -> Manifest {
+        manifest(
+            &[],
+            vec![entry(
+                "ripgrep",
+                Some(spec),
+                &[("linux", block(&["cargo"], package, None))],
+            )],
+        )
+    }
+
+    /// A lock pinning ripgrep at `version` under `purl` (cargo, `any`).
+    fn ripgrep_locked(purl: &str, version: &str, checksum: Option<&str>) -> LockDocument {
+        LockDocument {
+            lockfile_version: LOCKFILE_VERSION,
+            manifest: "/p/bosun.yaml".into(),
+            manifest_hash: "sha256:old".into(),
+            packages: vec![Package {
+                name: "ripgrep".into(),
+                meta: Spec::new(">=14.0.0|<15.0.0", "cargo").unwrap(),
+                targets: BTreeMap::from([(
+                    Target::Any,
+                    LockLeaf {
+                        placement: Placement {
+                            backend: BackendId::new("cargo"),
+                            purl: purl.parse().unwrap(),
+                        },
+                        spec: None,
+                        resolved: Version::parse(version, Scheme::Semver).unwrap(),
+                        index_snapshot: None,
+                        checksum: checksum.map(|c| Checksum(c.to_string())),
+                    },
+                )]),
+            }],
+        }
+    }
+
+    fn resolved_version(r: &Resolution) -> &str {
+        match &r.outcomes[0].outcome {
+            Outcome::Resolved { version, .. } => version.as_str(),
+            other => panic!("not resolved: {other:?}"),
+        }
+    }
+
+    fn any_host() -> Host<'static> {
+        Host {
+            os: Os::Linux,
+            arch: Arch::Amd64,
+            distro: None,
+        }
+    }
+
+    #[test]
+    fn a_locked_version_still_in_its_spec_is_kept() {
+        let index = FakeIndex::new(Scheme::Semver, &["14.0.0", "14.1.1"]);
+        let locked = ripgrep_locked("pkg:cargo/ripgrep", "14.0.0", None);
+        let r = resolve_with_lock(
+            &ripgrep_manifest(">=14.0.0|<15.0.0", None),
+            "sha256:new",
+            &any_host(),
+            &[cargo_backend(&index)],
+            &[],
+            Some(&locked),
+        )
+        .unwrap();
+        assert_eq!(resolved_version(&r), "14.0.0");
+        assert_eq!(
+            r.lock.packages[0].targets[&Target::Any].resolved.as_str(),
+            "14.0.0"
+        );
+        assert_eq!(r.lock.manifest_hash, "sha256:new");
+    }
+
+    #[test]
+    fn a_locked_version_the_spec_no_longer_admits_is_resolved_again() {
+        let index = FakeIndex::new(Scheme::Semver, &["14.0.0", "14.1.1"]);
+        let locked = ripgrep_locked("pkg:cargo/ripgrep", "14.0.0", None);
+        let r = resolve_with_lock(
+            &ripgrep_manifest(">=14.1.0|<15.0.0", None),
+            "h",
+            &any_host(),
+            &[cargo_backend(&index)],
+            &[],
+            Some(&locked),
+        )
+        .unwrap();
+        assert_eq!(resolved_version(&r), "14.1.1");
+    }
+
+    #[test]
+    fn a_locked_version_no_longer_available_is_resolved_again() {
+        let index = FakeIndex::new(Scheme::Semver, &["14.1.1"]);
+        let locked = ripgrep_locked("pkg:cargo/ripgrep", "14.0.0", None);
+        let r = resolve_with_lock(
+            &ripgrep_manifest(">=14.0.0|<15.0.0", None),
+            "h",
+            &any_host(),
+            &[cargo_backend(&index)],
+            &[],
+            Some(&locked),
+        )
+        .unwrap();
+        assert_eq!(resolved_version(&r), "14.1.1");
+    }
+
+    #[test]
+    fn a_pin_for_another_package_id_is_not_kept() {
+        // The manifest now names a different crate for ripgrep.
+        let index = FakeIndex::new(Scheme::Semver, &["14.0.0", "14.1.1"]);
+        let locked = ripgrep_locked("pkg:cargo/ripgrep", "14.0.0", None);
+        let r = resolve_with_lock(
+            &ripgrep_manifest(">=14.0.0|<15.0.0", Some("ripgrep-fork")),
+            "h",
+            &any_host(),
+            &[cargo_backend(&index)],
+            &[],
+            Some(&locked),
+        )
+        .unwrap();
+        assert_eq!(resolved_version(&r), "14.1.1");
+    }
+
+    #[test]
+    fn a_kept_pin_keeps_its_recorded_checksum() {
+        let index = FakeIndex::new(Scheme::Semver, &["14.0.0", "14.1.1"]);
+        let locked = ripgrep_locked("pkg:cargo/ripgrep", "14.0.0", Some("sha256:pinned"));
+        let r = resolve_with_lock(
+            &ripgrep_manifest(">=14.0.0|<15.0.0", None),
+            "h",
+            &any_host(),
+            &[cargo_backend(&index)],
+            &[],
+            Some(&locked),
+        )
+        .unwrap();
+        let leaf = &r.lock.packages[0].targets[&Target::Any];
+        assert_eq!(leaf.checksum, Some(Checksum("sha256:pinned".into())));
+    }
+
+    #[test]
+    fn without_a_lock_the_newest_in_the_spec_is_chosen() {
+        let index = FakeIndex::new(Scheme::Semver, &["14.0.0", "14.1.1"]);
+        let r = resolve_with_lock(
+            &ripgrep_manifest(">=14.0.0|<15.0.0", None),
+            "h",
+            &any_host(),
+            &[cargo_backend(&index)],
+            &[],
+            None,
+        )
+        .unwrap();
+        assert_eq!(resolved_version(&r), "14.1.1");
     }
 
     #[test]

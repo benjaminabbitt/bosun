@@ -106,14 +106,14 @@ real to check later):
 |---|---|
 | `add <name> --backend … [--package] [--spec] [--on <selector>] [--opt k=v]` / `remove <name> [--plan] [--yes]` | edit one manifest entry, keeping every other byte, then run `lock` on the edited manifest. Both refuse a manifest older than the current version (run `migrate`). `add` writes under `any` when every backend is platform-independent, else this machine's OS, unless `--on` says; it checks the entry first (backend options, then a resolve on this machine) and writes nothing on error; without `--spec` it writes the range from the newest version up to the next breaking one (`>=2.0.2\|<3.0.0`, below 1.0 the next minor, apt: any revision of the upstream version); it never installs. `remove` first releases the package (drops this manifest's claim, uninstalls only if bosun installed it and no other manifest claims it, behind the usual confirm), then edits and locks |
 | `refresh` | explicit index refresh, per backend |
-| `install [path] [--plan] [--scope system\|user] [--yes]` | plan → privilege check → confirm → apply: resolve each entry with the local package manager, install, record in the machine state (§4.8, §5.5). **Never uninstalls** (except the old name in a `formerly` migration, §5.4) |
+| `install [path] [--plan] [--scope system\|user] [--yes]` | plan → privilege check → confirm → apply: resolve each entry against this machine's lock (its pins that still fit, the newest in spec for the rest), install, record in the machine state, then write the lock (only after a successful apply; never with `--plan`) (§4.8, §5.5, §7). **Never uninstalls** (except the old name in a `formerly` migration, §5.4) |
 | `uninstall [path] [--plan] [--scope system\|user] [--yes]` | the inverse of `install` for one manifest: drop all of its claims, then uninstall each package bosun installed that no other manifest still claims; same plan → confirm → apply flow (§9) |
 | `prune [--plan] [--scope system\|user] [--yes]` | machine-wide cleanup: uninstall what bosun installed that no manifest claims any more, and drop claims whose manifest no longer exists (§9) |
-| `upgrade [pkg]` | re-resolve range entries, rewrite this machine's lock, show before/after |
+| `upgrade [pkg…] [--manifest]` | let go of the named pins (all, when none are named), re-resolve those packages to the newest version their spec allows, write this machine's lock, and show old → new; installs nothing |
 | `export` | seed a manifest from the current machine |
 | `status` | what bosun manages on this machine and which manifests claim it (drift is `install --plan`'s job) |
 | `adopt <name>` | explicitly take ownership of an existing install: `accepted` → `installed` (§4.6) |
-| `lock` | resolve the manifest for this machine (its platform, plus platform-independent `any` entries) and write this machine's lock for it, replacing the last one (§4.5, §4.7). Warns when an older bosun's `bosun.lock` sits beside the manifest: it is no longer read |
+| `lock` | resolve the manifest for this machine (its platform, plus platform-independent `any` entries) and write this machine's lock for it, keeping each version it already pins while that still fits (§4.5, §7). Warns when an older bosun's `bosun.lock` sits beside the manifest: it is no longer read |
 | `migrate [path] [--plan] [--yes]` | rewrite an older-version manifest as the current version (loading migrates in memory anyway; this writes it, so `add` / `remove` can edit it). annals writes the migrated tree without comments, so it shows the result and confirms first, and keeps the original as `<file>.v<N>` |
 | `install --frozen` | install exactly what this machine's lock records; never re-resolves, never writes the lock; errors when there is no lock for this manifest, or the manifest changed since it was locked (§7) |
 | `render args\|env\|json` | versions for a target platform as build args, env lines, or a JSON versions file (§8.3) |
@@ -169,8 +169,9 @@ the same fields.
 
 > **DECIDED: the lock is the machine's own.** The manifest is about the packages and is
 > shared; the user config holds this machine's preferences; the lock records what *this
-> machine* resolved and is never shared or committed. Only `lock` and `upgrade` write it
-> (`add` / `remove` run `lock`); `install --frozen` installs it verbatim. Earlier designs
+> machine* resolved and is never shared or committed. `lock` and `upgrade` write it (`add` /
+> `remove` run `lock`), and `install` writes it after a successful apply; `install --frozen`
+> installs it verbatim. Earlier designs
 > committed one `bosun.lock` covering every declared platform (format version 1); that file
 > is no longer read, and `lock` warns when it finds one beside the manifest.
 
@@ -830,14 +831,17 @@ Consequences:
   getting ordering right.
 - A pin that the configured sources no longer carry is unsatisfiable. The remedy is to widen
   the range (e.g. `>=1.7.1|<1.7.2~` for "any Debian revision of 1.7.1"), not a fallback mode.
-- Ranges **break reproducibility by design**, so bosun inherits uv/npm's frozen-vs-update split:
-  - `bosun lock` — resolve and record versions for this machine (§4.7).
+- Ranges **break reproducibility by design**, so bosun inherits uv/npm's frozen-vs-update split.
+  **A locked version stays until it's upgraded (DECIDED):** resolving keeps each pin that
+  still fits — the same backend and package identity, still published, still in the spec —
+  and gives the newest in-spec version only to new entries and pins that no longer fit.
+  - `bosun lock` — resolve and record versions for this machine (§4.7), keeping pins.
   - `bosun install --frozen` — apply this machine's lock verbatim, no re-resolve, no lock
     write. A container build or CI job runs `bosun lock` then `install --frozen` in the same
     environment, or relies on exact specs.
-  - `bosun upgrade` — re-resolve ranges, rewrite the lock, show a before/after diff.
-  - plain `bosun install` — reads the lock as a preference across claims (§4.6), never writes
-    it.
+  - `bosun upgrade [pkg…]` — let go of pins, re-resolve, rewrite the lock, show old → new.
+  - plain `bosun install` — resolves like `lock`, prefers the pinned version across claims
+    (§4.6), and writes the lock once the install succeeds.
 - The plan shows "spec → resolved" for every entry, so a range resolving somewhere new is
   visible before applying.
 
@@ -1276,6 +1280,7 @@ scenario in the real-backend tier (skipped for compile time).
 | M2-4 | manifest version 2: `backends` map (acceptable set + options, `package` per backend), no order and no `targets`; `any` selector and bare-block shorthand; 1 → 2 migration; config `version` (0 → 1); `bosun migrate`; `lock --check` removed | landed |
 | M2-5 | preference is the machine's: flag > `BOSUN_INSTALLER` > config > built in (user scope before system, then registration order); a config that fails to load is an error | landed |
 | M2-6 | the lock is the machine's own: version 2, one per manifest in the user state dir (`locks/<sha256 of path>.json`), records its manifest and hash; no cross-target merge; `install --frozen` refuses a missing or stale lock; an older `bosun.lock` beside the manifest is warned about and not read; the repo's committed `bosun.lock` deleted | landed |
+| M2-7 | a locked version stays until it's upgraded: `lock` / `add` / `remove` / `install` keep pins that still fit; `bosun upgrade [pkg…]`; plain `install` prefers the pin across claims and writes the lock after a successful apply | landed |
 | M3-1 | WindowsMachine (Administrator = High/System integrity label in `whoami /groups`; state `%ProgramData%` / `%LOCALAPPDATA%`, config `%APPDATA%`); github-release on Windows (`<binary>.exe` into `%USERPROFILE%\.local\bin`, `;`-separated case-insensitive PATH check); `Step::Remove` replaces `rm -f`; `just check-win` (zig cc as MinGW) | landed hermetically; workspace type-checks for x86_64-pc-windows-gnu; **unverified on a real Windows host** |
 | M3-2 | winget (user), scoop (user), choco (system) backends; probe only on Windows | landed hermetically (argv and output parsing unit-tested, fixture scenarios); **unverified on a real Windows host** |
 | M3-3 | github-installer: a release's `.msi` (`msiexec /i … /qn /norestart`) or `.exe` (manifest `silent_args`, required); found in the Uninstall registry keys (`reg query`, three views) by `display_name` (`*` suffix = prefix); uninstall `msiexec /x {ProductCode}` or the entry's quiet/plain uninstaller; msiexec's 3010 (reboot required) is success, reported; system scope, no hold, no downgrade | landed (unit tests); **unverified on a real Windows host**; no fixture scenario (the seam has no registry) |

@@ -105,10 +105,20 @@ pub enum Command {
         /// The manifest directory or file (default: current directory).
         path: Option<PathBuf>,
     },
-    /// Resolve this platform and record versions in `bosun.lock`.
+    /// Resolve the manifest for this machine and write its lock, keeping the
+    /// versions it already pins while they still fit.
     Lock {
         /// The manifest directory or file (default: current directory).
         path: Option<PathBuf>,
+    },
+    /// Move locked versions forward to the newest each spec allows, then write
+    /// the lock (installs nothing; `install` does).
+    Upgrade {
+        /// The packages to upgrade (default: all).
+        names: Vec<String>,
+        /// The manifest directory or file (default: current directory).
+        #[arg(long)]
+        manifest: Option<PathBuf>,
     },
     /// Rewrite an older-version manifest as the current version. The rewrite
     /// drops comments, so it shows the result and asks first.

@@ -8,7 +8,7 @@ use bosun_core::record::{LockDocument, StateDocument};
 use bosun_core::{BackendId, Manifest, Scope};
 use bosun_io::{check_options, load_manifest, lock, manifest_hash};
 use bosun_ports::{Installer, StateStore};
-use bosun_resolve::{resolve, NotApplicable, Outcome, Resolution};
+use bosun_resolve::{resolve, resolve_with_lock, NotApplicable, Outcome, Resolution};
 use serde::Serialize;
 
 use crate::env::Env;
@@ -358,39 +358,220 @@ struct ResolvedInfo {
 }
 
 /// Resolve the manifest for this machine (its platform and `any`) and write
-/// this machine's lock for it (§4.5), replacing the last one.
+/// this machine's lock for it (§4.5). A version the lock already pins is kept
+/// while it still fits (§7); `upgrade` moves pins forward.
 pub fn lock(env: &Env, path: Option<PathBuf>, pref: &[BackendId]) -> Result<LockOutput, CliError> {
     let file = manifest_file(path)?;
     let manifest = load(env, &file)?;
-    let hash = manifest_hash(&manifest);
-    let claim_path = canonical_manifest(&file);
+    let relocked = relock(env, &file, &manifest, pref, &Release::None)?;
+    let written = match &relocked.pending {
+        Some(pending) => Some(pending.write()?),
+        None => None,
+    };
+    Ok(lock_output(relocked.resolution, written.as_deref()))
+}
+
+/// What `bosun upgrade` moved: each package whose locked version changed, and
+/// the lock that followed.
+#[derive(Serialize)]
+pub struct UpgradeOutput {
+    changes: Vec<VersionChange>,
+    lock: LockOutput,
+}
+
+/// One package's locked version before and after (`from` is `None` for a
+/// package the lock didn't have).
+#[derive(Serialize)]
+struct VersionChange {
+    name: String,
+    from: Option<String>,
+    to: String,
+}
+
+impl Render for UpgradeOutput {
+    fn text(&self) -> String {
+        let mut lines: Vec<String> = self
+            .changes
+            .iter()
+            .map(|c| match &c.from {
+                Some(from) => format!("{:<16} {from} -> {}", c.name, c.to),
+                None => format!("{:<16} {} (new)", c.name, c.to),
+            })
+            .collect();
+        if self.changes.is_empty() && !self.lock.error {
+            lines.push("Everything is at the newest version its spec allows.".to_string());
+        }
+        lines.push(self.lock.text());
+        if !self.changes.is_empty() && !self.lock.error {
+            lines.push("Run `bosun install` to install them.".to_string());
+        }
+        lines.join("\n")
+    }
+
+    fn exit_code(&self) -> i32 {
+        self.lock.exit_code()
+    }
+}
+
+/// `bosun upgrade [name…]`: re-resolve the named packages (all, when none are
+/// named) to the newest version their spec admits, keep every other pin, and
+/// write the lock. Installs nothing.
+pub fn upgrade(
+    env: &Env,
+    names: &[String],
+    path: Option<PathBuf>,
+    pref: &[BackendId],
+) -> Result<UpgradeOutput, CliError> {
+    let file = manifest_file(path)?;
+    let manifest = load(env, &file)?;
+    if let Some(missing) = names
+        .iter()
+        .find(|n| !manifest.packages.iter().any(|e| &e.name == *n))
+    {
+        return Err(CliError::Usage(format!(
+            "upgrade: {} has no package named {missing:?}",
+            file.display()
+        )));
+    }
+    let release = if names.is_empty() {
+        Release::All
+    } else {
+        Release::Named(names.to_vec())
+    };
+    let relocked = relock(env, &file, &manifest, pref, &release)?;
+    let locked_version = |doc: &LockDocument, name: &str| {
+        doc.packages
+            .iter()
+            .find(|p| p.name == name)
+            .and_then(|p| p.targets.values().next())
+            .map(|leaf| leaf.resolved.as_str().to_string())
+    };
+    let changes = relocked
+        .resolution
+        .lock
+        .packages
+        .iter()
+        .filter_map(|p| {
+            let to = locked_version(&relocked.resolution.lock, &p.name)?;
+            let from = relocked
+                .previous
+                .as_ref()
+                .and_then(|prev| locked_version(prev, &p.name));
+            (from.as_deref() != Some(to.as_str())).then(|| VersionChange {
+                name: p.name.clone(),
+                from,
+                to,
+            })
+        })
+        .collect();
+    let written = match &relocked.pending {
+        Some(pending) => Some(pending.write()?),
+        None => None,
+    };
+    Ok(UpgradeOutput {
+        changes,
+        lock: lock_output(relocked.resolution, written.as_deref()),
+    })
+}
+
+/// Which pins a re-lock lets go of, so their packages resolve to the newest
+/// version their spec admits.
+pub(crate) enum Release {
+    /// Keep every pin that still fits (`lock`, `install`).
+    None,
+    /// Let every pin go (`upgrade`).
+    All,
+    /// Let these packages' pins go (`upgrade <name>…`).
+    Named(Vec<String>),
+}
+
+/// A lock worked out but not yet written: `install` writes it only once the
+/// install succeeds, so a declined or failed install leaves the old lock.
+pub(crate) struct PendingLock {
+    path: PathBuf,
+    doc: LockDocument,
+}
+
+impl PendingLock {
+    /// Write the lock, making its directory; gives where it went.
+    pub(crate) fn write(&self) -> Result<PathBuf, CliError> {
+        let io_err = |e: std::io::Error| CliError::Io {
+            path: self.path.clone(),
+            detail: e.to_string(),
+        };
+        if let Some(dir) = self.path.parent() {
+            fs::create_dir_all(dir).map_err(io_err)?;
+        }
+        fs::write(&self.path, lock::to_json(&self.doc)).map_err(io_err)?;
+        Ok(self.path.clone())
+    }
+}
+
+/// A re-lock's result: the resolution, the lock it read (if any), and the lock
+/// to write, `None` when an entry was unsatisfiable (a lock never records an
+/// incomplete resolution as current, §4.7).
+pub(crate) struct Relocked {
+    pub(crate) resolution: Resolution,
+    pub(crate) previous: Option<LockDocument>,
+    pub(crate) pending: Option<PendingLock>,
+}
+
+/// Resolve `manifest` for this machine against its current lock, keeping the
+/// pins `release` doesn't let go of. Writes nothing.
+pub(crate) fn relock(
+    env: &Env,
+    file: &Path,
+    manifest: &Manifest,
+    pref: &[BackendId],
+    release: &Release,
+) -> Result<Relocked, CliError> {
+    let hash = manifest_hash(manifest);
+    let claim_path = canonical_manifest(file);
     let lock_path = env.lock_path(&claim_path);
-    warn_of_a_project_lock(&file, &lock_path);
-
-    let resolution = resolve(&manifest, &hash, &env.host(), &env.resolvables(), pref)
-        .map_err(|e| CliError::Resolve(e.to_string()))?;
-
-    // An unsatisfiable entry leaves this run's targets incomplete: write
-    // nothing and exit 1, never recording a target as fresh when it is not
-    // (§4.7).
-    let has_error = resolution
+    warn_of_a_project_lock(file, &lock_path);
+    let previous = this_lock(env, &claim_path)?;
+    let kept = match (release, &previous) {
+        (_, None) | (Release::All, _) => None,
+        (Release::None, Some(doc)) => Some(doc.clone()),
+        (Release::Named(names), Some(doc)) => {
+            let mut doc = doc.clone();
+            doc.packages.retain(|p| !names.contains(&p.name));
+            Some(doc)
+        }
+    };
+    let resolution = resolve_with_lock(
+        manifest,
+        &hash,
+        &env.host(),
+        &env.resolvables(),
+        pref,
+        kept.as_ref(),
+    )
+    .map_err(|e| CliError::Resolve(e.to_string()))?;
+    let complete = !resolution
         .outcomes
         .iter()
         .any(|o| matches!(o.outcome, Outcome::Unsatisfiable { .. }));
-    if has_error {
-        return Ok(lock_output(resolution, None));
-    }
-    let mut doc = resolution.lock.clone();
-    doc.manifest = claim_path.display().to_string();
-    let io_err = |e: std::io::Error| CliError::Io {
-        path: lock_path.clone(),
-        detail: e.to_string(),
-    };
-    if let Some(dir) = lock_path.parent() {
-        fs::create_dir_all(dir).map_err(io_err)?;
-    }
-    fs::write(&lock_path, lock::to_json(&doc)).map_err(io_err)?;
-    Ok(lock_output(resolution, Some(&lock_path)))
+    let pending = complete.then(|| {
+        let mut doc = resolution.lock.clone();
+        doc.manifest = claim_path.display().to_string();
+        PendingLock {
+            path: lock_path,
+            doc,
+        }
+    });
+    Ok(Relocked {
+        resolution,
+        previous,
+        pending,
+    })
+}
+
+/// This machine's lock for the manifest at `claim_path`, if it has one: a lock
+/// file recording another manifest (a path-hash clash) is not this one's.
+fn this_lock(env: &Env, claim_path: &Path) -> Result<Option<LockDocument>, CliError> {
+    Ok(read_lock(&env.lock_path(claim_path), &env.schemes())?
+        .filter(|l| Path::new(&l.manifest) == claim_path))
 }
 
 /// A `bosun.lock` beside the manifest is the shared lock of older bosun
@@ -540,9 +721,16 @@ pub struct InstallOpts {
     pub frozen: bool,
 }
 
-/// Build the `install` plan (§4.8): resolve the manifest (or read the lock with
-/// `--frozen`), compare to machine state, and plan installs/upgrades/holds.
-pub fn install_plan(env: &Env, opts: InstallOpts, pref: &[BackendId]) -> Result<Plan, CliError> {
+/// Build the `install` plan (§4.8): re-lock the manifest, keeping the lock's
+/// pins that still fit (or, with `--frozen`, read the lock verbatim), compare
+/// to machine state, and plan installs/upgrades/holds. Also gives the lock to
+/// write once the install succeeds (`None` with `--frozen`, or when an entry
+/// is unsatisfiable).
+pub fn install_plan(
+    env: &Env,
+    opts: InstallOpts,
+    pref: &[BackendId],
+) -> Result<(Plan, Option<PendingLock>), CliError> {
     let file = manifest_file(opts.path)?;
     let manifest = load(env, &file)?;
     let hash = manifest_hash(&manifest);
@@ -554,16 +742,20 @@ pub fn install_plan(env: &Env, opts: InstallOpts, pref: &[BackendId]) -> Result<
     // projects' `./bosun.yaml` never collide and uninstall/prune can match it.
     let claim_path = canonical_manifest(&file);
 
-    let (managed, carried) = if opts.frozen {
+    let (managed, carried, pending) = if opts.frozen {
         let lock = frozen_lock(env, &file, &claim_path, &hash)?;
-        managed_from_lock(env, &claim_path, &lock, &mut state)?
+        let (managed, carried) = managed_from_lock(env, &claim_path, &lock, &mut state)?;
+        (managed, carried, None)
     } else {
-        let resolution = resolve(&manifest, &hash, &env.host(), &env.resolvables(), pref)
-            .map_err(|e| CliError::Resolve(e.to_string()))?;
-        managed_from_resolution(env, &claim_path, &resolution, &mut state)?
+        let relocked = relock(env, &file, &manifest, pref, &Release::None)?;
+        let (managed, carried) =
+            managed_from_resolution(env, &claim_path, &relocked.resolution, &mut state)?;
+        (managed, carried, relocked.pending)
     };
 
-    build_install_plan(&managed, carried).map_err(|e| CliError::Resolve(e.to_string()))
+    let plan =
+        build_install_plan(&managed, carried).map_err(|e| CliError::Resolve(e.to_string()))?;
+    Ok((plan, pending))
 }
 
 /// State read lazily, one scope at a time (§4.6): the system file is opened
@@ -658,8 +850,15 @@ fn managed_from_resolution<'a>(
                     let available = index
                         .query_available(&Ref::new(purl.clone()), target)
                         .map_err(|e| CliError::Resolve(e.to_string()))?;
-                    select_across_claims(&claims, &vers_type, &available, &[])
-                        .map_err(|e| CliError::Resolve(e.to_string()))?
+                    // Lockfiles advise, specs decide (§4.6): this project's
+                    // locked version, when every claim admits it.
+                    select_across_claims(
+                        &claims,
+                        &vers_type,
+                        &available,
+                        std::slice::from_ref(version),
+                    )
+                    .map_err(|e| CliError::Resolve(e.to_string()))?
                 } else {
                     version.clone() // accepted: bosun does not install it
                 };
@@ -853,15 +1052,12 @@ fn frozen_lock(
     claim_path: &Path,
     hash: &str,
 ) -> Result<LockDocument, CliError> {
-    let lock_path = env.lock_path(claim_path);
-    let lock = read_lock(&lock_path, &env.schemes())?
-        .filter(|l| Path::new(&l.manifest) == claim_path)
-        .ok_or_else(|| {
-            CliError::Resolve(format!(
-                "--frozen needs this machine's lock for {}; run `bosun lock`",
-                file.display()
-            ))
-        })?;
+    let lock = this_lock(env, claim_path)?.ok_or_else(|| {
+        CliError::Resolve(format!(
+            "--frozen needs this machine's lock for {}; run `bosun lock`",
+            file.display()
+        ))
+    })?;
     if lock.manifest_hash != hash {
         return Err(CliError::Resolve(format!(
             "--frozen: {} changed since it was locked; run `bosun lock`",
@@ -956,6 +1152,59 @@ mod tests {
 
     fn registered(v: &[(&str, Scope)]) -> Vec<(BackendId, Scope)> {
         v.iter().map(|(id, s)| (BackendId::new(*id), *s)).collect()
+    }
+
+    fn upgrade_output(changes: &[(&str, Option<&str>, &str)], error: bool) -> UpgradeOutput {
+        UpgradeOutput {
+            changes: changes
+                .iter()
+                .map(|(name, from, to)| VersionChange {
+                    name: name.to_string(),
+                    from: from.map(str::to_string),
+                    to: to.to_string(),
+                })
+                .collect(),
+            lock: LockOutput {
+                error,
+                resolved: Vec::new(),
+                diagnostics: Vec::new(),
+                lock: None,
+            },
+        }
+    }
+
+    #[test]
+    fn upgrade_text_lists_each_move_and_says_to_install() {
+        let text = upgrade_output(
+            &[
+                ("ripgrep", Some("14.1.1"), "14.2.0"),
+                ("fd", None, "10.2.0"),
+            ],
+            false,
+        )
+        .text();
+        assert!(text.contains("ripgrep          14.1.1 -> 14.2.0"), "{text}");
+        assert!(text.contains("fd               10.2.0 (new)"), "{text}");
+        assert!(text.contains("Run `bosun install`"), "{text}");
+        assert!(!text.contains("Everything is at"), "{text}");
+    }
+
+    #[test]
+    fn upgrade_text_with_nothing_to_move_says_so_and_nothing_to_install() {
+        let text = upgrade_output(&[], false).text();
+        assert!(text.contains("Everything is at the newest"), "{text}");
+        assert!(!text.contains("Run `bosun install`"), "{text}");
+    }
+
+    #[test]
+    fn a_failed_upgrade_neither_claims_newest_nor_says_install_and_exits_1() {
+        let out = upgrade_output(&[("ripgrep", Some("14.1.1"), "14.2.0")], true);
+        let text = out.text();
+        assert!(!text.contains("Run `bosun install`"), "{text}");
+        assert_eq!(out.exit_code(), 1);
+        let none = upgrade_output(&[], true).text();
+        assert!(!none.contains("Everything is at"), "{none}");
+        assert_eq!(upgrade_output(&[], false).exit_code(), 0);
     }
 
     #[test]

@@ -110,6 +110,10 @@ fn dispatch(cli: &Cli, format: Format) -> Result<i32, CliError> {
             let value = commands::lock(&env, path.clone(), &pref)?;
             emit(&value, format, &mut out)
         }
+        Command::Upgrade { names, manifest } => {
+            let value = commands::upgrade(&env, names, manifest.clone(), &pref)?;
+            emit(&value, format, &mut out)
+        }
         Command::Migrate { path, plan, yes } => {
             migrate::run(path.clone(), *plan, *yes, format, &mut out)
         }
@@ -120,7 +124,7 @@ fn dispatch(cli: &Cli, format: Format) -> Result<i32, CliError> {
             yes,
             frozen,
         } => {
-            let built = commands::install_plan(
+            let (built, pending) = commands::install_plan(
                 &env,
                 InstallOpts {
                     path: path.clone(),
@@ -128,18 +132,30 @@ fn dispatch(cli: &Cli, format: Format) -> Result<i32, CliError> {
                 },
                 &pref,
             )?;
-            run_mutation(
-                &env,
-                Mutation {
-                    command: "install",
-                    plan_only: *plan,
-                    scope: scope.map(Into::into),
-                    yes: *yes,
-                },
-                built,
-                format,
-                &mut out,
-            )
+            let m = Mutation {
+                command: "install",
+                plan_only: *plan,
+                scope: scope.map(Into::into),
+                yes: *yes,
+            };
+            if m.plan_only {
+                return emit(&built, format, &mut out);
+            }
+            match apply_mutation(&env, m, &built, format, &mut out)? {
+                Applied::Stopped(code) => Ok(code),
+                Applied::Done(report) => {
+                    // The lock follows what was installed, and only then.
+                    if let Some(pending) = pending {
+                        pending.write()?;
+                    }
+                    render(&report, format, &mut out).map_err(io_err)?;
+                    Ok(0)
+                }
+                Applied::Failed(report) => {
+                    render(&report, format, &mut out).map_err(io_err)?;
+                    Ok(1)
+                }
+            }
         }
         Command::Uninstall {
             path,
