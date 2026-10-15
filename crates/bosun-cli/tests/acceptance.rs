@@ -323,12 +323,9 @@ fn binary_bytes(asset: &str) -> Vec<u8> {
     format!("#!/bin/sh\necho {asset}\n").into_bytes()
 }
 
-/// A `.tar.gz` holding `entries`, as release archives are packed.
-fn targz(entries: &[(String, Vec<u8>)]) -> Vec<u8> {
-    let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(
-        Vec::new(),
-        flate2::Compression::default(),
-    ));
+/// A plain tar holding `entries`.
+fn tar_of(entries: &[(String, Vec<u8>)]) -> Vec<u8> {
+    let mut tar = tar::Builder::new(Vec::new());
     for (name, body) in entries {
         let mut header = tar::Header::new_gnu();
         header.set_size(body.len() as u64);
@@ -336,7 +333,55 @@ fn targz(entries: &[(String, Vec<u8>)]) -> Vec<u8> {
         header.set_cksum();
         tar.append_data(&mut header, name, body.as_slice()).unwrap();
     }
-    tar.into_inner().unwrap().finish().unwrap()
+    tar.into_inner().unwrap()
+}
+
+fn zip_of(entries: &[(String, Vec<u8>)]) -> Vec<u8> {
+    use std::io::Write;
+    let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for (name, body) in entries {
+        w.start_file(name.as_str(), zip::write::SimpleFileOptions::default())
+            .unwrap();
+        w.write_all(body).unwrap();
+    }
+    w.finish().unwrap().into_inner()
+}
+
+/// `bytes` compressed the way the file-name suffix `suffix` says (`gz`,
+/// `xz`, `zst`, `bz2`), or as they are for anything else.
+fn compressed(suffix: &str, bytes: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    match suffix {
+        "gz" | "tgz" => {
+            let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            e.write_all(bytes).unwrap();
+            e.finish().unwrap()
+        }
+        "xz" => {
+            let mut out = Vec::new();
+            lzma_rs::xz_compress(&mut std::io::BufReader::new(bytes), &mut out).unwrap();
+            out
+        }
+        "zst" => {
+            ruzstd::encoding::compress_to_vec(bytes, ruzstd::encoding::CompressionLevel::Fastest)
+        }
+        "bz2" => {
+            let mut e = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::default());
+            e.write_all(bytes).unwrap();
+            e.finish().unwrap()
+        }
+        _ => bytes.to_vec(),
+    }
+}
+
+/// `entries` packed as the asset name `asset` says: a zip, or a tar under the
+/// compression its suffix names (`.tar.gz`, `.tar.xz`, `.tar.zst`, …).
+fn pack(asset: &str, entries: &[(String, Vec<u8>)]) -> Vec<u8> {
+    if asset.ends_with(".zip") {
+        return zip_of(entries);
+    }
+    let suffix = asset.rsplit('.').next().unwrap_or_default();
+    compressed(suffix, &tar_of(entries))
 }
 
 /// An archive laid out like a goreleaser one: the binary, LICENSE and README,
@@ -346,19 +391,22 @@ fn release_archive(asset: &str, binary: &str, dir: Option<&str>) -> Vec<u8> {
         Some(d) => format!("{d}/{name}"),
         None => name.to_string(),
     };
-    targz(&[
-        (at("LICENSE"), b"MIT".to_vec()),
-        (at("README.md"), b"# readme".to_vec()),
-        (
-            at(&format!("completions/{binary}.bash")),
-            b"complete".to_vec(),
-        ),
-        (at(binary), binary_bytes(asset)),
-    ])
+    pack(
+        asset,
+        &[
+            (at("LICENSE"), b"MIT".to_vec()),
+            (at("README.md"), b"# readme".to_vec()),
+            (
+                at(&format!("completions/{binary}.bash")),
+                b"complete".to_vec(),
+            ),
+            (at(binary), binary_bytes(asset)),
+        ],
+    )
 }
 
 #[given(
-    regex = r"^(\S+/\S+) (v\S+) publishes (\S+\.tar\.gz) with (\S+) (?:at its root|in (\S+)/)$"
+    regex = r"^(\S+/\S+) (v\S+) publishes (\S+\.(?:tar(?:\.\w+)?|zip)) with (\S+) (?:at its root|in (\S+)/)$"
 )]
 fn release_publishes(
     world: &mut BosunWorld,
@@ -371,6 +419,15 @@ fn release_publishes(
     let dir = (!dir.is_empty()).then_some(dir.as_str());
     let archive = release_archive(&asset, &binary, dir);
     world.release_mut(&repo, &tag).assets.push((asset, archive));
+}
+
+/// A release asset that is the binary itself, or the binary alone compressed
+/// (`restic_0.18.1_linux_amd64.bz2`).
+#[given(regex = r"^(\S+/\S+) (v\S+) publishes (\S+) holding just the binary$")]
+fn release_publishes_binary(world: &mut BosunWorld, repo: String, tag: String, asset: String) {
+    let suffix = asset.rsplit_once('.').map_or("", |(_, s)| s).to_string();
+    let body = compressed(&suffix, &binary_bytes(&asset));
+    world.release_mut(&repo, &tag).assets.push((asset, body));
 }
 
 #[given(regex = r"^(\S+/\S+) (v\S+) also publishes (\S+\.tar\.gz)$")]

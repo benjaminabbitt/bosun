@@ -1456,6 +1456,7 @@ fn plan_json_renders_every_diagnostic_and_step_kind() {
                 dest: PathBuf::from("/tmp/a.tar.gz"),
             },
             Step::Extract {
+                format: bosun_ports::ArchiveFormat::TarGz,
                 archive: PathBuf::from("/tmp/a.tar.gz"),
                 member: "ctxloom".to_string(),
                 dest: PathBuf::from("/home/ben/.local/bin/ctxloom"),
@@ -1499,6 +1500,7 @@ fn plan_json_renders_every_diagnostic_and_step_kind() {
     let steps = &json["actions"][0]["steps"];
     assert_eq!(steps[0]["step"], "fetch");
     assert_eq!(steps[1]["step"], "extract");
+    assert_eq!(steps[1]["format"], "tar.gz");
     assert_eq!(json["actions"][0]["claims"][0]["user"], "ben");
     let kinds: Vec<&str> = json["diagnostics"]
         .as_array()

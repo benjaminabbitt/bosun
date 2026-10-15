@@ -16,3 +16,7 @@ pub const ASSET_NOT_YET_WHY: &str =
 /// A rendered asset name still holds a brace: a single-brace placeholder.
 pub const ASSET_BRACE: &str =
     "the rendered name contains a brace; write placeholders as {{ binary }}";
+
+/// The asset a template names is not a binary bosun can install (a package,
+/// signature or checksum file).
+pub const NOT_A_BINARY: &str = "not a binary bosun can install";

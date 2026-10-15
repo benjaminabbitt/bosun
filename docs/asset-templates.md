@@ -102,8 +102,18 @@ so writing `musl` into the template is usually right anyway.
 | trivy         | `trivy_0.67.2_Linux-64bit.tar.gz`                    | `{{ binary }}_{{ version }}_{{ os \| title }}-{% if arch == "amd64" %}64bit{% else %}{{ arch \| upper }}{% endif %}.tar.gz` |
 
 ripgrep's binary is `rg`, so the template spells the archive's `ripgrep` literally.
-Only `.tar.gz` archives install today; templates for other formats render, but the
-archive can't be extracted yet.
+## Formats
+
+bosun reads how the asset is packed from its name:
+
+| Asset name ends in | What bosun does |
+|---|---|
+| `.tar.gz` `.tgz` `.tar.xz` `.txz` `.tar.zst` `.tzst` `.tar.bz2` `.tbz2` `.tbz` `.tar` `.zip` | finds the binary inside by name |
+| `.gz` `.xz` `.zst` `.bz2` (not after `.tar`) | decompresses the file; that is the binary (restic) |
+| anything else, including no suffix, `.exe` and `.appimage` | installs the file as the binary (kind, jq, cosign) |
+| `.deb` `.rpm` `.apk` `.msi` `.dmg` `.pkg`, signatures, checksums, `.json`, `.txt`, `.sh` | refused when bosun resolves: not a binary bosun can install |
+
+Upper and lower case are the same (`RCLONE.ZIP` is a zip).
 
 ## Rules
 

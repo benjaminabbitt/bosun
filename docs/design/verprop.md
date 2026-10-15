@@ -476,7 +476,7 @@ commands too.
 |---|---|---|
 | `Run { argv, env, scope }` | `CommandRunner` (privilege per scope, §5.5) | `RUN` with shell-quoted argv |
 | `Fetch { url, sha256?, dest }` | bosun downloads and verifies the checksum when there is one | `ADD [--checksum=sha256:…] <url> <dest>` |
-| `Extract { archive, member, dest, mode }` | bosun extracts the one file named `member`, at any depth | `RUN tar …` / `unzip …` |
+| `Extract { format, archive, member, dest, mode }` | by `format` (read from the asset name): from a tar (plain, gz, xz, zstd, bzip2) or zip, the one file named `member` at any depth; a single compressed file, decompressed; a raw binary, copied | `RUN tar …` / `unzip …` / a decompressor / `COPY` |
 
 - `Fetch` and `Extract` exist because for `github-release` bosun *is* the installer (§12).
 - Queries (`verify_installed`, `query_available`) run directly; they're reads, not part of

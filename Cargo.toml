@@ -49,6 +49,12 @@ ureq = { version = "3.4.2", features = ["json"] }
 sha2 = "0.11.1"
 flate2 = "1.1.10"
 tar = "0.4.46"
+# Other release archive formats, all pure Rust so the Windows build needs no C
+# toolchain: zip (deflate through flate2), xz, zstd and bzip2.
+zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2"] }
+lzma-rs = "0.3.0"
+ruzstd = "0.9.0"
+bzip2 = "0.6.1"
 # github-release asset-name templates (strict undefined, built-in filters only).
 minijinja = { version = "=3.0.0", default-features = false, features = ["builtins"] }
 

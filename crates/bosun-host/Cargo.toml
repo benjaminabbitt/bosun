@@ -16,6 +16,10 @@ rustix.workspace = true
 sha2.workspace = true
 flate2.workspace = true
 tar.workspace = true
+zip.workspace = true
+lzma-rs.workspace = true
+ruzstd.workspace = true
+bzip2.workspace = true
 tempfile.workspace = true
 ureq.workspace = true
 

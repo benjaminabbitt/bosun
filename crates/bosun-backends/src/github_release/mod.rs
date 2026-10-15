@@ -27,12 +27,12 @@ use bosun_core::{
     Version,
 };
 use bosun_ports::{
-    Backend, BackendFactory, HostInfo, HttpFetcher, HttpRequest, HttpResponse, Index, Installer,
-    PortError, Probe, Step, Steps,
+    ArchiveFormat, Backend, BackendFactory, HostInfo, HttpFetcher, HttpRequest, HttpResponse,
+    Index, Installer, PortError, Probe, Step, Steps,
 };
 use tracing::warn;
 
-use crate::logmsg;
+use crate::{errmsg, logmsg};
 
 mod checksum;
 mod template;
@@ -274,22 +274,27 @@ impl GithubReleaseBackend {
 
     /// Resolve the archive for this host at `version` and its published
     /// sha256, when the release publishes one. Returns `(download_url,
-    /// archive_name, sha256)`. Shared by `install_exact` (which fetches and
-    /// extracts it) and the query-side `checksum` (which records it).
+    /// archive_name, format, sha256)`. Shared by `install_exact` (which
+    /// fetches and extracts it) and the query-side `checksum` (which records
+    /// it), so an asset that is not a binary fails at resolve.
     fn archive_and_checksum(
         &self,
         pkg: &Ref,
         version: &Version,
-    ) -> Result<(String, String, Option<String>), PortError> {
+    ) -> Result<(String, String, ArchiveFormat, Option<String>), PortError> {
         let repo = pkg.purl.native_id();
         let binary = Self::binary_of(pkg);
         let release = self.fetch_release(&repo, version)?;
         let expected = self.expected_asset(pkg, &binary, version, &release.tag_name)?;
+        let format = ArchiveFormat::of(&expected).ok_or_else(|| PortError::Backend {
+            detail: format!("{repo}: {expected:?} is {}", errmsg::NOT_A_BINARY),
+        })?;
         let archive = self.pick_archive(&expected, &release.assets)?;
         let sha256 = self.published_sha256(&release.assets, &archive.name)?;
         Ok((
             archive.browser_download_url.clone(),
             archive.name.clone(),
+            format,
             sha256,
         ))
     }
@@ -356,7 +361,7 @@ impl Index for GithubReleaseBackend {
         version: &Version,
         _target: &Target,
     ) -> Result<Option<Checksum>, PortError> {
-        let (_, _, sha256) = self.archive_and_checksum(pkg, version)?;
+        let (_, _, _, sha256) = self.archive_and_checksum(pkg, version)?;
         Ok(sha256.map(Checksum))
     }
 }
@@ -382,7 +387,7 @@ impl Installer for GithubReleaseBackend {
 
     fn install_exact(&self, pkg: &Ref, version: &Version) -> Result<Steps, PortError> {
         let binary = Self::binary_of(pkg);
-        let (url, archive_name, sha256) = self.archive_and_checksum(pkg, version)?;
+        let (url, archive_name, format, sha256) = self.archive_and_checksum(pkg, version)?;
         if sha256.is_none() {
             warn!(
                 message = logmsg::NO_CHECKSUM,
@@ -398,6 +403,7 @@ impl Installer for GithubReleaseBackend {
                 dest: download.clone(),
             },
             Step::Extract {
+                format,
                 archive: download,
                 member: binary.clone(),
                 dest: self.bin_dir.join(&binary),
@@ -590,6 +596,52 @@ mod tests {
     }
 
     #[test]
+    fn checksum_refuses_an_asset_that_is_not_a_binary() {
+        // A template naming a .deb fails at resolve, before anything downloads.
+        let tag_url = "https://api.github.com/repos/o/r/releases/tags/v1.0.0";
+        let release = r#"{"tag_name":"v1.0.0","assets":[
+            {"name":"r_1.0.0_amd64.deb","browser_download_url":"https://x/r.deb"}]}"#;
+        let fetcher = Arc::new(FakeHttpFetcher::new().with_body(tag_url, release));
+        let err = backend(fetcher, PathBuf::from("/b"))
+            .checksum(
+                &with_asset("pkg:github/o/r", "r_{{ version }}_{{ arch }}.deb"),
+                &sem("1.0.0"),
+                &"linux/amd64".parse().unwrap(),
+            )
+            .unwrap_err();
+        assert!(matches!(err, PortError::Backend { detail }
+            if detail.contains(crate::errmsg::NOT_A_BINARY) && detail.contains("r_1.0.0_amd64.deb")));
+    }
+
+    #[test]
+    fn install_exact_extracts_by_the_assets_format() {
+        let tag_url = "https://api.github.com/repos/o/r/releases/tags/v1.0.0";
+        let release = r#"{"tag_name":"v1.0.0","assets":[
+            {"name":"r-1.0.0-linux.zip","browser_download_url":"https://x/r.zip"},
+            {"name":"r-linux-amd64","browser_download_url":"https://x/r"}]}"#;
+        let fetcher = Arc::new(FakeHttpFetcher::new().with_body(tag_url, release));
+        let b = backend(fetcher, PathBuf::from("/b"));
+        for (template, format) in [
+            (
+                "{{ binary }}-{{ version }}-{{ os }}.zip",
+                ArchiveFormat::Zip,
+            ),
+            ("{{ binary }}-{{ os }}-{{ arch }}", ArchiveFormat::Raw),
+        ] {
+            let steps = b
+                .install_exact(
+                    &with_asset("pkg:github/o/r?binary=r", template),
+                    &sem("1.0.0"),
+                )
+                .unwrap();
+            assert!(
+                matches!(&steps[1], Step::Extract { format: f, .. } if *f == format),
+                "{template}: {steps:?}"
+            );
+        }
+    }
+
+    #[test]
     fn picker_chooses_the_plain_archive_not_full() {
         let b = backend(Arc::new(FakeHttpFetcher::new()), PathBuf::from("/b"));
         let assets = ctxloom_v064().assets;
@@ -667,6 +719,7 @@ mod tests {
                     ),
                 },
                 Step::Extract {
+                    format: ArchiveFormat::TarGz,
                     archive: PathBuf::from(
                         "/home/x/.local/bin/.bosun-cache/ctxloom_0.6.4_linux_amd64.tar.gz"
                     ),

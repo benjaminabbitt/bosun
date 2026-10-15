@@ -1,15 +1,19 @@
 //! The host step executor (§5.1): carries out the [`Step`] list an installer
 //! produced. `Run` goes through the [`CommandRunner`] (a non-zero exit is a
 //! failure); `Fetch` downloads through the [`HttpFetcher`] and verifies the
-//! sha256 when the step carries one; `Extract` pulls the one member with a given file name out of a
-//! `.tar.gz`, wherever in the archive it sits. The container
-//! renderer (§8) consumes the same steps instead of running them.
+//! sha256 when the step carries one; `Extract` pulls the one member with a
+//! given file name out of a tar (plain, gz, xz, zstd or bzip2) or zip archive,
+//! wherever in the archive it sits, decompresses a single compressed file, or
+//! copies a raw binary. The container renderer (§8) consumes the same steps
+//! instead of running them.
 
 use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
 
-use bosun_ports::{Command, CommandRunner, HttpFetcher, HttpRequest, PortError, Step};
+use bosun_ports::{
+    ArchiveFormat, Command, CommandRunner, HttpFetcher, HttpRequest, PortError, Step,
+};
 use sha2::{Digest, Sha256};
 
 use crate::errmsg;
@@ -79,11 +83,12 @@ impl<'a> StepExecutor<'a> {
                 write_file(dest, &resp.body, None)
             }
             Step::Extract {
+                format,
                 archive,
                 member,
                 dest,
                 mode,
-            } => extract_member(archive, member, dest, *mode),
+            } => extract(*format, archive, member, dest, *mode),
         }
     }
 }
@@ -114,20 +119,94 @@ fn write_file(dest: &Path, bytes: &[u8], mode: Option<u32>) -> Result<(), PortEr
     Ok(())
 }
 
-/// Extract the `.tar.gz` member whose **file name** is `member`, at any depth
+/// The compression around an asset's contents.
+#[derive(Clone, Copy)]
+enum Compression {
+    None,
+    Gz,
+    Xz,
+    Zst,
+    Bz2,
+}
+
+/// Write the binary `format` packs in `archive` to `dest` with unix mode
+/// `mode`: the member named `member` of a tar or zip, the whole of a single
+/// compressed file, or a raw binary as it is.
+fn extract(
+    format: ArchiveFormat,
+    archive: &Path,
+    member: &str,
+    dest: &Path,
+    mode: u32,
+) -> Result<(), PortError> {
+    let single = |c| {
+        let mut bytes = Vec::new();
+        decoder(c, archive)?
+            .read_to_end(&mut bytes)
+            .map_err(|e| io_err(archive, e))?;
+        write_file(dest, &bytes, Some(mode))
+    };
+    match format {
+        ArchiveFormat::Raw => single(Compression::None),
+        ArchiveFormat::Gz => single(Compression::Gz),
+        ArchiveFormat::Xz => single(Compression::Xz),
+        ArchiveFormat::Zst => single(Compression::Zst),
+        ArchiveFormat::Bz2 => single(Compression::Bz2),
+        ArchiveFormat::Zip => extract_zip_member(archive, member, dest, mode),
+        ArchiveFormat::Tar => extract_tar_member(Compression::None, archive, member, dest, mode),
+        ArchiveFormat::TarGz => extract_tar_member(Compression::Gz, archive, member, dest, mode),
+        ArchiveFormat::TarXz => extract_tar_member(Compression::Xz, archive, member, dest, mode),
+        ArchiveFormat::TarZst => extract_tar_member(Compression::Zst, archive, member, dest, mode),
+        ArchiveFormat::TarBz2 => extract_tar_member(Compression::Bz2, archive, member, dest, mode),
+    }
+}
+
+/// `archive`'s contents, decompressed as `c` says. xz is decoded whole, the
+/// others as a stream.
+fn decoder(c: Compression, archive: &Path) -> Result<Box<dyn Read>, PortError> {
+    let file = fs::File::open(archive).map_err(|e| io_err(archive, e))?;
+    Ok(match c {
+        Compression::None => Box::new(file),
+        Compression::Gz => Box::new(flate2::read::GzDecoder::new(file)),
+        Compression::Bz2 => Box::new(bzip2::read::BzDecoder::new(file)),
+        Compression::Zst => {
+            Box::new(ruzstd::decoding::StreamingDecoder::new(file).map_err(|e| {
+                PortError::Backend {
+                    detail: format!("{}: {e}", archive.display()),
+                }
+            })?)
+        }
+        Compression::Xz => {
+            let mut out = Vec::new();
+            lzma_rs::xz_decompress(&mut std::io::BufReader::new(file), &mut out).map_err(|e| {
+                PortError::Backend {
+                    detail: format!("{}: {e}", archive.display()),
+                }
+            })?;
+            Box::new(std::io::Cursor::new(out))
+        }
+    })
+}
+
+/// Extract the tar member whose **file name** is `member`, at any depth
 /// (`gum`, `gum_2.0.2_Linux_x86_64/gum`, `gh_2.80.0/bin/gh` alike), to `dest`
 /// with unix mode `mode`. Exactly one non-directory entry may carry that name;
 /// none or several is an error listing what was found. A symlink/hardlink
 /// member is refused, naming its type, rather than silently written as a
 /// 0-byte executable.
-fn extract_member(archive: &Path, member: &str, dest: &Path, mode: u32) -> Result<(), PortError> {
+fn extract_tar_member(
+    c: Compression,
+    archive: &Path,
+    member: &str,
+    dest: &Path,
+    mode: u32,
+) -> Result<(), PortError> {
     // Pass 1: the non-directory entries, in archive order.
-    let entries = entry_names(archive)?;
+    let entries = entry_names(c, archive)?;
     let index = locate_member(member, &entries, archive)?;
 
     // Pass 2: read that entry (directories are skipped the same way).
-    let file = fs::File::open(archive).map_err(|e| io_err(archive, e))?;
-    let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(file));
+    let mut tar = tar::Archive::new(decoder(c, archive)?);
     let mut files = tar
         .entries()
         .map_err(|e| io_err(archive, e))?
@@ -144,13 +223,7 @@ fn extract_member(archive: &Path, member: &str, dest: &Path, mode: u32) -> Resul
         .map_err(|e| io_err(archive, e))?;
     let kind = entry.header().entry_type();
     if !kind.is_file() {
-        return Err(PortError::Backend {
-            detail: format!(
-                "{} in {} is not a regular file ({kind:?})",
-                entries[index],
-                archive.display()
-            ),
-        });
+        return Err(not_a_file(&entries[index], archive, &format!("{kind:?}")));
     }
     let mut bytes = Vec::new();
     entry
@@ -159,10 +232,9 @@ fn extract_member(archive: &Path, member: &str, dest: &Path, mode: u32) -> Resul
     write_file(dest, &bytes, Some(mode))
 }
 
-/// The paths of every non-directory entry in a `.tar.gz`, in archive order.
-fn entry_names(archive: &Path) -> Result<Vec<String>, PortError> {
-    let file = fs::File::open(archive).map_err(|e| io_err(archive, e))?;
-    let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(file));
+/// The paths of every non-directory entry in a tar, in archive order.
+fn entry_names(c: Compression, archive: &Path) -> Result<Vec<String>, PortError> {
+    let mut tar = tar::Archive::new(decoder(c, archive)?);
     let mut names = Vec::new();
     for entry in tar.entries().map_err(|e| io_err(archive, e))? {
         let entry = entry.map_err(|e| io_err(archive, e))?;
@@ -173,6 +245,49 @@ fn entry_names(archive: &Path) -> Result<Vec<String>, PortError> {
         names.push(path.to_string_lossy().into_owned());
     }
     Ok(names)
+}
+
+/// The zip counterpart of [`extract_tar_member`]: the one non-directory entry
+/// whose file name is `member`, refusing a symlink.
+fn extract_zip_member(
+    archive: &Path,
+    member: &str,
+    dest: &Path,
+    mode: u32,
+) -> Result<(), PortError> {
+    let file = fs::File::open(archive).map_err(|e| io_err(archive, e))?;
+    let zip_err = |e: zip::result::ZipError| PortError::Backend {
+        detail: format!("{}: {e}", archive.display()),
+    };
+    let mut zip = zip::ZipArchive::new(file).map_err(zip_err)?;
+    let mut entries = Vec::new();
+    for i in 0..zip.len() {
+        let entry = zip.by_index_raw(i).map_err(zip_err)?;
+        if !entry.is_dir() {
+            entries.push((i, entry.name().to_string()));
+        }
+    }
+    let names: Vec<String> = entries.iter().map(|(_, n)| n.clone()).collect();
+    let index = locate_member(member, &names, archive)?;
+    let mut entry = zip.by_index(entries[index].0).map_err(zip_err)?;
+    // zip's `is_file` is false for a directory and for a symlink.
+    if !entry.is_file() {
+        return Err(not_a_file(&names[index], archive, "Symlink"));
+    }
+    let mut bytes = Vec::new();
+    entry
+        .read_to_end(&mut bytes)
+        .map_err(|e| io_err(archive, e))?;
+    write_file(dest, &bytes, Some(mode))
+}
+
+fn not_a_file(entry: &str, archive: &Path, kind: &str) -> PortError {
+    PortError::Backend {
+        detail: format!(
+            "{entry} in {} is not a regular file ({kind})",
+            archive.display()
+        ),
+    }
 }
 
 /// The index in `entries` of the one entry whose file name (last path
@@ -250,7 +365,7 @@ mod tests {
     use super::*;
     use bosun_core::Scope;
     use bosun_ports::testing::{FakeCommandRunner, FakeHttpFetcher};
-    use bosun_ports::{HttpResponse, Output};
+    use bosun_ports::{ArchiveFormat, HttpResponse, Output};
     use flate2::write::GzEncoder;
     use flate2::Compression;
 
@@ -423,6 +538,7 @@ mod tests {
             &runner,
             &fetcher,
             &[Step::Extract {
+                format: ArchiveFormat::TarGz,
                 archive: archive.clone(),
                 member: "jq".into(),
                 dest: dest.clone(),
@@ -456,6 +572,7 @@ mod tests {
             &runner,
             &fetcher,
             &[Step::Extract {
+                format: ArchiveFormat::TarGz,
                 archive,
                 member: "jq".into(),
                 dest: dir.path().join("jq"),
@@ -492,6 +609,7 @@ mod tests {
             &FakeCommandRunner::new(),
             &FakeHttpFetcher::new(),
             &[Step::Extract {
+                format: ArchiveFormat::of(&archive.to_string_lossy()).expect("a binary asset"),
                 archive: archive.to_path_buf(),
                 member: member.to_string(),
                 dest: dest.to_path_buf(),
@@ -682,5 +800,176 @@ mod tests {
             "{err:?}"
         );
         assert!(!dest.exists(), "nothing is written on an ambiguous archive");
+    }
+
+    // --- formats ---------------------------------------------------------------
+
+    /// A plain tar holding `entries`.
+    fn tar_bytes(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut tar = tar::Builder::new(Vec::new());
+        for (name, content) in entries {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(content.len() as u64);
+            h.set_mode(0o644);
+            h.set_cksum();
+            tar.append_data(&mut h, name, *content).unwrap();
+        }
+        tar.into_inner().unwrap()
+    }
+
+    fn gz(bytes: &[u8]) -> Vec<u8> {
+        let mut e = GzEncoder::new(Vec::new(), Compression::default());
+        e.write_all(bytes).unwrap();
+        e.finish().unwrap()
+    }
+
+    fn xz(bytes: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        lzma_rs::xz_compress(&mut std::io::BufReader::new(bytes), &mut out).unwrap();
+        out
+    }
+
+    fn zst(bytes: &[u8]) -> Vec<u8> {
+        ruzstd::encoding::compress_to_vec(bytes, ruzstd::encoding::CompressionLevel::Fastest)
+    }
+
+    fn bz2(bytes: &[u8]) -> Vec<u8> {
+        let mut e = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::default());
+        e.write_all(bytes).unwrap();
+        e.finish().unwrap()
+    }
+
+    fn zip_bytes(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, content) in entries {
+            w.start_file(*name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            w.write_all(content).unwrap();
+        }
+        w.finish().unwrap().into_inner()
+    }
+
+    const RELEASE: &[(&str, &[u8])] = &[
+        ("tool-1.0/README.md", b"readme"),
+        ("tool-1.0/tool", b"TOOL"),
+    ];
+
+    #[test]
+    fn every_archive_format_yields_the_binary_found_by_name() {
+        let tar = tar_bytes(RELEASE);
+        for (name, bytes) in [
+            ("r.tar", tar.clone()),
+            ("r.tar.gz", gz(&tar)),
+            ("r.tar.xz", xz(&tar)),
+            ("r.tar.zst", zst(&tar)),
+            ("r.tar.bz2", bz2(&tar)),
+            ("r.zip", zip_bytes(RELEASE)),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let archive = dir.path().join(name);
+            std::fs::write(&archive, bytes).unwrap();
+            let dest = dir.path().join("out").join("tool");
+            extract(&archive, "tool", &dest).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(std::fs::read(&dest).unwrap(), b"TOOL", "{name}");
+        }
+    }
+
+    #[test]
+    fn a_single_compressed_file_is_the_binary() {
+        for (name, bytes) in [
+            ("tool.gz", gz(b"TOOL")),
+            ("tool.xz", xz(b"TOOL")),
+            ("tool.zst", zst(b"TOOL")),
+            ("tool.bz2", bz2(b"TOOL")),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let archive = dir.path().join(name);
+            std::fs::write(&archive, bytes).unwrap();
+            let dest = dir.path().join("tool");
+            extract(&archive, "unused", &dest).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(std::fs::read(&dest).unwrap(), b"TOOL", "{name}");
+        }
+    }
+
+    #[test]
+    fn a_raw_binary_is_copied_with_its_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("kind-linux-amd64");
+        std::fs::write(&archive, b"KIND").unwrap();
+        let dest = dir.path().join("bin").join("kind");
+        extract(&archive, "kind", &dest).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"KIND");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&dest).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o755);
+        }
+    }
+
+    #[test]
+    fn a_zip_without_the_binary_lists_what_it_has() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("r.zip");
+        std::fs::write(&archive, zip_bytes(RELEASE)).unwrap();
+        let err = extract(&archive, "other", &dir.path().join("other")).unwrap_err();
+        assert!(
+            matches!(&err, PortError::Backend { detail }
+                if detail.contains(errmsg::MEMBER_NOT_FOUND) && detail.contains("tool-1.0/tool")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_zip_with_two_binaries_of_that_name_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("r.zip");
+        std::fs::write(&archive, zip_bytes(&[("a/tool", b"1"), ("b/tool", b"2")])).unwrap();
+        let dest = dir.path().join("tool");
+        let err = extract(&archive, "tool", &dest).unwrap_err();
+        assert!(
+            matches!(&err, PortError::Backend { detail } if detail.contains(errmsg::MEMBER_AMBIGUOUS)),
+            "{err:?}"
+        );
+        assert!(!dest.exists());
+    }
+
+    #[test]
+    fn a_zip_symlink_member_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("r.zip");
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        w.add_symlink(
+            "bin/tool",
+            "/somewhere/else",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        std::fs::write(&archive, w.finish().unwrap().into_inner()).unwrap();
+        let err = extract(&archive, "tool", &dir.path().join("tool")).unwrap_err();
+        assert!(
+            matches!(&err, PortError::Backend { detail } if detail.contains("not a regular file")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_corrupt_archive_is_an_error_not_a_panic() {
+        for name in [
+            "r.tar.xz",
+            "r.tar.zst",
+            "r.tar.bz2",
+            "r.zip",
+            "tool.xz",
+            "tool.gz",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let archive = dir.path().join(name);
+            std::fs::write(&archive, b"not an archive at all").unwrap();
+            assert!(
+                extract(&archive, "tool", &dir.path().join("tool")).is_err(),
+                "{name}"
+            );
+        }
     }
 }

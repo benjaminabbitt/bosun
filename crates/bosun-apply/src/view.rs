@@ -62,6 +62,7 @@ enum StepView<'a> {
         dest: String,
     },
     Extract {
+        format: &'static str,
         archive: String,
         member: &'a str,
         dest: String,
@@ -99,11 +100,13 @@ fn step_view(step: &Step) -> StepView<'_> {
             dest: dest.display().to_string(),
         },
         Step::Extract {
+            format,
             archive,
             member,
             dest,
             mode,
         } => StepView::Extract {
+            format: format.label(),
             archive: archive.display().to_string(),
             member,
             dest: dest.display().to_string(),
