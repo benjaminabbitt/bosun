@@ -2,18 +2,27 @@
 //! set of backends with canned available versions, so the real `bosun` binary
 //! can be driven in integration tests without touching apt/cargo/the network.
 //! Production runs ignore it and probe the real host.
+//!
+//! A backend marked `real` is bosun's own compiled-in backend (github-release,
+//! where bosun is the installer) run against canned HTTP responses (`http`:
+//! URL to a local file) and a scratch `bin_dir`, so its asset picking,
+//! checksum lookup and extraction run for real without the network.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use bosun_core::vers::scheme_for_type;
 use bosun_core::{
     Capabilities, Checksum, HoldSupport, Installed, Ref, Scope, Source, Target, Version,
 };
+use bosun_host::StepExecutor;
 use bosun_ports::backend::{Index, Installer};
 use bosun_ports::step::{Step, StepRunner, Steps};
-use bosun_ports::PortError;
+use bosun_ports::testing::FakeCommandRunner;
+use bosun_ports::{HttpFetcher, PortError};
 use serde::Deserialize;
 
 /// The fixture's in-memory machine: native id → installed version. Steps mutate
@@ -44,6 +53,13 @@ pub struct Fixture {
     pub fail_step: Option<String>,
     /// The backends present in this fixture.
     pub backends: Vec<FixtureBackend>,
+    /// Canned HTTP responses for `real` backends: URL to the file served as
+    /// its 200 body. Any other URL fails.
+    #[serde(default)]
+    pub http: BTreeMap<String, PathBuf>,
+    /// Where `real` backends install binaries (github-release's bin dir).
+    #[serde(default)]
+    pub bin_dir: Option<PathBuf>,
 }
 
 /// Fixture distro facts (§5.4).
@@ -65,6 +81,10 @@ pub struct FixtureDistro {
 pub struct FixtureBackend {
     /// The backend id (`apt`).
     pub id: String,
+    /// Build bosun's own compiled-in backend of this id over the fixture's
+    /// canned HTTP and `bin_dir`, instead of a canned index and installer.
+    #[serde(default)]
+    pub real: bool,
     /// The backend's own version, for `bosun backends`.
     pub version: String,
     /// The purl type for identity (§5.6).
@@ -234,19 +254,65 @@ impl Installer for FixtureInstaller {
     }
 }
 
+/// Where `real` backends' steps run: `Fetch`/`Extract` through the host
+/// executor over the canned HTTP, and removals confined to `bin_dir`.
+pub struct RealSteps {
+    /// The canned HTTP the real backends fetch through.
+    pub fetcher: Arc<dyn HttpFetcher>,
+    /// The scratch bin dir real backends install into.
+    pub bin_dir: PathBuf,
+}
+
+impl RealSteps {
+    fn fetch_or_extract(&self, step: &Step) -> Result<(), PortError> {
+        StepExecutor::new(&FakeCommandRunner::new(), self.fetcher.as_ref())
+            .execute(std::slice::from_ref(step))
+    }
+
+    /// A real backend's `rm -f <file>` inside `bin_dir`, done in-process; any
+    /// other argv is not ours (`false`).
+    fn remove(&self, argv: &[String]) -> Result<bool, PortError> {
+        let [rm, force, path] = argv else {
+            return Ok(false);
+        };
+        let path = Path::new(path);
+        if rm != "rm" || force != "-f" || !path.starts_with(&self.bin_dir) {
+            return Ok(false);
+        }
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+            Err(e) => Err(PortError::Backend {
+                detail: format!("{}: {e}", path.display()),
+            }),
+        }
+    }
+}
+
 /// A [`StepRunner`] that applies each step to the shared machine — an
 /// `install`/`downgrade` records the version, a `remove` clears it — so
 /// `verify_installed` afterwards reflects reality. It fails any `Run` whose
 /// argv contains `fail_on` (without mutating), to drive a crash-mid-apply test.
+/// With `real` set, it also carries out real backends' steps.
 pub struct FixtureStepRunner {
     fail_on: Option<String>,
     machine: Machine,
+    real: Option<RealSteps>,
 }
 
 impl FixtureStepRunner {
-    /// Build with an optional failure marker, sharing the machine.
-    pub fn new(fail_on: Option<String>, machine: Machine) -> FixtureStepRunner {
-        FixtureStepRunner { fail_on, machine }
+    /// Build with an optional failure marker, sharing the machine, and the
+    /// real-backend step target when the fixture has real backends.
+    pub fn new(
+        fail_on: Option<String>,
+        machine: Machine,
+        real: Option<RealSteps>,
+    ) -> FixtureStepRunner {
+        FixtureStepRunner {
+            fail_on,
+            machine,
+            real,
+        }
     }
 }
 
@@ -254,6 +320,9 @@ impl StepRunner for FixtureStepRunner {
     fn execute(&self, steps: &[Step]) -> Result<(), PortError> {
         for step in steps {
             let Step::Run { argv, .. } = step else {
+                if let Some(real) = &self.real {
+                    real.fetch_or_extract(step)?;
+                }
                 continue;
             };
             if let Some(marker) = &self.fail_on {
@@ -263,6 +332,11 @@ impl StepRunner for FixtureStepRunner {
                         code: Some(1),
                         stderr: "fixture step failure".to_string(),
                     });
+                }
+            }
+            if let Some(real) = &self.real {
+                if real.remove(argv)? {
+                    continue;
                 }
             }
             // argv is [verb, native_id, version?]; reflect it on the machine.

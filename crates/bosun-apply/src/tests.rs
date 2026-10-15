@@ -1389,7 +1389,7 @@ fn plan_json_renders_every_diagnostic_and_step_kind() {
         steps: vec![
             Step::Fetch {
                 url: "https://example/a.tar.gz".to_string(),
-                sha256: "abc".to_string(),
+                sha256: Some("abc".to_string()),
                 dest: PathBuf::from("/tmp/a.tar.gz"),
             },
             Step::Extract {

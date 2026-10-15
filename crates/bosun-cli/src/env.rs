@@ -28,7 +28,7 @@ use bosun_ports::{
 use bosun_resolve::{Host, ResolvableBackend};
 
 use crate::error::CliError;
-use crate::fixture::{Fixture, FixtureIndex, FixtureInstaller, FixtureStepRunner};
+use crate::fixture::{Fixture, FixtureIndex, FixtureInstaller, FixtureStepRunner, RealSteps};
 
 /// One backend available this run: the resolver metadata, the query index, and
 /// the install side — all owned so they outlive a command.
@@ -365,6 +365,21 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
     let user_name = fx.user.unwrap_or_else(|| "tester".to_string());
 
     let (system, user) = state_paths_at(state_dir);
+    // Canned HTTP and a scratch bin dir for real backends (github-release).
+    let mut canned = bosun_ports::testing::FakeHttpFetcher::new();
+    for (url, file) in &fx.http {
+        let body = fs::read(file).map_err(|e| CliError::Io {
+            path: file.clone(),
+            detail: e.to_string(),
+        })?;
+        canned = canned.with_body(url.clone(), body);
+    }
+    let fetcher: Arc<dyn HttpFetcher> = Arc::new(canned);
+    let bin_dir = fx
+        .bin_dir
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(state_dir).join("bin"));
+    let any_real = fx.backends.iter().any(|b| b.real);
     // One in-memory machine shared by every installer and the step runner,
     // seeded with the packages each backend reports already present.
     let machine_state: crate::fixture::Machine = Rc::new(RefCell::new(BTreeMap::new()));
@@ -377,6 +392,9 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
                     what: format!("fixture backend {} version", b.id),
                     detail: e.to_string(),
                 })?;
+            if b.real {
+                return real_backend(&b.id, version, &fetcher, &bin_dir, os, arch);
+            }
             for (native, ver) in &b.installed {
                 machine_state
                     .borrow_mut()
@@ -430,7 +448,53 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
         exec: Exec::Fixture(Box::new(FixtureStepRunner::new(
             fx.fail_step,
             machine_state,
+            any_real.then(|| RealSteps { fetcher, bin_dir }),
         ))),
+    })
+}
+
+/// bosun's own compiled-in backend `id`, built over the fixture's canned HTTP
+/// and bin dir (only github-release, where bosun is the installer, has no
+/// external tool to fake).
+fn real_backend(
+    id: &str,
+    version: Version,
+    fetcher: &Arc<dyn HttpFetcher>,
+    bin_dir: &std::path::Path,
+    os: Os,
+    arch: Arch,
+) -> Result<BackendEntry, CliError> {
+    let factory = match id {
+        "github-release" => {
+            GithubReleaseFactory::new(fetcher.clone(), bin_dir.to_path_buf(), os, arch)
+        }
+        other => {
+            return Err(env_err(format!(
+                "fixture backend {other} cannot be real; only github-release can"
+            )))
+        }
+    };
+    let runner = bosun_ports::testing::FakeCommandRunner::new();
+    let host = HostInfo {
+        os,
+        arch,
+        distro: None,
+        runner: &runner,
+    };
+    let probe = factory
+        .probe(&host)
+        .map_err(env_err)?
+        .ok_or_else(|| env_err(format!("fixture backend {id} is not present")))?;
+    let meta = factory.meta();
+    let Backend { index, installer } = factory.build(probe);
+    Ok(BackendEntry {
+        id: factory.id(),
+        version,
+        purl_type: meta.purl_type.to_string(),
+        vers_type: meta.vers_type.to_string(),
+        platform_independent: meta.platform_independent,
+        index,
+        installer,
     })
 }
 

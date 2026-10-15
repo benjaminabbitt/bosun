@@ -261,7 +261,13 @@ fn resolve_entry(
         source,
     })?;
     let native = block.package.as_deref().unwrap_or(&entry.name);
-    let purl = build_purl(&entry.name, &chosen.purl_type, native, host)?;
+    let purl = build_purl(
+        &entry.name,
+        &chosen.purl_type,
+        native,
+        block.asset.as_deref(),
+        host,
+    )?;
 
     // §4.7: platform-independent backends resolve under `any`.
     let target = if chosen.platform_independent {
@@ -347,6 +353,7 @@ fn effective_block(
             },
             package: entry.package.or(defaults.package),
             spec: entry.spec.or(defaults.spec),
+            asset: entry.asset.or(defaults.asset),
         }),
     }
 }
@@ -418,14 +425,18 @@ fn choose_backend<'b>(
 /// - `deb`: `pkg:deb/<distro-id>/<name>?arch=<arch>&distro=<codename>` — the
 ///   namespace is the distro ID and the qualifiers carry arch and the distro
 ///   codename (from `VERSION_CODENAME`), omitted when the host has none.
-/// - `github`: `pkg:github/<owner>/<repo>?binary=<logical>` — the package id is
-///   `owner/repo`; the `binary` qualifier defaults to the entry's logical name
-///   so `- name: ltk` with `package: owner/repo` selects the `ltk` binary.
-/// - anything else: `pkg:<type>/<name>` (cargo, generic, …).
+/// - `github`: `pkg:github/<owner>/<repo>?asset=<template>&binary=<logical>` —
+///   the package id is `owner/repo`; the `binary` qualifier defaults to the
+///   entry's logical name so `- name: ltk` with `package: owner/repo` selects
+///   the `ltk` binary; `asset` is the install block's `asset:` template,
+///   verbatim, when one is given (the backend renders and validates it).
+/// - anything else: `pkg:<type>/<name>` (cargo, generic, …). `asset` applies
+///   only to github, so a fallback backend in the same block ignores it.
 fn build_purl(
     name: &str,
     purl_type: &str,
     native: &str,
+    asset: Option<&str>,
     host: &Host<'_>,
 ) -> Result<Purl, ResolveError> {
     let bad_purl = |source| ResolveError::BadPurl {
@@ -455,6 +466,9 @@ fn build_purl(
                     })?;
             let mut qualifiers = BTreeMap::new();
             qualifiers.insert("binary".to_string(), name.to_string());
+            if let Some(asset) = asset {
+                qualifiers.insert("asset".to_string(), asset.to_string());
+            }
             Purl::from_components("github", Some(owner), repo, None, qualifiers, None)
                 .map_err(bad_purl)
         }
@@ -766,7 +780,13 @@ mod tests {
             backends: backends.iter().map(|s| s.to_string()).collect(),
             package: package.map(str::to_string),
             spec: spec.map(str::to_string),
+            asset: None,
         }
+    }
+
+    fn with_asset(mut b: InstallBlock, asset: &str) -> InstallBlock {
+        b.asset = Some(asset.to_string());
+        b
     }
 
     fn entry(name: &str, spec: Option<&str>, install: &[(&str, InstallBlock)]) -> ManifestEntry {
@@ -951,6 +971,109 @@ mod tests {
             "pkg:github/ctxloom/ctxloom?binary=ltk"
         );
         assert_eq!(target, AMD64);
+    }
+
+    #[test]
+    fn github_asset_template_is_carried_into_the_purl() {
+        let host = Host {
+            os: Os::Linux,
+            arch: Arch::Amd64,
+            distro: None,
+        };
+        let index = FakeIndex::new(Scheme::Semver, &["2.0.2"]);
+        let template = "{{ binary }}_{{ version }}_{{ os | title }}_{{ arch_goreleaser }}.tar.gz";
+        let m = manifest(
+            &[],
+            vec![entry(
+                "gum",
+                Some(">=2.0.0"),
+                &[(
+                    "linux",
+                    with_asset(
+                        block(&["github-release"], Some("charmbracelet/gum"), None),
+                        template,
+                    ),
+                )],
+            )],
+        );
+
+        let r = resolve(&m, "sha256:h", &host, &[github_backend(&index)], &[]).unwrap();
+
+        let (queried, _) = index.last.borrow().clone().unwrap();
+        assert_eq!(
+            queried.purl.qualifiers().get("asset").map(String::as_str),
+            Some(template)
+        );
+        assert_eq!(
+            queried.purl.qualifiers().get("binary").map(String::as_str),
+            Some("gum")
+        );
+        // The lock records the same identity, and it round-trips through text.
+        let leaf = r.lock.packages[0].targets.values().next().unwrap();
+        let reparsed: Purl = leaf.placement.purl.to_string().parse().unwrap();
+        assert_eq!(reparsed, leaf.placement.purl);
+        assert_eq!(
+            reparsed.qualifiers().get("asset").map(String::as_str),
+            Some(template)
+        );
+    }
+
+    #[test]
+    fn github_asset_is_inherited_from_defaults() {
+        let host = Host {
+            os: Os::Linux,
+            arch: Arch::Amd64,
+            distro: None,
+        };
+        let index = FakeIndex::new(Scheme::Semver, &["0.8.1"]);
+        let template = "{{ binary }}_{{ version }}_{{ os }}_{{ arch_goreleaser }}.tar.gz";
+        let m = manifest(
+            &[(
+                "linux",
+                with_asset(block(&["github-release"], None, None), template),
+            )],
+            vec![entry(
+                "duf",
+                Some(">=0.8.0"),
+                &[("linux", block(&[], Some("muesli/duf"), None))],
+            )],
+        );
+
+        resolve(&m, "sha256:h", &host, &[github_backend(&index)], &[]).unwrap();
+
+        let (queried, _) = index.last.borrow().clone().unwrap();
+        assert_eq!(
+            queried.purl.qualifiers().get("asset").map(String::as_str),
+            Some(template)
+        );
+    }
+
+    #[test]
+    fn asset_does_not_reach_a_non_github_identity() {
+        // `backends: [github-release, cargo]` with an asset: when cargo is the
+        // one chosen, its identity carries no asset qualifier.
+        let index = FakeIndex::new(Scheme::Semver, &["0.8.1"]);
+        let host = Host {
+            os: Os::Linux,
+            arch: Arch::Amd64,
+            distro: None,
+        };
+        let m = manifest(
+            &[],
+            vec![entry(
+                "duf",
+                Some(">=0.8.0"),
+                &[(
+                    "linux",
+                    with_asset(block(&["github-release", "cargo"], None, None), "x.tar.gz"),
+                )],
+            )],
+        );
+
+        resolve(&m, "sha256:h", &host, &[cargo_backend(&index)], &[]).unwrap();
+
+        let (queried, _) = index.last.borrow().clone().unwrap();
+        assert_eq!(queried.purl.to_string(), "pkg:cargo/duf");
     }
 
     #[test]

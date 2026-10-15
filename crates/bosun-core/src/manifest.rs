@@ -49,4 +49,7 @@ pub struct InstallBlock {
     pub package: Option<String>,
     /// A per-selector spec override.
     pub spec: Option<String>,
+    /// The release asset name, as a template (github-release only). Kept
+    /// verbatim; the backend renders and validates it.
+    pub asset: Option<String>,
 }

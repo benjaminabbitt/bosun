@@ -28,6 +28,10 @@ fmt-check:
 release:
     cargo build --release -p bosun-cli
 
+# Install the bosun binary into ~/.cargo/bin from this checkout.
+install:
+    cargo install --locked --path crates/bosun-cli
+
 # Mutation testing in a disposable tree copy (see docs/design/verprop.md quality
 # bars). A plain copy — not a git worktree — because the shared .git may be
 # read-only; -j1 and TMPDIR off /tmp so the copy's target tree is self-contained.

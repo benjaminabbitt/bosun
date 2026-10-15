@@ -1,0 +1,132 @@
+# github-release asset templates
+
+A `github-release` package installs one archive from a GitHub release. bosun finds that
+archive by **exact name**, so it never matches by prefix and a `_full` variant can't be
+mistaken for the plain archive. The name comes from a [minijinja](https://docs.rs/minijinja)
+template: `{{ variable }}` placeholders are replaced with values for the package being
+installed and the host it's going to.
+
+## Default
+
+With no `asset:` key, the template is goreleaser's default archive name:
+
+```text
+{{ binary }}_{{ version }}_{{ os }}_{{ arch }}.tar.gz
+```
+
+For ctxloom 0.6.4 on linux/amd64 that gives `ctxloom_0.6.4_linux_amd64.tar.gz`.
+
+## Overriding the template
+
+Set `asset:` on the install block when a release uses a different layout:
+
+```yaml
+packages:
+  - name: gum
+    spec: ">=2.0.0|<3.0.0"
+    install:
+      linux:
+        backend: github-release
+        package: charmbracelet/gum
+        asset: "{{ binary }}_{{ version }}_{{ os | title }}_{{ arch_goreleaser }}.tar.gz"
+```
+
+The template must name the asset exactly as it appears on the release page, extension
+included. Quote it in YAML: a value that starts with `{` would otherwise be read as a mapping.
+
+`asset:` can also go in `defaults.install`, and an entry inherits it like the other install
+fields. It only applies to `github-release`; when a block lists other backends too and one of
+them is chosen, the template is ignored.
+
+## Variables
+
+| Variable          | Value                                                              | linux/amd64 | linux/arm64 |
+|-------------------|--------------------------------------------------------------------|-------------|-------------|
+| `binary`          | The binary name: the entry's `name` (the `binary` purl qualifier)   | `gum`       | `gum`       |
+| `version`         | The resolved version, without a leading `v`                        | `2.0.2`     | `2.0.2`     |
+| `tag`             | The release's actual tag                                           | `v2.0.2`    | `v2.0.2`    |
+| `os`              | Go's `GOOS`                                                        | `linux`     | `linux`     |
+| `arch`            | Go's `GOARCH` (also Debian's spelling for these two)               | `amd64`     | `arm64`     |
+| `arch_uname`      | The `uname -m` spelling; also Rust triples, rpm and apk            | `x86_64`    | `aarch64`   |
+| `arch_goreleaser` | The `goreleaser init` spelling: `x86_64` for amd64, otherwise `arch` | `x86_64`  | `arm64`     |
+
+All OS values:
+
+| bosun OS | `os`      | `os \| title` |
+|----------|-----------|---------------|
+| linux    | `linux`   | `Linux`       |
+| macos    | `darwin`  | `Darwin`      |
+| windows  | `windows` | `Windows`     |
+
+Names follow goreleaser's template fields (lower-cased) where they overlap, so a template can
+often be copied from the project's own `.goreleaser.yaml`.
+
+`arch_uname` and `arch_goreleaser` are both needed because release authors mix spellings.
+gum, lazygit and duf publish `x86_64` next to `arm64` (that's `arch_goreleaser`). Projects that
+follow `uname -m` or Rust target triples use `aarch64` (that's `arch_uname`).
+
+minijinja's built-in filters change case or spelling: `{{ os | title }}` gives `Linux`,
+`{{ arch | upper }}` gives `ARM64`, `{{ arch_uname | replace("x86_64", "x64") }}` gives `x64`.
+`{% if %}` works for one-off spellings.
+
+Not available yet:
+
+| Variable      | Would be                                              | linux/amd64                |
+|---------------|-------------------------------------------------------|----------------------------|
+| `libc`        | The host's C library family (`gnu` or `musl`)          | `gnu`                      |
+| `rust_target` | `{{ arch_uname }}-unknown-{{ os }}-{{ libc }}`         | `x86_64-unknown-linux-gnu` |
+
+Both need host libc detection, which bosun doesn't have yet. A template that uses either is
+an error that says so. Many Rust projects publish only a musl build for some architectures,
+so writing `musl` into the template is usually right anyway.
+
+## Examples from real releases
+
+| Project       | Release asset (linux/amd64)                          | Template |
+|---------------|------------------------------------------------------|----------|
+| ctxloom       | `ctxloom_0.6.4_linux_amd64.tar.gz`                   | default |
+| ctxloom       | `ctxloom_0.6.4_linux_amd64_full.tar.gz`              | `{{ binary }}_{{ version }}_{{ os }}_{{ arch }}_full.tar.gz` |
+| traefik       | `traefik_v3.7.14_linux_amd64.tar.gz`                 | `{{ binary }}_{{ tag }}_{{ os }}_{{ arch }}.tar.gz` |
+| duf           | `duf_0.8.1_linux_x86_64.tar.gz`                      | `{{ binary }}_{{ version }}_{{ os }}_{{ arch_goreleaser }}.tar.gz` |
+| gum           | `gum_2.0.2_Linux_x86_64.tar.gz`                      | `{{ binary }}_{{ version }}_{{ os \| title }}_{{ arch_goreleaser }}.tar.gz` |
+| ripgrep       | `ripgrep-15.2.0-x86_64-unknown-linux-musl.tar.gz`    | `ripgrep-{{ version }}-{{ arch_uname }}-unknown-linux-musl.tar.gz` |
+| fd            | `fd-v10.3.0-x86_64-unknown-linux-musl.tar.gz`        | `{{ binary }}-{{ tag }}-{{ arch_uname }}-unknown-linux-musl.tar.gz` |
+| uv            | `uv-x86_64-unknown-linux-gnu.tar.gz`                 | `{{ binary }}-{{ arch_uname }}-unknown-linux-gnu.tar.gz` |
+| golangci-lint | `golangci-lint-2.5.0-linux-amd64.tar.gz`             | `{{ binary }}-{{ version }}-{{ os }}-{{ arch }}.tar.gz` |
+| trivy         | `trivy_0.67.2_Linux-64bit.tar.gz`                    | `{{ binary }}_{{ version }}_{{ os \| title }}-{% if arch == "amd64" %}64bit{% else %}{{ arch \| upper }}{% endif %}.tar.gz` |
+
+ripgrep's binary is `rg`, so the template spells the archive's `ripgrep` literally.
+Only `.tar.gz` archives install today; templates for other formats render, but the
+archive can't be extracted yet.
+
+## Rules
+
+- Variables are case-sensitive: `{{ os }}` exists, `{{ Os }}` doesn't.
+- An unknown variable such as `{{ platform }}` is an error that names it and lists the
+  variables available. It is never passed through literally or rendered empty.
+- A single-brace placeholder like `{binary}` is an error too. To minijinja it's literal text,
+  so bosun refuses any rendered name that still contains `{` or `}`.
+- Templates are checked when bosun resolves the package (`bosun lock`, `bosun install`), once
+  it has found the release. A broken template stops resolution, and nothing is installed.
+- Matching is exact. If no asset has the rendered name, the error lists the release's assets
+  so you can correct the template.
+- bosun finds the binary inside the archive by name, at any depth: at the root (duf), in a
+  wrapping directory (`gum_2.0.2_Linux_x86_64/gum`), or under `bin/` (`gh_…/bin/gh`). Exactly
+  one file in the archive may have that name. If there are none, or more than one, the error
+  lists what it found.
+- **Checksums:** when the release publishes a sha256 for the asset, bosun verifies the
+  download against it and records it in the lock. A mismatch is an error. bosun looks for:
+  - a per-asset file, `<asset>.sha256` or `<asset>.sha256sum`;
+  - otherwise a combined sums file: `checksums.txt`, `<name>_checksums.txt`,
+    `<name>-checksums.txt`, `SHA256SUMS`, `sha256sum.txt`, `SHASUMS256.txt`, `sha256.sum` or
+    `checksums.sha256`.
+
+  Signature files (`.asc`, `.sig`, `.minisig`, `.sigstore.json`, `.pem`) are never read as
+  sums. If the release publishes no checksum, or its sums file doesn't list the asset, bosun
+  installs anyway, prints a warning naming the repo and asset, and records no checksum.
+
+## Open
+
+- **Binary path override** for archives where locating by name doesn't work (two files with
+  the binary's name, or a binary named differently from the package): a second template naming
+  the path inside the archive, using the same variables.

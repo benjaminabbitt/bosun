@@ -33,21 +33,25 @@ pub enum Step {
         /// The install scope this runs under.
         scope: Scope,
     },
-    /// Download `url` to `dest` and verify its sha256. Host: bosun fetches and
-    /// checks. Container: `ADD --checksum=sha256:… <url> <dest>`.
+    /// Download `url` to `dest`, verifying its sha256 when one is known.
+    /// Host: bosun fetches and checks. Container: `ADD --checksum=sha256:…
+    /// <url> <dest>` (a plain `ADD` without one).
     Fetch {
         /// The source URL.
         url: String,
-        /// The expected sha256, hex-encoded.
-        sha256: String,
+        /// The expected sha256, hex-encoded; `None` when the source publishes
+        /// none, and the download is written unverified.
+        sha256: Option<String>,
         /// Where to write it.
         dest: PathBuf,
     },
-    /// Extract one member of an archive to `dest` with file mode `mode`.
+    /// Extract one member of an archive to `dest` with file mode `mode`. The
+    /// member is found by file name at any depth (the archive root, a wrapping
+    /// directory, a nested `bin/`); exactly one entry may carry that name.
     Extract {
         /// The archive file.
         archive: PathBuf,
-        /// The member path within the archive.
+        /// The member's file name (not a path) within the archive.
         member: String,
         /// Where to write the extracted file.
         dest: PathBuf,

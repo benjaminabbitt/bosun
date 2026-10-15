@@ -32,6 +32,9 @@ tempfile.workspace = true
 assert_cmd.workspace = true
 predicates.workspace = true
 cucumber.workspace = true
+flate2.workspace = true
+sha2.workspace = true
+tar.workspace = true
 futures.workspace = true
 
 [[test]]

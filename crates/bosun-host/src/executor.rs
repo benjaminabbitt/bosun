@@ -1,7 +1,8 @@
 //! The host step executor (§5.1): carries out the [`Step`] list an installer
 //! produced. `Run` goes through the [`CommandRunner`] (a non-zero exit is a
 //! failure); `Fetch` downloads through the [`HttpFetcher`] and verifies the
-//! sha256; `Extract` pulls one member out of a `.tar.gz`. The container
+//! sha256 when the step carries one; `Extract` pulls the one member with a given file name out of a
+//! `.tar.gz`, wherever in the archive it sits. The container
 //! renderer (§8) consumes the same steps instead of running them.
 
 use std::fs;
@@ -10,6 +11,8 @@ use std::path::Path;
 
 use bosun_ports::{Command, CommandRunner, HttpFetcher, HttpRequest, PortError, Step};
 use sha2::{Digest, Sha256};
+
+use crate::errmsg;
 
 /// Runs step lists on the local host.
 pub struct StepExecutor<'a> {
@@ -66,7 +69,7 @@ impl<'a> StepExecutor<'a> {
                     });
                 }
                 let got = hex(&Sha256::digest(&resp.body));
-                if got != *sha256 {
+                if let Some(sha256) = sha256.as_ref().filter(|want| got != **want) {
                     return Err(PortError::Backend {
                         detail: format!(
                             "checksum mismatch for {url}: expected {sha256}, got {got}"
@@ -111,37 +114,103 @@ fn write_file(dest: &Path, bytes: &[u8], mode: Option<u32>) -> Result<(), PortEr
     Ok(())
 }
 
-/// Extract one **regular-file** `.tar.gz` member to `dest` with unix mode
-/// `mode`. A leading `./` on either side is ignored (goreleaser archives store
-/// members both ways). A symlink/hardlink/dir member is refused, naming its
-/// type, rather than silently written as a 0-byte executable.
+/// Extract the `.tar.gz` member whose **file name** is `member`, at any depth
+/// (`gum`, `gum_2.0.2_Linux_x86_64/gum`, `gh_2.80.0/bin/gh` alike), to `dest`
+/// with unix mode `mode`. Exactly one non-directory entry may carry that name;
+/// none or several is an error listing what was found. A symlink/hardlink
+/// member is refused, naming its type, rather than silently written as a
+/// 0-byte executable.
 fn extract_member(archive: &Path, member: &str, dest: &Path, mode: u32) -> Result<(), PortError> {
+    // Pass 1: the non-directory entries, in archive order.
+    let entries = entry_names(archive)?;
+    let index = locate_member(member, &entries, archive)?;
+
+    // Pass 2: read that entry (directories are skipped the same way).
     let file = fs::File::open(archive).map_err(|e| io_err(archive, e))?;
     let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(file));
+    let mut files = tar
+        .entries()
+        .map_err(|e| io_err(archive, e))?
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .map_or(true, |e| !e.header().entry_type().is_dir())
+        });
+    let mut entry = files
+        .nth(index)
+        .ok_or_else(|| PortError::Backend {
+            detail: format!("{} changed while reading", archive.display()),
+        })?
+        .map_err(|e| io_err(archive, e))?;
+    let kind = entry.header().entry_type();
+    if !kind.is_file() {
+        return Err(PortError::Backend {
+            detail: format!(
+                "{} in {} is not a regular file ({kind:?})",
+                entries[index],
+                archive.display()
+            ),
+        });
+    }
+    let mut bytes = Vec::new();
+    entry
+        .read_to_end(&mut bytes)
+        .map_err(|e| io_err(archive, e))?;
+    write_file(dest, &bytes, Some(mode))
+}
+
+/// The paths of every non-directory entry in a `.tar.gz`, in archive order.
+fn entry_names(archive: &Path) -> Result<Vec<String>, PortError> {
+    let file = fs::File::open(archive).map_err(|e| io_err(archive, e))?;
+    let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(file));
+    let mut names = Vec::new();
     for entry in tar.entries().map_err(|e| io_err(archive, e))? {
-        let mut entry = entry.map_err(|e| io_err(archive, e))?;
-        let path = entry.path().map_err(|e| io_err(archive, e))?;
-        if norm(&path.to_string_lossy()) != norm(member) {
+        let entry = entry.map_err(|e| io_err(archive, e))?;
+        if entry.header().entry_type().is_dir() {
             continue;
         }
-        let kind = entry.header().entry_type();
-        if !kind.is_file() {
-            return Err(PortError::Backend {
+        let path = entry.path().map_err(|e| io_err(archive, e))?;
+        names.push(path.to_string_lossy().into_owned());
+    }
+    Ok(names)
+}
+
+/// The index in `entries` of the one entry whose file name (last path
+/// component) is `name`. None or several is an error: a missing name lists the
+/// archive's entries, an ambiguous one lists the matches.
+fn locate_member(name: &str, entries: &[String], archive: &Path) -> Result<usize, PortError> {
+    let matches: Vec<usize> = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, path)| file_name(path) == name)
+        .map(|(i, _)| i)
+        .collect();
+    match matches.as_slice() {
+        [one] => Ok(*one),
+        [] => Err(PortError::Backend {
+            detail: format!(
+                "{} {name:?} ({}); found: {entries:?}",
+                errmsg::MEMBER_NOT_FOUND,
+                archive.display()
+            ),
+        }),
+        several => {
+            let found: Vec<&str> = several.iter().map(|&i| entries[i].as_str()).collect();
+            Err(PortError::Backend {
                 detail: format!(
-                    "{member} in {} is not a regular file ({kind:?})",
+                    "{} {name:?} ({}); found: {found:?}",
+                    errmsg::MEMBER_AMBIGUOUS,
                     archive.display()
                 ),
-            });
+            })
         }
-        let mut bytes = Vec::new();
-        entry
-            .read_to_end(&mut bytes)
-            .map_err(|e| io_err(archive, e))?;
-        return write_file(dest, &bytes, Some(mode));
     }
-    Err(PortError::Backend {
-        detail: format!("{member} not found in {}", archive.display()),
-    })
+}
+
+/// The last component of an archive path, ignoring a leading `./`.
+fn file_name(path: &str) -> &str {
+    let path = norm(path);
+    path.rsplit('/').next().unwrap_or(path)
 }
 
 /// Strip a single leading `./` for member comparison.
@@ -261,12 +330,30 @@ mod tests {
             &fetcher,
             &[Step::Fetch {
                 url: "https://x/a".into(),
-                sha256: sha,
+                sha256: Some(sha),
                 dest: dest.clone(),
             }],
         )
         .unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), body);
+    }
+
+    #[test]
+    fn fetch_without_a_checksum_writes_unverified() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out.bin");
+        let fetcher = FakeHttpFetcher::new().with_body("https://x/a", b"unsigned".to_vec());
+        exec_with(
+            &FakeCommandRunner::new(),
+            &fetcher,
+            &[Step::Fetch {
+                url: "https://x/a".into(),
+                sha256: None,
+                dest: dest.clone(),
+            }],
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"unsigned");
     }
 
     #[test]
@@ -278,7 +365,7 @@ mod tests {
             &fetcher,
             &[Step::Fetch {
                 url: "https://x/a".into(),
-                sha256: "00".repeat(32),
+                sha256: Some("00".repeat(32)),
                 dest: std::env::temp_dir().join("bosun-never"),
             }],
         )
@@ -304,7 +391,7 @@ mod tests {
                 &fetcher,
                 &[Step::Fetch {
                     url: "https://x/a".into(),
-                    sha256: "x".into(),
+                    sha256: Some("x".into()),
                     dest: std::env::temp_dir().join("bosun-never"),
                 }]
             ),
@@ -337,7 +424,7 @@ mod tests {
             &fetcher,
             &[Step::Extract {
                 archive: archive.clone(),
-                member: "bin/jq".into(),
+                member: "jq".into(),
                 dest: dest.clone(),
                 mode: 0o755,
             }],
@@ -370,7 +457,7 @@ mod tests {
             &fetcher,
             &[Step::Extract {
                 archive,
-                member: "bin/jq".into(),
+                member: "jq".into(),
                 dest: dir.path().join("jq"),
                 mode: 0o755,
             }]
@@ -423,7 +510,7 @@ mod tests {
         // Hold the old inode open, as a running executable would be.
         let mut held = std::fs::File::open(&dest).unwrap();
 
-        extract(&archive, "bin/jq", &dest).unwrap();
+        extract(&archive, "jq", &dest).unwrap();
 
         assert_eq!(std::fs::read(&dest).unwrap(), b"NEW"); // new content via a new inode
         let mut old = String::new();
@@ -442,7 +529,7 @@ mod tests {
         std::fs::create_dir(&dest).unwrap();
         let before = list(dir.path());
 
-        assert!(extract(&archive, "bin/jq", &dest).is_err());
+        assert!(extract(&archive, "jq", &dest).is_err());
         assert_eq!(list(dir.path()), before, "a temp file survived the failure");
     }
 
@@ -460,7 +547,7 @@ mod tests {
                 .unwrap();
             tar.into_inner().unwrap().finish().unwrap();
         }
-        let err = extract(&archive, "bin/jq", &dir.path().join("jq")).unwrap_err();
+        let err = extract(&archive, "jq", &dir.path().join("jq")).unwrap_err();
         assert!(
             matches!(err, PortError::Backend { detail } if detail.contains("not a regular file")),
             "a symlink member must be refused"
@@ -475,9 +562,9 @@ mod tests {
         // applied: a `norm` that collapses every name to a constant would
         // wrongly match this one, so the extracted bytes pin that `norm`
         // actually strips `./` on both sides rather than returning a constant.
-        targz(&archive, &[("README", b"DECOY"), ("./bin/jq", b"X")]);
+        targz(&archive, &[("README", b"DECOY"), ("./jq", b"X")]);
         let dest = dir.path().join("jq");
-        extract(&archive, "bin/jq", &dest).unwrap(); // requested without ./
+        extract(&archive, "jq", &dest).unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b"X");
     }
 
@@ -498,5 +585,102 @@ mod tests {
             .unwrap();
         assert_eq!(runner.calls().len(), 1);
         assert_eq!(runner.calls()[0].program, "apt-get");
+    }
+
+    // --- locating the member by name -----------------------------------------
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn locate_err(name: &str, list: &[&str]) -> String {
+        match locate_member(name, &names(list), Path::new("a.tar.gz")).unwrap_err() {
+            PortError::Backend { detail } => detail,
+            other => panic!("unexpected error {other:?}"),
+        }
+    }
+
+    #[test]
+    fn locate_finds_the_binary_at_the_root() {
+        // duf, lazygit, k9s, just: the binary sits next to LICENSE and README.
+        let entries = names(&["LICENSE", "README.md", "duf"]);
+        assert_eq!(locate_member("duf", &entries, Path::new("a")).unwrap(), 2);
+        // goreleaser sometimes writes `./` on member names.
+        let dotted = names(&["./LICENSE", "./duf"]);
+        assert_eq!(locate_member("duf", &dotted, Path::new("a")).unwrap(), 1);
+    }
+
+    #[test]
+    fn locate_finds_the_binary_in_a_wrapping_directory() {
+        let entries = names(&[
+            "gum_2.0.2_Linux_x86_64/LICENSE",
+            "gum_2.0.2_Linux_x86_64/completions/gum.bash",
+            "gum_2.0.2_Linux_x86_64/gum",
+            "gum_2.0.2_Linux_x86_64/manpages/gum.1.gz",
+        ]);
+        assert_eq!(locate_member("gum", &entries, Path::new("a")).unwrap(), 2);
+    }
+
+    #[test]
+    fn locate_finds_the_binary_under_a_nested_bin() {
+        let entries = names(&[
+            "gh_2.80.0_linux_amd64/LICENSE",
+            "gh_2.80.0_linux_amd64/bin/gh",
+            "gh_2.80.0_linux_amd64/share/man/man1/gh.1",
+        ]);
+        assert_eq!(locate_member("gh", &entries, Path::new("a")).unwrap(), 1);
+    }
+
+    #[test]
+    fn locate_errors_when_missing_and_lists_the_entries() {
+        let e = locate_err("gum", &["gum_2.0.2/LICENSE", "gum_2.0.2/gumx"]);
+        assert!(e.contains(errmsg::MEMBER_NOT_FOUND), "{e}");
+        assert!(e.contains("gum_2.0.2/gumx"), "{e}");
+        assert!(e.contains("a.tar.gz"), "{e}");
+    }
+
+    #[test]
+    fn locate_errors_on_duplicates_and_lists_them() {
+        let e = locate_err("uv", &["uv-x/uv", "uv-x/uvx", "uv-x/bin/uv"]);
+        assert!(e.contains(errmsg::MEMBER_AMBIGUOUS), "{e}");
+        assert!(e.contains("uv-x/uv") && e.contains("uv-x/bin/uv"), "{e}");
+        assert!(!e.contains("uvx"), "only the matches are listed: {e}");
+    }
+
+    #[test]
+    fn locate_never_matches_a_path_or_a_prefix() {
+        // A name, not a path: `bin/gh` names nothing; `gh` is not `gh.1`.
+        assert!(locate_member("bin/gh", &names(&["x/bin/gh"]), Path::new("a")).is_err());
+        assert!(locate_member("gh", &names(&["gh.1", "ghx"]), Path::new("a")).is_err());
+    }
+
+    #[test]
+    fn extract_pulls_the_binary_out_of_a_wrapping_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("gum.tar.gz");
+        targz(
+            &archive,
+            &[
+                ("gum_2.0.2_Linux_x86_64/README.md", b"readme"),
+                ("gum_2.0.2_Linux_x86_64/gum", b"GUM"),
+            ],
+        );
+        let dest = dir.path().join("out").join("gum");
+        extract(&archive, "gum", &dest).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"GUM");
+    }
+
+    #[test]
+    fn extract_refuses_an_archive_with_two_binaries_of_that_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("r.tar.gz");
+        targz(&archive, &[("a/jq", b"1"), ("b/jq", b"2")]);
+        let dest = dir.path().join("jq");
+        let err = extract(&archive, "jq", &dest).unwrap_err();
+        assert!(
+            matches!(&err, PortError::Backend { detail } if detail.contains(errmsg::MEMBER_AMBIGUOUS)),
+            "{err:?}"
+        );
+        assert!(!dest.exists(), "nothing is written on an ambiguous archive");
     }
 }

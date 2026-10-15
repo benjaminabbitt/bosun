@@ -475,8 +475,8 @@ commands too.
 | step | host executor | container renderer |
 |---|---|---|
 | `Run { argv, env, scope }` | `CommandRunner` (privilege per scope, §5.5) | `RUN` with shell-quoted argv |
-| `Fetch { url, sha256, dest }` | bosun downloads and verifies the checksum | `ADD --checksum=sha256:… <url> <dest>` |
-| `Extract { archive, member, dest, mode }` | bosun extracts | `RUN tar …` / `unzip …` |
+| `Fetch { url, sha256?, dest }` | bosun downloads and verifies the checksum when there is one | `ADD [--checksum=sha256:…] <url> <dest>` |
+| `Extract { archive, member, dest, mode }` | bosun extracts the one file named `member`, at any depth | `RUN tar …` / `unzip …` |
 
 - `Fetch` and `Extract` exist because for `github-release` bosun *is* the installer (§12).
 - Queries (`verify_installed`, `query_available`) run directly; they're reads, not part of
@@ -1051,11 +1051,14 @@ What dogfooding forces into v1 (proposed):
 1. **A `github-release` backend.** Previously only the rolling-backend fallback (§5.2, FUTURE.md);
    it is the main Linux/Windows path for the ctxloom family. Lists versions from the GitHub
    releases API (token for rate limits), picks the archive for the target OS/arch, verifies it
-   against the release's `checksums.txt`, extracts the binary, and records what it installed in
-   machine state (user scope).
+   against the checksum the release publishes (if any), extracts the binary, and records what it
+   installed in machine state (user scope).
    - **Integrity exception to §9:** here bosun *is* the installer, so it cannot delegate
-     verification. It verifies the upstream-published checksum and records it in the lock,
-     where `checksum` becomes enforced for this backend rather than informational.
+     verification. When the release publishes a sha256 for the asset (a per-asset
+     `<asset>.sha256`/`.sha256sum`, else a combined sums file such as `checksums.txt`,
+     `<name>_checksums.txt` or `SHA256SUMS`), bosun verifies the download against it and records
+     it in the lock; a mismatch is an error. bosun doesn't audit releases: when none is published,
+     or the sums file doesn't list the asset, it installs anyway, warns, and records no checksum.
    - **Install location exception to §9:** with no package manager to choose a prefix, bosun
      needs a default bin directory (e.g. `~/.local/bin`, `%LOCALAPPDATA%\bosun\bin`) and must
      say so when it isn't on PATH.
@@ -1152,9 +1155,14 @@ remote indexes. Traits stay ready; nothing is stubbed.
   is never a placeholder version. github-release reports `Present { version: None }`, so apply
   records the resolved version and state is the authority for it.
 - `Ref` carries the canonical purl. github-release identity uses purl qualifiers `binary`
-  (default: the entry's logical name, set by resolve) and an optional `asset` template (e.g.
-  for goreleaser's `_full` archives); the default asset match is goreleaser's exact name
-  `{binary}_{version}_{os}_{arch}.tar.gz`.
+  (default: the entry's logical name, set by resolve) and an optional `asset` template, from
+  the install block's `asset:` key (see `docs/asset-templates.md`). The asset template is a
+  minijinja template with strict undefined over precomputed variables (`binary`, `version`,
+  `tag`, `os`, `arch`, `arch_uname`, `arch_goreleaser`); the default is goreleaser's
+  `{{ binary }}_{{ version }}_{{ os }}_{{ arch }}.tar.gz`, matched exactly. A bad template is
+  an error at resolve, through `Index::checksum`. The binary is located in the archive by file
+  name at any depth (exactly one match). A published checksum is verified; none published means
+  install, warn and record none.
 - Resolve takes a narrow `Host { os, arch, distro }` and `ResolvableBackend { id, purl_type,
   vers_type, platform_independent, index }` values built by the CLI from the registry, and
   the manifest hash passed in, so bosun-resolve depends on neither bosun-host nor bosun-io.
@@ -1189,7 +1197,8 @@ remote indexes. Traits stay ready; nothing is stubbed.
   compare as SemVer. That applies to lock `resolved`, state `installed` and every spec.
   Crossing schemes was dogfood bug 1.
 - `Index::checksum` (defaulted to none) lets the lock record a backend-reported checksum;
-  github-release returns the `checksums.txt` sha256, the same value its Fetch step enforces.
+  github-release returns the release's published sha256 for the asset (none when it publishes
+  none), the same value its Fetch step enforces.
 - `Arch` is amd64/arm64 only; `Os` uses Docker's spelling (`darwin`).
 
 **M1 status: COMPLETE (2026-10-14).** `bosun backends | status | lock [--check] | install |

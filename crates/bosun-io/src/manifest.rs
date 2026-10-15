@@ -143,7 +143,7 @@ fn install_block(v: &Value) -> Result2<InstallBlock> {
     check_keys(
         entries,
         "an install block",
-        &["backend", "backends", "package", "spec"],
+        &["backend", "backends", "package", "spec", "asset"],
     )?;
     // `backends:` (preferred, a list) or `backend:` (one), scalar or sequence.
     let backends = match v.get("backends").or_else(|| v.get("backend")) {
@@ -155,6 +155,7 @@ fn install_block(v: &Value) -> Result2<InstallBlock> {
         backends,
         package: field("package"),
         spec: field("spec"),
+        asset: field("asset"),
     })
 }
 
@@ -292,6 +293,9 @@ struct CanonBlock {
     backends: Vec<String>,
     package: Option<String>,
     spec: Option<String>,
+    // Omitted when absent, so manifests without it keep their hash.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    asset: Option<String>,
 }
 
 fn canon_block(b: &InstallBlock) -> CanonBlock {
@@ -299,6 +303,7 @@ fn canon_block(b: &InstallBlock) -> CanonBlock {
         backends: b.backends.clone(),
         package: b.package.clone(),
         spec: b.spec.clone(),
+        asset: b.asset.clone(),
     }
 }
 
@@ -439,6 +444,38 @@ packages:
         // A real content change does change it.
         let changed = SAMPLE.replace("10.2.0", "10.3.0");
         assert_ne!(manifest_hash(&load(SAMPLE)), manifest_hash(&load(&changed)));
+    }
+
+    #[test]
+    fn hash_of_a_manifest_without_asset_is_unchanged() {
+        // Adding the `asset` key must not move the hash of a manifest that
+        // doesn't use it, or every existing lock would read as stale.
+        assert_eq!(
+            manifest_hash(&load(SAMPLE)),
+            "sha256:28b16b8a3b8a2a7fd51534e1b2e60c1c212e49e91fea39ee7dd104007e6a37ee"
+        );
+    }
+
+    #[test]
+    fn asset_template_is_kept_verbatim_and_hashed() {
+        let text = r#"version: 1
+packages:
+  - name: gum
+    spec: ">=2.0.0|<3.0.0"
+    install:
+      linux:
+        backend: github-release
+        package: charmbracelet/gum
+        asset: "{{ binary }}_{{ version }}_{{ os | title }}_{{ arch_goreleaser }}.tar.gz"
+"#;
+        let m = load(text);
+        let sel = "linux".parse::<Selector>().unwrap();
+        assert_eq!(
+            m.packages[0].install[&sel].asset.as_deref(),
+            Some("{{ binary }}_{{ version }}_{{ os | title }}_{{ arch_goreleaser }}.tar.gz")
+        );
+        let other = text.replace("os | title", "os");
+        assert_ne!(manifest_hash(&m), manifest_hash(&load(&other)));
     }
 
     #[test]

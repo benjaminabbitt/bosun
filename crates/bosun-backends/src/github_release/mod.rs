@@ -3,20 +3,21 @@
 //! are `Fetch` + `Extract` steps a host executor (or the container renderer)
 //! runs; the query side lists release tags over HTTP.
 //!
-//! One release carries several per-binary archives (ctxloom, ltk, taskloom,
-//! harp), so an asset is picked by **(binary, os, arch)** against goreleaser's
-//! default archive name `<binary>_<version>_<os>_<arch>.tar.gz`. (bosun could
-//! not fetch a real ctxloom release listing — the repo is not public — so the
-//! fixture uses that documented default; slice-12 dogfood confirms it.)
+//! An asset is picked by **exact name**: the `asset` qualifier (the manifest's
+//! `asset:` key) rendered as a minijinja template for this host, else
+//! goreleaser's default archive name `<binary>_<version>_<os>_<arch>.tar.gz`
+//! (see [`template`]). The binary is located inside the archive by name, at
+//! any depth, when the `Extract` step runs.
 //!
-//! The binary name (which differs from the repo for the shared ctxloom repo)
-//! is carried in the package id's `kind`, defaulting to the repo's last path
-//! segment.
+//! The binary name (which can differ from the repo, as `rg` does for ripgrep)
+//! is carried in the purl's `binary` qualifier, defaulting to the repo's last
+//! path segment.
 //!
 //! Versions are the tag minus a leading `v`, compared as SemVer; GitHub
-//! pre-releases are listed, and the selection guard (§5.6) decides. The
-//! checksum is enforced, never skipped (§12). The downloaded binary is never
-//! run during verification.
+//! pre-releases are listed, and the selection guard (§5.6) decides. A checksum
+//! the release publishes is enforced (§12); with none published, bosun
+//! installs anyway and warns (see [`checksum`]). The downloaded binary is
+//! never run during verification.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -32,6 +33,9 @@ use bosun_ports::{
 use tracing::warn;
 
 use crate::logmsg;
+
+mod checksum;
+mod template;
 
 const BACKEND: &str = "github-release";
 
@@ -187,20 +191,32 @@ impl GithubReleaseBackend {
             .unwrap_or_else(|| pkg.purl.name().to_string())
     }
 
-    /// The expected archive name for (binary, version, os, arch): the `asset`
-    /// qualifier as a template (`{binary}`/`{version}`/`{os}`/`{arch}`), else
-    /// goreleaser's default `<binary>_<version>_<os>_<arch>.tar.gz`.
-    fn expected_asset(&self, pkg: &Ref, binary: &str, version: &Version) -> String {
-        let os = self.os.to_string();
-        let arch = self.arch.to_string();
-        match pkg.purl.qualifiers().get("asset") {
-            Some(template) => template
-                .replace("{binary}", binary)
-                .replace("{version}", version.as_str())
-                .replace("{os}", &os)
-                .replace("{arch}", &arch),
-            None => format!("{binary}_{}_{os}_{arch}.tar.gz", version.as_str()),
-        }
+    /// The expected archive name: the `asset` qualifier rendered as a template
+    /// (see [`template`]), else goreleaser's default
+    /// `{{ binary }}_{{ version }}_{{ os }}_{{ arch }}.tar.gz`. `tag` is the
+    /// release's actual tag. A bad template is an error, never a fallback.
+    fn expected_asset(
+        &self,
+        pkg: &Ref,
+        binary: &str,
+        version: &Version,
+        tag: &str,
+    ) -> Result<String, PortError> {
+        let source = pkg
+            .purl
+            .qualifiers()
+            .get("asset")
+            .map_or(template::DEFAULT_TEMPLATE, String::as_str);
+        template::render(
+            source,
+            &template::AssetVars {
+                binary,
+                version: version.as_str(),
+                tag,
+                os: self.os,
+                arch: self.arch,
+            },
+        )
     }
 
     /// Pick the asset whose name is **exactly** `expected` (not a prefix, so a
@@ -226,49 +242,50 @@ impl GithubReleaseBackend {
         }
     }
 
-    /// The sha256 recorded for `asset_name` in a `checksums.txt` body.
-    fn checksum_for(body: &str, asset_name: &str) -> Option<String> {
-        body.lines().find_map(|line| {
-            let mut it = line.split_whitespace();
-            let sha = it.next()?;
-            let name = it.next()?;
-            // goreleaser writes `<sha>  <name>`; names may have a `*` prefix.
-            (name.trim_start_matches('*') == asset_name).then(|| sha.to_string())
-        })
+    /// The release's published sha256 for `asset`, or `None` when it
+    /// publishes none for it (see [`checksum`]). A sums file that can't be
+    /// fetched is an error; one that doesn't list the asset is not.
+    fn published_sha256(
+        &self,
+        assets: &[ReleaseAsset],
+        asset: &str,
+    ) -> Result<Option<String>, PortError> {
+        let names: Vec<&str> = assets.iter().map(|a| a.name.as_str()).collect();
+        for file in checksum::sums_files(asset, &names) {
+            let Some(url) = assets
+                .iter()
+                .find(|a| a.name == file.name)
+                .map(|a| a.browser_download_url.as_str())
+            else {
+                continue;
+            };
+            let resp = self
+                .fetcher
+                .fetch(&api_request(url, self.token.as_deref()))?;
+            check_status(url, &resp)?;
+            let body = String::from_utf8_lossy(&resp.body);
+            if let Some(sha) = checksum::sha256_in(&body, asset, file.per_asset) {
+                return Ok(Some(sha));
+            }
+        }
+        Ok(None)
     }
 
-    /// Resolve the plain archive for (binary, os, arch) at `version` and its
-    /// enforced sha256, read from the release's `checksums.txt` (§12). Returns
-    /// `(download_url, archive_name, sha256)`. Shared by `install_exact` (which
-    /// fetches and extracts it) and the query-side `checksum` (which records it).
+    /// Resolve the archive for this host at `version` and its published
+    /// sha256, when the release publishes one. Returns `(download_url,
+    /// archive_name, sha256)`. Shared by `install_exact` (which fetches and
+    /// extracts it) and the query-side `checksum` (which records it).
     fn archive_and_checksum(
         &self,
         pkg: &Ref,
         version: &Version,
-    ) -> Result<(String, String, String), PortError> {
+    ) -> Result<(String, String, Option<String>), PortError> {
         let repo = pkg.purl.native_id();
         let binary = Self::binary_of(pkg);
         let release = self.fetch_release(&repo, version)?;
-        let expected = self.expected_asset(pkg, &binary, version);
+        let expected = self.expected_asset(pkg, &binary, version, &release.tag_name)?;
         let archive = self.pick_archive(&expected, &release.assets)?;
-
-        // Enforce the checksum (§12): checksums.txt must exist and list it.
-        let sums = release
-            .assets
-            .iter()
-            .find(|a| a.name == "checksums.txt")
-            .ok_or_else(|| PortError::Backend {
-                detail: format!("no checksums.txt in {repo} release for {binary}"),
-            })?;
-        let resp = self.fetcher.fetch(&api_request(
-            &sums.browser_download_url,
-            self.token.as_deref(),
-        ))?;
-        check_status(&sums.browser_download_url, &resp)?;
-        let sha256 = Self::checksum_for(&String::from_utf8_lossy(&resp.body), &archive.name)
-            .ok_or_else(|| PortError::Backend {
-                detail: format!("{} not listed in checksums.txt", archive.name),
-            })?;
+        let sha256 = self.published_sha256(&release.assets, &archive.name)?;
         Ok((
             archive.browser_download_url.clone(),
             archive.name.clone(),
@@ -339,7 +356,7 @@ impl Index for GithubReleaseBackend {
         _target: &Target,
     ) -> Result<Option<Checksum>, PortError> {
         let (_, _, sha256) = self.archive_and_checksum(pkg, version)?;
-        Ok(Some(Checksum(sha256)))
+        Ok(sha256.map(Checksum))
     }
 }
 
@@ -365,6 +382,13 @@ impl Installer for GithubReleaseBackend {
     fn install_exact(&self, pkg: &Ref, version: &Version) -> Result<Steps, PortError> {
         let binary = Self::binary_of(pkg);
         let (url, archive_name, sha256) = self.archive_and_checksum(pkg, version)?;
+        if sha256.is_none() {
+            warn!(
+                message = logmsg::NO_CHECKSUM,
+                repo = %pkg.purl.native_id(),
+                asset = %archive_name,
+            );
+        }
         let download = self.bin_dir.join(".bosun-cache").join(&archive_name);
         Ok(vec![
             Step::Fetch {
@@ -426,8 +450,9 @@ mod tests {
 
     // Real ctxloom v0.6.4 data (ctxloom/ctxloom; only `ctxloom` ships, no
     // pre-releases). See tests/fixtures/github/README once vendored.
-    const RELEASES: &str = include_str!("../tests/fixtures/github/ctxloom-releases-page1.json");
-    const CHECKSUMS: &str = include_str!("../tests/fixtures/github/ctxloom-v0.6.4-checksums.txt");
+    const RELEASES: &str = include_str!("../../tests/fixtures/github/ctxloom-releases-page1.json");
+    const CHECKSUMS: &str =
+        include_str!("../../tests/fixtures/github/ctxloom-v0.6.4-checksums.txt");
 
     fn sem(v: &str) -> Version {
         Version::parse(v, Scheme::Semver).unwrap()
@@ -489,19 +514,78 @@ mod tests {
         );
     }
 
+    /// A purl with `asset` set to `template` (percent-encoded as purl writes it).
+    fn with_asset(base: &str, template: &str) -> Ref {
+        let p: bosun_core::Purl = base.parse().unwrap();
+        let mut q = p.qualifiers().clone();
+        q.insert("asset".into(), template.into());
+        Ref::new(
+            bosun_core::Purl::from_components(p.ty(), p.namespace(), p.name(), None, q, None)
+                .unwrap(),
+        )
+    }
+
     #[test]
     fn expected_asset_default_and_override() {
         let b = backend(Arc::new(FakeHttpFetcher::new()), PathBuf::from("/b"));
         let plain = gh("pkg:github/ctxloom/ctxloom");
         assert_eq!(
-            b.expected_asset(&plain, "ctxloom", &sem("0.6.4")),
+            b.expected_asset(&plain, "ctxloom", &sem("0.6.4"), "v0.6.4")
+                .unwrap(),
             "ctxloom_0.6.4_linux_amd64.tar.gz"
         );
-        let full = gh("pkg:github/ctxloom/ctxloom?asset=%7Bbinary%7D_%7Bversion%7D_%7Bos%7D_%7Barch%7D_full.tar.gz");
+        let full = with_asset(
+            "pkg:github/ctxloom/ctxloom",
+            "{{ binary }}_{{ version }}_{{ os }}_{{ arch }}_full.tar.gz",
+        );
         assert_eq!(
-            b.expected_asset(&full, "ctxloom", &sem("0.6.4")),
+            b.expected_asset(&full, "ctxloom", &sem("0.6.4"), "v0.6.4")
+                .unwrap(),
             "ctxloom_0.6.4_linux_amd64_full.tar.gz"
         );
+    }
+
+    #[test]
+    fn expected_asset_renders_the_tag_and_goreleaser_init_arch() {
+        let b = backend(Arc::new(FakeHttpFetcher::new()), PathBuf::from("/b"));
+        let gum = with_asset(
+            "pkg:github/charmbracelet/gum",
+            "{{ binary }}_{{ tag }}_{{ os | title }}_{{ arch_goreleaser }}.tar.gz",
+        );
+        assert_eq!(
+            b.expected_asset(&gum, "gum", &sem("2.0.2"), "v2.0.2")
+                .unwrap(),
+            "gum_v2.0.2_Linux_x86_64.tar.gz"
+        );
+    }
+
+    #[test]
+    fn expected_asset_with_an_unknown_variable_is_an_error() {
+        let b = backend(Arc::new(FakeHttpFetcher::new()), PathBuf::from("/b"));
+        let bad = with_asset("pkg:github/o/r", "{{ platform }}.tar.gz");
+        let err = b
+            .expected_asset(&bad, "r", &sem("1.0.0"), "v1.0.0")
+            .unwrap_err();
+        assert!(matches!(err, PortError::Backend { detail }
+            if detail.contains(crate::errmsg::ASSET_UNKNOWN_VARIABLE) && detail.contains("platform")));
+    }
+
+    #[test]
+    fn checksum_fails_on_a_bad_template_once_the_release_is_found() {
+        // Resolve reaches the template through `checksum`, so a bad template is
+        // a resolve-time error, not a silent fallback to the default name.
+        let tag_url = "https://api.github.com/repos/o/r/releases/tags/v1.0.0";
+        let release = r#"{"tag_name":"v1.0.0","assets":[]}"#;
+        let fetcher = Arc::new(FakeHttpFetcher::new().with_body(tag_url, release));
+        let err = backend(fetcher, PathBuf::from("/b"))
+            .checksum(
+                &with_asset("pkg:github/o/r", "{{ libc }}.tar.gz"),
+                &sem("1.0.0"),
+                &"linux/amd64".parse().unwrap(),
+            )
+            .unwrap_err();
+        assert!(matches!(err, PortError::Backend { detail }
+            if detail.contains(crate::errmsg::ASSET_NOT_YET)));
     }
 
     #[test]
@@ -534,13 +618,10 @@ mod tests {
     #[test]
     fn checksum_lookup_from_real_checksums() {
         assert_eq!(
-            GithubReleaseBackend::checksum_for(CHECKSUMS, "ctxloom_0.6.4_linux_amd64.tar.gz"),
+            checksum::sha256_in(CHECKSUMS, "ctxloom_0.6.4_linux_amd64.tar.gz", false),
             Some("89a356c697c9458929ecf851bc85da3a9548d19aa978837b54c0b0b27100810f".to_string())
         );
-        assert_eq!(
-            GithubReleaseBackend::checksum_for(CHECKSUMS, "absent.tar.gz"),
-            None
-        );
+        assert_eq!(checksum::sha256_in(CHECKSUMS, "absent.tar.gz", false), None);
     }
 
     #[test]
@@ -577,8 +658,9 @@ mod tests {
             vec![
                 Step::Fetch {
                     url: archive_url,
-                    sha256: "89a356c697c9458929ecf851bc85da3a9548d19aa978837b54c0b0b27100810f"
-                        .into(),
+                    sha256: Some(
+                        "89a356c697c9458929ecf851bc85da3a9548d19aa978837b54c0b0b27100810f".into()
+                    ),
                     dest: PathBuf::from(
                         "/home/x/.local/bin/.bosun-cache/ctxloom_0.6.4_linux_amd64.tar.gz"
                     ),
@@ -642,18 +724,97 @@ mod tests {
         })
     }
 
-    #[test]
-    fn install_exact_errors_when_checksum_missing() {
-        let tag_url = "https://api.github.com/repos/o/r/releases/tags/v0.7.0";
-        // Release has the archive but no checksums.txt asset.
-        let release = r#"{"tag_name":"v0.7.0","assets":[
-            {"name":"r_0.7.0_linux_amd64.tar.gz","browser_download_url":"https://dl/r.tgz"}
-        ]}"#;
-        let fetcher = Arc::new(FakeHttpFetcher::new().with_body(tag_url, release));
-        let err = backend(fetcher, PathBuf::from("/b"))
+    const SHA: &str = "89a356c697c9458929ecf851bc85da3a9548d19aa978837b54c0b0b27100810f";
+    const TAG_URL: &str = "https://api.github.com/repos/o/r/releases/tags/v0.7.0";
+    const ARCHIVE: &str = "r_0.7.0_linux_amd64.tar.gz";
+
+    /// A v0.7.0 release of o/r carrying the archive plus `extra` assets, each
+    /// served with the given body.
+    fn release_with(extra: &[(&str, String)]) -> GithubReleaseBackend {
+        let mut assets = vec![serde_json::json!({
+            "name": ARCHIVE, "browser_download_url": format!("https://dl/{ARCHIVE}"),
+        })];
+        let mut fetcher = FakeHttpFetcher::new();
+        for (name, body) in extra {
+            assets.push(serde_json::json!({
+                "name": name, "browser_download_url": format!("https://dl/{name}"),
+            }));
+            fetcher = fetcher.with_body(format!("https://dl/{name}"), body.clone());
+        }
+        let release = serde_json::json!({"tag_name": "v0.7.0", "assets": assets});
+        backend(
+            Arc::new(fetcher.with_body(TAG_URL, release.to_string())),
+            PathBuf::from("/b"),
+        )
+    }
+
+    fn fetch_sha(b: &GithubReleaseBackend) -> Option<String> {
+        match &b
             .install_exact(&gh("pkg:github/o/r"), &sem("0.7.0"))
-            .unwrap_err();
-        assert!(matches!(err, PortError::Backend { detail } if detail.contains("checksums.txt")));
+            .unwrap()[0]
+        {
+            Step::Fetch { sha256, .. } => sha256.clone(),
+            other => panic!("expected Fetch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_published_checksum_installs_unverified() {
+        let b = release_with(&[]);
+        assert_eq!(fetch_sha(&b), None);
+        assert_eq!(
+            b.checksum(
+                &gh("pkg:github/o/r"),
+                &sem("0.7.0"),
+                &"linux/amd64".parse().unwrap()
+            )
+            .unwrap(),
+            None,
+            "nothing is recorded in the lock"
+        );
+    }
+
+    #[test]
+    fn a_sums_file_not_listing_the_asset_is_no_checksum() {
+        let b = release_with(&[(
+            "checksums.txt",
+            format!("{SHA}  r_0.7.0_linux_arm64.tar.gz\n"),
+        )]);
+        assert_eq!(fetch_sha(&b), None);
+    }
+
+    #[test]
+    fn a_combined_sums_file_is_used() {
+        let b = release_with(&[("r_0.7.0_checksums.txt", format!("{SHA}  {ARCHIVE}\n"))]);
+        assert_eq!(fetch_sha(&b), Some(SHA.to_string()));
+        assert_eq!(
+            b.checksum(
+                &gh("pkg:github/o/r"),
+                &sem("0.7.0"),
+                &"linux/amd64".parse().unwrap()
+            )
+            .unwrap(),
+            Some(Checksum(SHA.to_string()))
+        );
+    }
+
+    #[test]
+    fn a_per_asset_file_wins_over_a_combined_one() {
+        let other = "1".repeat(64);
+        let b = release_with(&[
+            ("SHA256SUMS", format!("{other}  {ARCHIVE}\n")),
+            (&format!("{ARCHIVE}.sha256"), format!("{SHA}\n")),
+        ]);
+        assert_eq!(fetch_sha(&b), Some(SHA.to_string()));
+    }
+
+    #[test]
+    fn an_unreadable_per_asset_file_falls_through_to_the_combined_one() {
+        let b = release_with(&[
+            (&format!("{ARCHIVE}.sha256"), "not a hash\n".to_string()),
+            ("sha256sum.txt", format!("{SHA}  {ARCHIVE}\n")),
+        ]);
+        assert_eq!(fetch_sha(&b), Some(SHA.to_string()));
     }
 
     #[test]

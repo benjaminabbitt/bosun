@@ -57,7 +57,8 @@ enum StepView<'a> {
     },
     Fetch {
         url: &'a str,
-        sha256: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sha256: Option<&'a str>,
         dest: String,
     },
     Extract {
@@ -94,7 +95,7 @@ fn step_view(step: &Step) -> StepView<'_> {
         },
         Step::Fetch { url, sha256, dest } => StepView::Fetch {
             url,
-            sha256,
+            sha256: sha256.as_deref(),
             dest: dest.display().to_string(),
         },
         Step::Extract {

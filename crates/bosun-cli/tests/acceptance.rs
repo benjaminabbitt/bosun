@@ -9,15 +9,21 @@
 //! are all prose steps. The steps here build the fixture and state JSON the
 //! seam consumes; backend metadata (purl/vers type, scope, hold support,
 //! platform independence) comes from [`known_backend`], not the Gherkin.
+//!
+//! GitHub releases are the exception: bosun is their installer, so its real
+//! github-release backend runs against releases the steps build — small
+//! `.tar.gz` archives laid out like the real ones, served through the seam's
+//! canned HTTP — and installs into a scratch bin dir.
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use cucumber::gherkin::Step;
 use cucumber::{given, then, when, World};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 /// The host bosun runs on.
@@ -78,6 +84,14 @@ struct Backend {
     available: BTreeMap<String, Vec<String>>,
     checksums: BTreeMap<String, String>,
     installed: BTreeMap<String, String>,
+    /// bosun's own backend, run against [`BosunWorld::releases`].
+    real: bool,
+}
+
+/// A GitHub release the steps publish: its assets, by name, in order.
+#[derive(Debug, Clone, Default)]
+struct Release {
+    assets: Vec<(String, Vec<u8>)>,
 }
 
 #[derive(Debug, Default, World)]
@@ -86,6 +100,8 @@ struct BosunWorld {
     machine: Option<Machine>,
     backends: Vec<Backend>,
     fail_step: Option<String>,
+    /// GitHub releases by `(owner/repo, tag)`.
+    releases: BTreeMap<(String, String), Release>,
     /// Seeded state packages per scope (`system` / `user`).
     seeded: BTreeMap<String, Vec<Value>>,
     code: i32,
@@ -145,7 +161,10 @@ impl BosunWorld {
                 "available": b.available,
                 "checksums": b.checksums,
                 "installed": b.installed,
+                "real": b.real,
             })).collect::<Vec<_>>(),
+            "http": self.http(),
+            "bin_dir": self.bin_dir(),
         });
         if let Some((id, codename)) = &m.distro {
             fx["distro"] = json!({"id": id, "codename": codename});
@@ -154,6 +173,63 @@ impl BosunWorld {
             fx["fail_step"] = json!(f);
         }
         fx
+    }
+
+    /// The scratch bin dir bosun's own installer writes into.
+    fn bin_dir(&self) -> PathBuf {
+        self.dir.as_ref().expect("a temp dir").path().join("bin")
+    }
+
+    /// The canned HTTP for the published releases: each repo's release list,
+    /// each tag's release, and each asset's download, written to files.
+    fn http(&self) -> BTreeMap<String, PathBuf> {
+        let root = self.dir.as_ref().expect("a temp dir").path().join("http");
+        fs::create_dir_all(&root).unwrap();
+        let mut http = BTreeMap::new();
+        let mut serve = |url: String, body: &[u8]| {
+            let file = root.join(format!("{}", http.len()));
+            fs::write(&file, body).unwrap();
+            http.insert(url, file);
+        };
+        let mut lists: BTreeMap<&str, Vec<Value>> = BTreeMap::new();
+        for ((repo, tag), release) in &self.releases {
+            let assets: Vec<Value> = release
+                .assets
+                .iter()
+                .map(|(name, _)| {
+                    json!({
+                        "name": name,
+                        "browser_download_url":
+                            format!("https://github.com/{repo}/releases/download/{tag}/{name}"),
+                    })
+                })
+                .collect();
+            let doc = json!({"tag_name": tag, "assets": assets});
+            serve(
+                format!("https://api.github.com/repos/{repo}/releases/tags/{tag}"),
+                doc.to_string().as_bytes(),
+            );
+            lists.entry(repo).or_default().push(doc);
+            for (name, body) in &release.assets {
+                serve(
+                    format!("https://github.com/{repo}/releases/download/{tag}/{name}"),
+                    body,
+                );
+            }
+        }
+        for (repo, list) in lists {
+            serve(
+                format!("https://api.github.com/repos/{repo}/releases?per_page=100&page=1"),
+                Value::Array(list).to_string().as_bytes(),
+            );
+        }
+        http
+    }
+
+    fn release_mut(&mut self, repo: &str, tag: &str) -> &mut Release {
+        self.releases
+            .entry((repo.to_string(), tag.to_string()))
+            .or_default()
     }
 
     fn state_text(&mut self) -> String {
@@ -219,7 +295,107 @@ fn backend_available(world: &mut BosunWorld, id: String, version: String) {
         available: BTreeMap::new(),
         checksums: BTreeMap::new(),
         installed: BTreeMap::new(),
+        real: false,
     });
+}
+
+// ---- GitHub releases --------------------------------------------------------
+
+#[given("bosun installs GitHub releases itself")]
+fn github_release_itself(world: &mut BosunWorld) {
+    world.path();
+    world.backends.push(Backend {
+        id: "github-release".into(),
+        version: "1.0.0".into(),
+        meta: known_backend("github-release"),
+        available: BTreeMap::new(),
+        checksums: BTreeMap::new(),
+        installed: BTreeMap::new(),
+        real: true,
+    });
+}
+
+/// The bytes of the binary shipped in `asset`, so an installed file says which
+/// archive it came from.
+fn binary_bytes(asset: &str) -> Vec<u8> {
+    format!("#!/bin/sh\necho {asset}\n").into_bytes()
+}
+
+/// A `.tar.gz` holding `entries`, as release archives are packed.
+fn targz(entries: &[(String, Vec<u8>)]) -> Vec<u8> {
+    let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(
+        Vec::new(),
+        flate2::Compression::default(),
+    ));
+    for (name, body) in entries {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        tar.append_data(&mut header, name, body.as_slice()).unwrap();
+    }
+    tar.into_inner().unwrap().finish().unwrap()
+}
+
+/// An archive laid out like a goreleaser one: the binary, LICENSE and README,
+/// at the root or under `dir/`.
+fn release_archive(asset: &str, binary: &str, dir: Option<&str>) -> Vec<u8> {
+    let at = |name: &str| match dir {
+        Some(d) => format!("{d}/{name}"),
+        None => name.to_string(),
+    };
+    targz(&[
+        (at("LICENSE"), b"MIT".to_vec()),
+        (at("README.md"), b"# readme".to_vec()),
+        (
+            at(&format!("completions/{binary}.bash")),
+            b"complete".to_vec(),
+        ),
+        (at(binary), binary_bytes(asset)),
+    ])
+}
+
+#[given(
+    regex = r"^(\S+/\S+) (v\S+) publishes (\S+\.tar\.gz) with (\S+) (?:at its root|in (\S+)/)$"
+)]
+fn release_publishes(
+    world: &mut BosunWorld,
+    repo: String,
+    tag: String,
+    asset: String,
+    binary: String,
+    dir: String,
+) {
+    let dir = (!dir.is_empty()).then_some(dir.as_str());
+    let archive = release_archive(&asset, &binary, dir);
+    world.release_mut(&repo, &tag).assets.push((asset, archive));
+}
+
+#[given(regex = r"^(\S+/\S+) (v\S+) also publishes (\S+\.tar\.gz)$")]
+fn release_also_publishes(world: &mut BosunWorld, repo: String, tag: String, asset: String) {
+    let release = world.release_mut(&repo, &tag);
+    let binary = repo.rsplit('/').next().unwrap().to_string();
+    let archive = release_archive(&asset, &binary, None);
+    release.assets.push((asset, archive));
+}
+
+#[given(regex = r"^(\S+/\S+) (v\S+) publishes checksums\.txt$")]
+fn release_publishes_checksums(world: &mut BosunWorld, repo: String, tag: String) {
+    let release = world.release_mut(&repo, &tag);
+    let sums: String = release
+        .assets
+        .iter()
+        .map(|(name, body)| {
+            let sha: String = Sha256::digest(body)
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            format!("{sha}  {name}\n")
+        })
+        .collect();
+    release
+        .assets
+        .push(("checksums.txt".to_string(), sums.into_bytes()));
 }
 
 #[given(regex = r"^(\S+) publishes (\S+) (.+)$")]
@@ -413,6 +589,46 @@ fn claim_is_absolute(world: &mut BosunWorld, relative: String) {
     assert!(!state.contains(&relative), "state:\n{state}");
 }
 
+#[then(expr = "it warns {string}")]
+fn warns(world: &mut BosunWorld, needle: String) {
+    assert!(world.stderr.contains(&needle), "stderr:\n{}", world.stderr);
+}
+
+#[then(expr = "it does not warn {string}")]
+fn does_not_warn(world: &mut BosunWorld, needle: String) {
+    assert!(!world.stderr.contains(&needle), "stderr:\n{}", world.stderr);
+}
+
+#[then(expr = "it reports {string}")]
+fn reports(world: &mut BosunWorld, needle: String) {
+    let all = format!("{}{}", world.stdout, world.stderr);
+    assert!(all.contains(&needle), "output:\n{all}");
+}
+
+#[then(regex = r"^(\S+) is installed from (\S+)$")]
+fn installed_from(world: &mut BosunWorld, binary: String, asset: String) {
+    let path = world.bin_dir().join(&binary);
+    let got = fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    assert_eq!(
+        String::from_utf8_lossy(&got),
+        String::from_utf8_lossy(&binary_bytes(&asset))
+    );
+    assert_executable(&path);
+}
+
+#[then(regex = r"^(\S+) is not installed$")]
+fn not_installed(world: &mut BosunWorld, binary: String) {
+    let path = world.bin_dir().join(&binary);
+    assert!(!path.exists(), "{} exists", path.display());
+}
+
+#[cfg(unix)]
+fn assert_executable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = fs::metadata(path).unwrap().permissions().mode();
+    assert_eq!(mode & 0o111, 0o111, "{} mode {mode:o}", path.display());
+}
+
 #[then("a lock is written")]
 fn lock_written(world: &mut BosunWorld) {
     let p = world.path();
@@ -459,5 +675,10 @@ fn lock_checksum(world: &mut BosunWorld, checksum: String) {
 }
 
 fn main() {
-    futures::executor::block_on(BosunWorld::cucumber().run_and_exit("tests/acceptance/features"));
+    // An undefined step skips its scenario; that must fail the suite, not pass it.
+    futures::executor::block_on(
+        BosunWorld::cucumber()
+            .fail_on_skipped()
+            .run_and_exit("tests/acceptance/features"),
+    );
 }

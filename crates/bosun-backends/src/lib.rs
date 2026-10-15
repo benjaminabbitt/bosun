@@ -7,6 +7,7 @@
 
 pub mod apt;
 pub mod cargo;
+pub mod errmsg;
 pub mod github_release;
 pub mod logmsg;
 
