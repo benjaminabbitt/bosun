@@ -329,13 +329,12 @@ Only the header and the per-target leaf fields differ:
 - Claims that can't all be satisfied (empty intersection, e.g. two different exact pins): **refuse (DECIDED)**,
   naming the manifests and specs that disagree. Never last-writer-wins, which would flip the
   installed version every time you switch projects.
-- **Lockfiles advise; specs decide (DECIDED).** Two projects' lockfiles can pin different exact
-  versions that both satisfy both projects' specs (e.g. `>=1.7|<2` locked to `1.7.1-3` in one,
-  `1.7.1-4` in the other). Plain `install` picks a version satisfying every claim's *spec*,
-  preferring one some lockfile already chose (the current project's first), and reports any
-  lockfile it doesn't match. Only `install --frozen` holds a claim to its lockfile's exact
-  version, and refuses on a clash with another claim. Ordinary multi-project machines stay
-  usable; CI and container builds, which use `--frozen`, stay exact.
+- **Locks advise; specs decide (DECIDED).** Plain `install` picks a version satisfying every
+  claim's *spec*, preferring, in order: this project's pin; else what bosun already installed
+  (for any project), when every spec admits it; else the newest every spec allows. A project
+  resolving a shared tool for the first time therefore locks the installed version rather than
+  bumping it, and `bosun upgrade` is how a project moves it. Only `install --frozen` holds a
+  claim to its lock's exact version, and refuses on a clash with another claim.
 
 **Multiple OS users.** Claims in the *system* state file also record the claiming user
 (`"user": "babbitt"` alongside `manifest`), so prune and conflict checks in one user's project
@@ -834,7 +833,8 @@ Consequences:
 - Ranges **break reproducibility by design**, so bosun inherits uv/npm's frozen-vs-update split.
   **A locked version stays until it's upgraded (DECIDED):** resolving keeps each pin that
   still fits — the same backend and package identity, still published, still in the spec —
-  and gives the newest in-spec version only to new entries and pins that no longer fit.
+  and gives the newest in-spec version only to new entries and pins that no longer fit. A new
+  entry first takes the version bosun already installed, when it fits (§4.6).
   - `bosun lock` — resolve and record versions for this machine (§4.7), keeping pins.
   - `bosun install --frozen` — apply this machine's lock verbatim, no re-resolve, no lock
     write. A container build or CI job runs `bosun lock` then `install --frozen` in the same
@@ -862,7 +862,9 @@ image builds are the same mechanism. Both of the first two shapes are supported 
 - **build-args / env** — the Dockerfile takes versions as `ARG`s (or `ENV`) and bosun supplies
   them with `bosun render` (§8.3). Simplest; stable build args give clean layer-cache
   behaviour. The author writes the `RUN` lines.
-- **in-build execution** — `COPY bosun + bosun.yaml` then `RUN bosun install --yes`. The lock
+- **in-build execution (DECIDED: the M3 container path)** — `COPY bosun + bosun.yaml` then
+  `RUN bosun install --yes`. `render` and `Containerfile.bosun` wait for remote indexes (§4.7),
+  starting with the backends a dev container needs. The lock
   is the machine's own (§4.5), so the image resolves against its own repositories; exact
   versions across builds come from exact specs plus a pinned base-image digest. Single source
   of truth; needs the
@@ -1286,6 +1288,7 @@ scenario in the real-backend tier (skipped for compile time).
 | M2-6 | the lock is the machine's own: version 2, one per manifest in the user state dir (`locks/<sha256 of path>.json`), records its manifest and hash; no cross-target merge; `install --frozen` refuses a missing or stale lock; an older `bosun.lock` beside the manifest is warned about and not read; the repo's committed `bosun.lock` deleted | landed |
 | M2-7 | a locked version stays until it's upgraded: `lock` / `add` / `remove` / `install` keep pins that still fit; `bosun upgrade [pkg…]`; plain `install` prefers the pin across claims and writes the lock after a successful apply | landed |
 | M2-8 | release checksums held on first use: no published checksum → `lock` records the download's sha256 and every later install verifies against the lock's checksum; github-deb/rpm/installer refuse an unpublished checksum without `unverified: allow` | landed |
+| M2-9 | shared tools: a new entry's candidate pin is what bosun already installed (any project), kept when it fits, so `install` doesn't bump a tool another project installed; `upgrade` moves it | landed |
 | M3-1 | WindowsMachine (Administrator = High/System integrity label in `whoami /groups`; state `%ProgramData%` / `%LOCALAPPDATA%`, config `%APPDATA%`); github-release on Windows (`<binary>.exe` into `%USERPROFILE%\.local\bin`, `;`-separated case-insensitive PATH check); `Step::Remove` replaces `rm -f`; `just check-win` (zig cc as MinGW) | landed hermetically; workspace type-checks for x86_64-pc-windows-gnu; **unverified on a real Windows host** |
 | M3-2 | winget (user), scoop (user), choco (system) backends; probe only on Windows | landed hermetically (argv and output parsing unit-tested, fixture scenarios); **unverified on a real Windows host** |
 | M3-3 | github-installer: a release's `.msi` (`msiexec /i … /qn /norestart`) or `.exe` (manifest `silent_args`, required); found in the Uninstall registry keys (`reg query`, three views) by `display_name` (`*` suffix = prefix); uninstall `msiexec /x {ProductCode}` or the entry's quiet/plain uninstaller; msiexec's 3010 (reboot required) is success, reported; system scope, no hold, no downgrade | landed (unit tests); **unverified on a real Windows host**; no fixture scenario (the seam has no registry) |

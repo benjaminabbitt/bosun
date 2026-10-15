@@ -118,3 +118,27 @@ Feature: a locked version stays until it's upgraded
     When I run `bosun install . --yes`
     Then it fails
     And no lock is written
+
+  Scenario: a tool another project installed is not bumped by a project resolving it later
+    Given cargo publishes ripgrep 14.0.0, 14.1.1
+    And bosun installed ripgrep 14.0.0 for another project wanting ">=14.0.0|<15.0.0"
+    When I run `bosun install . --yes`
+    Then it succeeds
+    And bosun has recorded ripgrep 14.0.0
+    And the lock pins ripgrep 14.0.0
+
+  Scenario: an upgraded pin moves the shared tool on the next install
+    Given cargo publishes ripgrep 14.0.0, 14.1.1
+    And bosun installed ripgrep 14.0.0 for another project wanting ">=14.0.0|<15.0.0"
+    When I run `bosun install . --yes`
+    And I run `bosun upgrade ripgrep`
+    And I run `bosun install . --yes`
+    Then it succeeds
+    And bosun has recorded ripgrep 14.1.1
+
+  Scenario: an installed version this project's spec excludes is not kept
+    Given cargo publishes ripgrep 13.0.0, 14.1.1
+    And bosun installed ripgrep 13.0.0 for another project wanting ">=13.0.0|<15.0.0"
+    When I run `bosun install . --yes`
+    Then it succeeds
+    And bosun has recorded ripgrep 14.1.1

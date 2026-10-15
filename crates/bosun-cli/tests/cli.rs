@@ -1094,3 +1094,42 @@ fn github_release_install_is_idempotent_on_the_second_run() {
     let manifest = "version: 2\npackages:\n  - name: ctxloom\n    spec: \">=0.6.4|<0.7.0\"\n    install:\n      linux: {backend: github-release, package: ctxloom/ctxloom}\n";
     assert_second_run_is_idempotent(write_project(fixture, manifest).path());
 }
+
+#[test]
+fn a_new_entry_beside_pinned_ones_takes_the_installed_version() {
+    // ripgrep is already pinned; fd joins the manifest while another project
+    // has fd 1.0.0 installed: the lock pins fd at 1.0.0, not the newest.
+    let fixture = r#"{"os":"linux","arch":"amd64","privilege":"unelevated","user":"t",
+      "backends":[{"id":"cargo","version":"1.76.0","purl_type":"cargo","vers_type":"cargo","platform_independent":true,
+        "scope":"user","available":{"ripgrep":["14.1.1"],"fd":["1.0.0","2.0.0"]}}]}"#;
+    let rg_only = "version: 2\npackages:\n  - name: ripgrep\n    spec: \">=14.0.0|<15.0.0\"\n    install: {backend: cargo}\n";
+    let dir = write_project(fixture, rg_only);
+    bosun(dir.path())
+        .arg("lock")
+        .arg(dir.path())
+        .assert()
+        .success();
+
+    write_user_state(
+        dir.path(),
+        r#"{"stateVersion":1,"packages":[{"name":"fd","targets":{"linux/amd64":{"backend":"cargo","purl":"pkg:cargo/fd","installed":"1.0.0","origin":"installed","claimedBy":[{"manifest":"/other/bosun.yaml","spec":"vers:cargo/>=1.0.0|<3.0.0"}]}}}]}"#,
+    );
+    let both = format!(
+        "{rg_only}  - name: fd\n    spec: \">=1.0.0|<3.0.0\"\n    install: {{backend: cargo}}\n"
+    );
+    fs::write(dir.path().join("bosun.yaml"), both).unwrap();
+    bosun(dir.path())
+        .arg("lock")
+        .arg(dir.path())
+        .assert()
+        .success();
+
+    let lock: Value = serde_json::from_str(&the_lock(dir.path())).unwrap();
+    let fd = lock["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "fd")
+        .expect("fd is locked");
+    assert_eq!(fd["targets"]["any"]["resolved"], "1.0.0", "lock: {lock}");
+}

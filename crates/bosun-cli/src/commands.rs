@@ -1,11 +1,12 @@
 //! The M1 read/resolve commands (§4.2): `backends`, `status`, `lock`.
 //! Each returns one typed value; the mutating commands are slice 10-2.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use bosun_core::record::{LockDocument, StateDocument};
-use bosun_core::{BackendId, Manifest, Scope};
+use bosun_core::record::{LockDocument, LockLeaf, LockPackage, Package, StateDocument};
+use bosun_core::{BackendId, Manifest, Scope, Spec};
 use bosun_io::{check_options, load_manifest, lock, manifest_hash};
 use bosun_ports::{Installer, StateStore};
 use bosun_resolve::{resolve, resolve_with_lock, NotApplicable, Outcome, Resolution};
@@ -530,22 +531,37 @@ pub(crate) fn relock(
     let lock_path = env.lock_path(&claim_path);
     warn_of_a_project_lock(file, &lock_path);
     let previous = this_lock(env, &claim_path)?;
-    let kept = match (release, &previous) {
-        (_, None) | (Release::All, _) => None,
-        (Release::None, Some(doc)) => Some(doc.clone()),
-        (Release::Named(names), Some(doc)) => {
-            let mut doc = doc.clone();
-            doc.packages.retain(|p| !names.contains(&p.name));
-            Some(doc)
-        }
+    let released = |name: &str| match release {
+        Release::None => false,
+        Release::All => true,
+        Release::Named(names) => names.iter().any(|n| n == name),
     };
+    let mut kept = previous.clone().unwrap_or_else(|| LockDocument {
+        lockfile_version: bosun_resolve::LOCKFILE_VERSION,
+        manifest: claim_path.display().to_string(),
+        manifest_hash: hash.clone(),
+        packages: Vec::new(),
+    });
+    kept.packages.retain(|p| !released(&p.name));
+    // §4.6: an entry this lock doesn't pin yet takes what bosun already
+    // installed (for any project) when it fits, so a shared tool isn't bumped
+    // just because another project resolves it later.
+    let state = state_of_named_scopes(env, manifest)?;
+    for entry in &manifest.packages {
+        if released(&entry.name) || kept.packages.iter().any(|p| p.name == entry.name) {
+            continue;
+        }
+        if let Some(pin) = installed_pin(&state, &entry.name) {
+            kept.packages.push(pin);
+        }
+    }
     let resolution = resolve_with_lock(
         manifest,
         &hash,
         &env.host(),
         &env.resolvables(),
         pref,
-        kept.as_ref(),
+        Some(&kept),
     )
     .map_err(|e| CliError::Resolve(e.to_string()))?;
     let complete = !resolution
@@ -564,6 +580,56 @@ pub(crate) fn relock(
         resolution,
         previous,
         pending,
+    })
+}
+
+/// The machine state of every scope a backend the manifest names installs
+/// into, and no other: a manifest of user-scope tools never opens the
+/// root-owned system state (§4.6).
+fn state_of_named_scopes(env: &Env, manifest: &Manifest) -> Result<StateDocument, CliError> {
+    let blocks = manifest
+        .defaults
+        .values()
+        .chain(manifest.packages.iter().flat_map(|e| e.install.values()));
+    let mut scopes = Vec::new();
+    for block in blocks {
+        for backend in block.backends.keys() {
+            if let Some(installer) = env.installer_for(&BackendId::new(backend)) {
+                if !scopes.contains(&installer.scope()) {
+                    scopes.push(installer.scope());
+                }
+            }
+        }
+    }
+    let mut packages = Vec::new();
+    for scope in scopes {
+        packages.extend(read_state(env, scope)?.packages);
+    }
+    Ok(StateDocument {
+        state_version: 1,
+        packages,
+    })
+}
+
+/// A candidate pin from what bosun recorded installing `name` (any scope,
+/// any project): the resolver keeps it only if it is the same backend and
+/// package, still published, and in this project's spec. State records the
+/// machine's platform; the pin is offered under `any` too, for
+/// platform-independent backends.
+fn installed_pin(state: &StateDocument, name: &str) -> Option<LockPackage> {
+    let pkg = state.packages.iter().find(|p| p.name == name)?;
+    let (target, leaf) = pkg.targets.iter().next()?;
+    let lock_leaf = LockLeaf {
+        placement: leaf.placement.clone(),
+        spec: None,
+        resolved: leaf.installed.clone(),
+        index_snapshot: None,
+        checksum: None,
+    };
+    Some(Package {
+        name: name.to_string(),
+        meta: Spec::new("*", "generic").expect("`*` is a spec"),
+        targets: BTreeMap::from([(*target, lock_leaf.clone()), (Target::Any, lock_leaf)]),
     })
 }
 

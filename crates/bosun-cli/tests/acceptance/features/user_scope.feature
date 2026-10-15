@@ -46,9 +46,14 @@ Feature: install, upgrade and cross-claim resolution at user scope (cargo)
     Then it fails
     And it says "bosun.cli.environment"
 
-  Scenario: an installed-lower package is planned for upgrade
+  Scenario: an installed-lower package that fits is kept, and upgrade moves it
     Given bosun installed ripgrep 14.0.0 for another project wanting ">=14.0.0|<15.0.0"
     When I run `bosun --format json install . --plan`
+    Then it succeeds
+    And it does not say "upgrade"
+    When I run `bosun install . --yes`
+    And I run `bosun upgrade ripgrep`
+    And I run `bosun --format json install . --plan`
     Then it reports changes pending
     And it says "upgrade"
 
