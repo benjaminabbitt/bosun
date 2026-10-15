@@ -29,7 +29,7 @@ mod errmsg;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use bosun_core::manifest::{Ext, InstallBlock, Manifest, ManifestEntry};
+use bosun_core::manifest::{Ext, InstallBlock, Manifest, ManifestEntry, EXT_PACKAGE};
 use bosun_core::platform::{Arch, Distro, Os, Selector, Target};
 use bosun_core::record::{LockDocument, LockLeaf, LockPackage, Package, Placement, TargetLock};
 use bosun_core::spec::{SelectError, Spec, SpecError};
@@ -260,14 +260,15 @@ fn resolve_entry(
         name: entry.name.clone(),
         source,
     })?;
-    let native = block.package.as_deref().unwrap_or(&entry.name);
-    let purl = build_purl(
-        &entry.name,
-        &chosen.purl_type,
-        native,
-        block.ext.get(chosen.id.as_str()),
-        host,
-    )?;
+    let native = block.package_for(chosen.id.as_str()).unwrap_or(&entry.name);
+    let mut qualifiers = block
+        .ext
+        .get(chosen.id.as_str())
+        .cloned()
+        .unwrap_or_default();
+    // The per-backend package is already the identity's name, not a setting.
+    qualifiers.remove(EXT_PACKAGE);
+    let purl = build_purl(&entry.name, &chosen.purl_type, native, qualifiers, host)?;
 
     // §4.7: platform-independent backends resolve under `any`.
     let target = if chosen.platform_independent {
@@ -439,19 +440,18 @@ fn choose_backend<'b>(
 ///   name so `- name: ltk` with `package: owner/repo` selects the `ltk` binary.
 /// - anything else: `pkg:<type>/<name>` (cargo, generic, …).
 ///
-/// The chosen backend's `ext` settings (`ext`, already narrowed to that
-/// backend) are added as qualifiers, verbatim, for the backend to read and
-/// validate (github-release's `asset` template). Another backend's section
+/// `qualifiers` are the chosen backend's `ext` settings, already narrowed to
+/// that backend and without its package, kept verbatim for the backend to read
+/// and validate (github-release's `asset` template). Another backend's section
 /// never reaches this identity. The qualifiers above are set after them, so an
 /// ext key can't replace one.
 fn build_purl(
     name: &str,
     purl_type: &str,
     native: &str,
-    ext: Option<&BTreeMap<String, String>>,
+    mut qualifiers: BTreeMap<String, String>,
     host: &Host<'_>,
 ) -> Result<Purl, ResolveError> {
-    let mut qualifiers = ext.cloned().unwrap_or_default();
     let bad_purl = |source| ResolveError::BadPurl {
         name: name.to_string(),
         source,
@@ -1132,6 +1132,80 @@ mod tests {
 
         let (queried, _) = index.last.borrow().clone().unwrap();
         assert_eq!(queried.purl.to_string(), "pkg:cargo/duf?features=x");
+    }
+
+    /// `backends: [github-release, cargo]` with a shared `package` and cargo's
+    /// own under `ext.cargo.package`.
+    fn fallback_with_per_backend_package() -> Manifest {
+        let b = with_ext(
+            block(&["github-release", "cargo"], Some("muesli/duf"), None),
+            "cargo",
+            "package",
+            "duf-cli",
+        );
+        manifest(&[], vec![entry("duf", Some(">=0.8.0"), &[("linux", b)])])
+    }
+
+    #[test]
+    fn a_per_backend_package_names_the_package_when_that_backend_is_chosen() {
+        let index = FakeIndex::new(Scheme::Semver, &["0.8.1"]);
+        let host = Host {
+            os: Os::Linux,
+            arch: Arch::Amd64,
+            distro: None,
+        };
+
+        resolve(
+            &fallback_with_per_backend_package(),
+            "sha256:h",
+            &host,
+            &[cargo_backend(&index)],
+            &[],
+        )
+        .unwrap();
+
+        // The per-backend name is the identity, not a qualifier.
+        let (queried, _) = index.last.borrow().clone().unwrap();
+        assert_eq!(queried.purl.to_string(), "pkg:cargo/duf-cli");
+    }
+
+    #[test]
+    fn another_backends_package_leaves_the_shared_package_in_force() {
+        let index = FakeIndex::new(Scheme::Semver, &["0.8.1"]);
+        let host = Host {
+            os: Os::Linux,
+            arch: Arch::Amd64,
+            distro: None,
+        };
+
+        resolve(
+            &fallback_with_per_backend_package(),
+            "sha256:h",
+            &host,
+            &[github_backend(&index)],
+            &[],
+        )
+        .unwrap();
+
+        let (queried, _) = index.last.borrow().clone().unwrap();
+        assert_eq!(queried.purl.to_string(), "pkg:github/muesli/duf?binary=duf");
+    }
+
+    #[test]
+    fn a_per_backend_package_alone_needs_no_shared_package() {
+        let index = FakeIndex::new(Scheme::Semver, &["0.8.1"]);
+        let host = Host {
+            os: Os::Linux,
+            arch: Arch::Amd64,
+            distro: None,
+        };
+        let b = with_ext(block(&["cargo"], None, None), "cargo", "package", "duf-cli");
+        let m = manifest(&[], vec![entry("duf", Some(">=0.8.0"), &[("linux", b)])]);
+
+        resolve(&m, "sha256:h", &host, &[cargo_backend(&index)], &[]).unwrap();
+
+        let (queried, _) = index.last.borrow().clone().unwrap();
+        assert_eq!(queried.purl.to_string(), "pkg:cargo/duf-cli");
     }
 
     #[test]

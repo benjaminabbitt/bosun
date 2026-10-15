@@ -39,7 +39,9 @@ included. Quote it in YAML: a value that starts with `{` would otherwise be read
 
 `ext` holds settings that only one backend reads, keyed by that backend's id. A key the
 backend doesn't declare is an error that lists the keys it does (`unknown key "aset" in
-ext.github-release (allowed: asset)`), and so is a section for a backend bosun doesn't have.
+ext.github-release (allowed: package, asset, tag)`), and so is a section for a backend bosun
+doesn't have. `package` is the one key every backend takes: that backend's own package id,
+when a block lists several backends that name the package differently.
 `ext` can also go in `defaults.install`; an entry inherits it key by key, and a key the entry
 sets wins. When a block lists other backends too and one of them is chosen, the
 `github-release` section is ignored.

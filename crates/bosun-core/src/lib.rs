@@ -12,7 +12,7 @@ pub mod spec;
 pub mod vers;
 pub mod version;
 
-pub use manifest::{Ext, InstallBlock, Manifest, ManifestEntry};
+pub use manifest::{Ext, InstallBlock, Manifest, ManifestEntry, EXT_PACKAGE};
 pub use model::{
     BackendId, Capabilities, Checksum, Claim, HoldSupport, Installed, Origin, Ref, Scope, Source,
     SourceId,

@@ -18,7 +18,7 @@ use std::path::Path;
 use annals_diagnostic::{Arg, Diagnostic};
 use annals_yaml::versioned::Migrations;
 use annals_yaml::Value;
-use bosun_core::manifest::{Ext, InstallBlock, Manifest, ManifestEntry};
+use bosun_core::manifest::{Ext, InstallBlock, Manifest, ManifestEntry, EXT_PACKAGE};
 use bosun_core::platform::{Selector, Target};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -46,8 +46,8 @@ pub enum ManifestError {
     MissingName,
     /// An `ext` section for a backend this build does not have.
     UnknownExtBackend { package: String, backend: String },
-    /// An `ext` key the backend does not declare; `allowed` lists the ones it
-    /// does, comma-separated, or `(none)`.
+    /// An `ext` key the backend does not declare; `allowed` lists the keys it
+    /// takes, comma-separated, starting with `package`, which every backend takes.
     UnknownExtKey {
         package: String,
         backend: String,
@@ -356,16 +356,18 @@ pub fn check_ext(m: &Manifest, known: &BackendExtKeys) -> Result<(), ManifestErr
                     package: package.to_string(),
                     backend: backend.clone(),
                 })?;
-            if let Some(key) = settings.keys().find(|k| !allowed.contains(k)) {
+            if let Some(key) = settings
+                .keys()
+                .find(|k| k.as_str() != EXT_PACKAGE && !allowed.contains(k))
+            {
                 return Err(ManifestError::UnknownExtKey {
                     package: package.to_string(),
                     backend: backend.clone(),
                     key: key.clone(),
-                    allowed: if allowed.is_empty() {
-                        "(none)".to_string()
-                    } else {
-                        allowed.join(", ")
-                    },
+                    allowed: std::iter::once(EXT_PACKAGE)
+                        .chain(allowed.iter().map(String::as_str))
+                        .collect::<Vec<_>>()
+                        .join(", "),
                 });
             }
         }
@@ -656,10 +658,18 @@ packages:
                 package: "gum".into(),
                 backend: "github-release".into(),
                 key: "aset".into(),
-                allowed: "asset".into(),
+                allowed: "package, asset".into(),
             }
         );
         assert!(err.to_string().contains("asset"), "message: {err}");
+    }
+
+    #[test]
+    fn check_ext_accepts_package_for_every_backend() {
+        // `package` names the backend's own package id; it is bosun's key, not
+        // the backend's, so even a backend that declares no keys takes it.
+        let text = "version: 1\npackages:\n  - name: fd\n    install:\n      linux:\n        backends: [github-release, apt]\n        ext: {apt: {package: fd-find}, github-release: {package: sharkdp/fd}}\n";
+        assert_eq!(check_ext(&load(text), &known()), Ok(()));
     }
 
     #[test]
@@ -672,7 +682,7 @@ packages:
                 package: "defaults.install".into(),
                 backend: "apt".into(),
                 key: "asset".into(),
-                allowed: "(none)".into(),
+                allowed: "package".into(),
             }
         );
     }

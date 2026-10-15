@@ -97,6 +97,31 @@ Feature: bosun add and bosun remove edit the manifest, then lock
     Then it succeeds
     And duf is installed from duf_0.8.1_linux_x86_64.tar.gz
 
+  Scenario: each backend in a fallback list can name its own package
+    Given cargo publishes fd-find 10.2.0
+    And the manifest:
+      """
+      version: 1
+      targets: [linux/amd64]
+      """
+    When I run `bosun add fd --backend github-release,cargo --package sharkdp/fd --ext cargo.package=fd-find`
+    Then it succeeds
+    And the manifest reads:
+      """
+      version: 1
+      targets: [linux/amd64]
+      packages:
+        - name: fd
+          spec: ">=10.2.0|<11.0.0"
+          install:
+            linux:
+              backends: [github-release, cargo]
+              package: sharkdp/fd
+              ext:
+                cargo: {package: fd-find}
+      """
+    And the lock pins fd 10.2.0
+
   Scenario: add a name the manifest already has changes nothing
     Given the manifest:
       """
@@ -136,7 +161,7 @@ Feature: bosun add and bosun remove edit the manifest, then lock
       """
     When I run `bosun add ripgrep --backend cargo --ext features=x`
     Then it fails
-    And it reports "unknown key \"features\" in ext.cargo (allowed: (none))"
+    And it reports "unknown key \"features\" in ext.cargo (allowed: package)"
     And the manifest is unchanged
 
   Scenario: remove takes the entry out, drops it from the lock and uninstalls it

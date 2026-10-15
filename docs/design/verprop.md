@@ -535,8 +535,8 @@ trait BackendFactory {
 **Selection: the project decides what's allowed, the user's preference picks among it.**
 
 - A manifest `install` selector names **one** backend or an **ordered list** of acceptable ones
-  (e.g. `"linux": [{ "backend": "apt", "package": "fd-find" }, { "backend": "cargo",
-  "package": "fd-find" }]`).
+  (`backends: [scoop, winget]`). The list is names only; a backend whose package id differs
+  names it in its own `ext` section (`ext: {winget: {package: sharkdp.fd}}`, §5.4).
 - If it names exactly one, that backend is used: a preference never overrides a single
   explicit backend, because version grammar and pin durability differ per backend
   (`ripgrep` via apt = distro's old Debian version; via cargo = crates.io semver, any version).
@@ -593,7 +593,10 @@ packages:
     install:
       linux:debian: {backend: apt, package: fd-find, spec: 9.0.0-1}
       linux:fedora: {backend: dnf, package: fd-find}
-      windows: {backend: winget, package: sharkdp.fd}
+      # scoop if present, else winget; each names its own package
+      windows:
+        backends: [scoop, winget]
+        ext: {winget: {package: sharkdp.fd}}
 
   - name: eza
     spec: 0.20.0
@@ -616,7 +619,10 @@ Rules (draft syntax):
   each backend declares its keys in `BackendMeta::ext_keys`, and the manifest is checked
   against every compiled-in backend at load, so an unknown backend or key is an error. The
   chosen backend's section becomes qualifiers on its identity purl, which it validates when
-  it reads them; other backends' sections are ignored.
+  it reads them; other backends' sections are ignored. One key is bosun's, not the backend's,
+  and every backend takes it: **`package`**, the backend's own package id, which wins over the
+  block's shared `package` when that backend is chosen. It becomes the purl's name, never a
+  qualifier. This is how a fallback list names each candidate's package.
 - **Defaults keep it sparse:** `package` defaults to `name`; a per-platform `spec` overrides the
   entry's `spec`; `defaults` supplies backend choices, so entries only state
   exceptions.

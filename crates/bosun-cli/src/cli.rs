@@ -58,6 +58,8 @@ pub enum Command {
         #[arg(long = "backend", value_delimiter = ',')]
         backends: Vec<String>,
         /// The backend's own id for the package, where it differs from the name.
+        /// With several backends, name one backend's own id with
+        /// `--ext <backend>.package=<id>`.
         #[arg(long)]
         package: Option<String>,
         /// The version spec. Default: the newest version, up to the next one
