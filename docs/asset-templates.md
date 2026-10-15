@@ -8,7 +8,7 @@ installed and the host it's going to.
 
 ## Default
 
-With no `asset:` key, the template is goreleaser's default archive name:
+With no `asset` setting, the template is goreleaser's default archive name:
 
 ```text
 {{ binary }}_{{ version }}_{{ os }}_{{ arch }}.tar.gz
@@ -18,7 +18,8 @@ For ctxloom 0.6.4 on linux/amd64 that gives `ctxloom_0.6.4_linux_amd64.tar.gz`.
 
 ## Overriding the template
 
-Set `asset:` on the install block when a release uses a different layout:
+Set `asset` in the install block's `ext.github-release` section when a release uses a
+different layout:
 
 ```yaml
 packages:
@@ -28,15 +29,20 @@ packages:
       linux:
         backend: github-release
         package: charmbracelet/gum
-        asset: "{{ binary }}_{{ version }}_{{ os | title }}_{{ arch_goreleaser }}.tar.gz"
+        ext:
+          github-release:
+            asset: "{{ binary }}_{{ version }}_{{ os | title }}_{{ arch_goreleaser }}.tar.gz"
 ```
 
 The template must name the asset exactly as it appears on the release page, extension
 included. Quote it in YAML: a value that starts with `{` would otherwise be read as a mapping.
 
-`asset:` can also go in `defaults.install`, and an entry inherits it like the other install
-fields. It only applies to `github-release`; when a block lists other backends too and one of
-them is chosen, the template is ignored.
+`ext` holds settings that only one backend reads, keyed by that backend's id. A key the
+backend doesn't declare is an error that lists the keys it does (`unknown key "aset" in
+ext.github-release (allowed: asset)`), and so is a section for a backend bosun doesn't have.
+`ext` can also go in `defaults.install`; an entry inherits it key by key, and a key the entry
+sets wins. When a block lists other backends too and one of them is chosen, the
+`github-release` section is ignored.
 
 ## Variables
 

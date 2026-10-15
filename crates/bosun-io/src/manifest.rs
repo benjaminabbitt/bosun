@@ -18,7 +18,7 @@ use std::path::Path;
 use annals_diagnostic::{Arg, Diagnostic};
 use annals_yaml::versioned::Migrations;
 use annals_yaml::Value;
-use bosun_core::manifest::{InstallBlock, Manifest, ManifestEntry};
+use bosun_core::manifest::{Ext, InstallBlock, Manifest, ManifestEntry};
 use bosun_core::platform::{Selector, Target};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -44,6 +44,16 @@ pub enum ManifestError {
     BadSelector { value: String },
     /// A package entry with no `name`.
     MissingName,
+    /// An `ext` section for a backend this build does not have.
+    UnknownExtBackend { package: String, backend: String },
+    /// An `ext` key the backend does not declare; `allowed` lists the ones it
+    /// does, comma-separated, or `(none)`.
+    UnknownExtKey {
+        package: String,
+        backend: String,
+        key: String,
+        allowed: String,
+    },
 }
 
 impl fmt::Display for ManifestError {
@@ -58,6 +68,18 @@ impl fmt::Display for ManifestError {
             ManifestError::BadTarget { value } => write!(f, "invalid target {value:?}"),
             ManifestError::BadSelector { value } => write!(f, "invalid selector {value:?}"),
             ManifestError::MissingName => f.write_str("a package entry has no `name`"),
+            ManifestError::UnknownExtBackend { package, backend } => {
+                write!(f, "{package}: `ext` names unknown backend {backend:?}")
+            }
+            ManifestError::UnknownExtKey {
+                package,
+                backend,
+                key,
+                allowed,
+            } => write!(
+                f,
+                "{package}: unknown key {key:?} in ext.{backend} (allowed: {allowed})"
+            ),
         }
     }
 }
@@ -72,6 +94,8 @@ impl Diagnostic for ManifestError {
             ManifestError::BadTarget { .. } => "bosun.manifest.bad_target",
             ManifestError::BadSelector { .. } => "bosun.manifest.bad_selector",
             ManifestError::MissingName => "bosun.manifest.missing_name",
+            ManifestError::UnknownExtBackend { .. } => "bosun.manifest.unknown_ext_backend",
+            ManifestError::UnknownExtKey { .. } => "bosun.manifest.unknown_ext_key",
         }
     }
 
@@ -90,6 +114,21 @@ impl Diagnostic for ManifestError {
                 vec![("value", value.clone().into())]
             }
             ManifestError::MissingName => vec![],
+            ManifestError::UnknownExtBackend { package, backend } => vec![
+                ("package", package.clone().into()),
+                ("backend", backend.clone().into()),
+            ],
+            ManifestError::UnknownExtKey {
+                package,
+                backend,
+                key,
+                allowed,
+            } => vec![
+                ("package", package.clone().into()),
+                ("backend", backend.clone().into()),
+                ("key", key.clone().into()),
+                ("allowed", allowed.clone().into()),
+            ],
         }
     }
 }
@@ -138,12 +177,33 @@ fn string_or_seq(v: &Value, context: &str) -> Result2<Vec<String>> {
     }
 }
 
+/// `ext: {<backend>: {<key>: <scalar>}}`, kept verbatim; which backends and
+/// keys are valid is [`check_ext`]'s job, against the compiled-in backends.
+fn ext(v: &Value) -> Result2<Ext> {
+    as_map(v, "ext")?
+        .iter()
+        .map(|(backend, section)| {
+            let context = format!("ext.{backend}");
+            let settings = as_map(section, &context)?
+                .iter()
+                .map(|(key, value)| {
+                    let value = value.as_str().ok_or_else(|| ManifestError::NotAScalar {
+                        context: format!("{context}.{key}"),
+                    })?;
+                    Ok((key.clone(), value.to_string()))
+                })
+                .collect::<Result2<BTreeMap<_, _>>>()?;
+            Ok((backend.clone(), settings))
+        })
+        .collect()
+}
+
 fn install_block(v: &Value) -> Result2<InstallBlock> {
     let entries = as_map(v, "an install block")?;
     check_keys(
         entries,
         "an install block",
-        &["backend", "backends", "package", "spec", "asset"],
+        &["backend", "backends", "package", "spec", "ext"],
     )?;
     // `backends:` (preferred, a list) or `backend:` (one), scalar or sequence.
     let backends = match v.get("backends").or_else(|| v.get("backend")) {
@@ -155,7 +215,10 @@ fn install_block(v: &Value) -> Result2<InstallBlock> {
         backends,
         package: field("package"),
         spec: field("spec"),
-        asset: field("asset"),
+        ext: match v.get("ext") {
+            Some(e) => ext(e)?,
+            None => Ext::new(),
+        },
     })
 }
 
@@ -270,6 +333,46 @@ pub fn load_manifest(text: &str, source: &Path) -> Result<Manifest, IoError> {
         })
 }
 
+/// The `ext` keys each compiled-in backend declares, by backend id. Built by
+/// the CLI from every compiled-in backend (present this run or not), like
+/// [`crate::BackendSchemes`].
+pub type BackendExtKeys = BTreeMap<String, Vec<String>>;
+
+/// Check every `ext` section in `m` against the backends this build has: an
+/// unknown backend or an undeclared key is an error, never silently ignored.
+/// What a declared key's value means is the backend's to validate when it
+/// reads it.
+pub fn check_ext(m: &Manifest, known: &BackendExtKeys) -> Result<(), ManifestError> {
+    let blocks = m.defaults.values().map(|b| ("defaults.install", b)).chain(
+        m.packages
+            .iter()
+            .flat_map(|e| e.install.values().map(move |b| (e.name.as_str(), b))),
+    );
+    for (package, block) in blocks {
+        for (backend, settings) in &block.ext {
+            let allowed = known
+                .get(backend)
+                .ok_or_else(|| ManifestError::UnknownExtBackend {
+                    package: package.to_string(),
+                    backend: backend.clone(),
+                })?;
+            if let Some(key) = settings.keys().find(|k| !allowed.contains(k)) {
+                return Err(ManifestError::UnknownExtKey {
+                    package: package.to_string(),
+                    backend: backend.clone(),
+                    key: key.clone(),
+                    allowed: if allowed.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        allowed.join(", ")
+                    },
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 // --- canonical hash --------------------------------------------------------
 
 #[derive(Serialize)]
@@ -293,9 +396,9 @@ struct CanonBlock {
     backends: Vec<String>,
     package: Option<String>,
     spec: Option<String>,
-    // Omitted when absent, so manifests without it keep their hash.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    asset: Option<String>,
+    // Omitted when empty, so manifests without it keep their hash.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    ext: Ext,
 }
 
 fn canon_block(b: &InstallBlock) -> CanonBlock {
@@ -303,7 +406,7 @@ fn canon_block(b: &InstallBlock) -> CanonBlock {
         backends: b.backends.clone(),
         package: b.package.clone(),
         spec: b.spec.clone(),
-        asset: b.asset.clone(),
+        ext: b.ext.clone(),
     }
 }
 
@@ -447,18 +550,16 @@ packages:
     }
 
     #[test]
-    fn hash_of_a_manifest_without_asset_is_unchanged() {
-        // Adding the `asset` key must not move the hash of a manifest that
-        // doesn't use it, or every existing lock would read as stale.
+    fn hash_of_a_manifest_without_ext_is_unchanged() {
+        // The `ext` key must not move the hash of a manifest that doesn't use
+        // it, or every existing lock would read as stale.
         assert_eq!(
             manifest_hash(&load(SAMPLE)),
             "sha256:28b16b8a3b8a2a7fd51534e1b2e60c1c212e49e91fea39ee7dd104007e6a37ee"
         );
     }
 
-    #[test]
-    fn asset_template_is_kept_verbatim_and_hashed() {
-        let text = r#"version: 1
+    const GUM: &str = r#"version: 1
 packages:
   - name: gum
     spec: ">=2.0.0|<3.0.0"
@@ -466,16 +567,114 @@ packages:
       linux:
         backend: github-release
         package: charmbracelet/gum
-        asset: "{{ binary }}_{{ version }}_{{ os | title }}_{{ arch_goreleaser }}.tar.gz"
+        ext:
+          github-release:
+            asset: "{{ binary }}_{{ version }}_{{ os | title }}_{{ arch_goreleaser }}.tar.gz"
 "#;
-        let m = load(text);
+
+    #[test]
+    fn ext_settings_are_kept_verbatim_per_backend_and_hashed() {
+        let m = load(GUM);
+        let sel = "linux".parse::<Selector>().unwrap();
+        let ext = &m.packages[0].install[&sel].ext;
+        assert_eq!(
+            ext["github-release"]["asset"],
+            "{{ binary }}_{{ version }}_{{ os | title }}_{{ arch_goreleaser }}.tar.gz"
+        );
+        let other = GUM.replace("os | title", "os");
+        assert_ne!(manifest_hash(&m), manifest_hash(&load(&other)));
+    }
+
+    #[test]
+    fn ext_in_defaults_install_is_read() {
+        let text = "version: 1\ndefaults:\n  install:\n    linux:\n      ext: {github-release: {asset: a.tar.gz}}\n";
         let sel = "linux".parse::<Selector>().unwrap();
         assert_eq!(
-            m.packages[0].install[&sel].asset.as_deref(),
-            Some("{{ binary }}_{{ version }}_{{ os | title }}_{{ arch_goreleaser }}.tar.gz")
+            load(text).defaults[&sel].ext["github-release"]["asset"],
+            "a.tar.gz"
         );
-        let other = text.replace("os | title", "os");
-        assert_ne!(manifest_hash(&m), manifest_hash(&load(&other)));
+    }
+
+    #[test]
+    fn asset_outside_ext_is_an_unknown_key() {
+        let text = "version: 1\npackages:\n  - name: x\n    install:\n      linux: {backend: github-release, asset: a.tar.gz}\n";
+        let err = load_manifest(text, Path::new("bosun.yaml")).unwrap_err();
+        assert!(format!("{err}").contains("\"asset\""), "message: {err}");
+    }
+
+    #[test]
+    fn an_ext_value_must_be_a_scalar() {
+        let text = "version: 1\npackages:\n  - name: x\n    install:\n      linux:\n        ext: {github-release: {asset: [a, b]}}\n";
+        let err = load_manifest(text, Path::new("bosun.yaml")).unwrap_err();
+        assert!(
+            format!("{err}").contains("ext.github-release.asset"),
+            "message: {err}"
+        );
+    }
+
+    #[test]
+    fn an_ext_section_must_be_a_mapping() {
+        let text = "version: 1\npackages:\n  - name: x\n    install:\n      linux:\n        ext: {github-release: a.tar.gz}\n";
+        let err = load_manifest(text, Path::new("bosun.yaml")).unwrap_err();
+        assert!(
+            format!("{err}").contains("ext.github-release"),
+            "message: {err}"
+        );
+    }
+
+    fn known() -> BackendExtKeys {
+        BackendExtKeys::from([
+            ("apt".to_string(), vec![]),
+            ("github-release".to_string(), vec!["asset".to_string()]),
+        ])
+    }
+
+    #[test]
+    fn check_ext_accepts_declared_keys() {
+        assert_eq!(check_ext(&load(GUM), &known()), Ok(()));
+    }
+
+    #[test]
+    fn check_ext_rejects_a_backend_this_build_does_not_know() {
+        let m = load(&GUM.replace("          github-release:", "          gihtub-release:"));
+        assert_eq!(
+            check_ext(&m, &known()),
+            Err(ManifestError::UnknownExtBackend {
+                package: "gum".into(),
+                backend: "gihtub-release".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn check_ext_rejects_a_key_the_backend_does_not_declare_and_lists_the_allowed() {
+        let m = load(&GUM.replace("            asset:", "            aset:"));
+        let err = check_ext(&m, &known()).unwrap_err();
+        assert_eq!(
+            err,
+            ManifestError::UnknownExtKey {
+                package: "gum".into(),
+                backend: "github-release".into(),
+                key: "aset".into(),
+                allowed: "asset".into(),
+            }
+        );
+        assert!(err.to_string().contains("asset"), "message: {err}");
+    }
+
+    #[test]
+    fn check_ext_covers_defaults_install() {
+        let text = "version: 1\ndefaults:\n  install:\n    linux:\n      ext: {apt: {asset: a}}\n";
+        let err = check_ext(&load(text), &known()).unwrap_err();
+        assert_eq!(
+            err,
+            ManifestError::UnknownExtKey {
+                package: "defaults.install".into(),
+                backend: "apt".into(),
+                key: "asset".into(),
+                allowed: "(none)".into(),
+            }
+        );
     }
 
     #[test]

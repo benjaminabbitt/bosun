@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use bosun_core::record::{LockDocument, StateDocument};
 use bosun_core::{BackendId, Manifest, Scope};
-use bosun_io::{load_manifest, lock, manifest_hash};
+use bosun_io::{check_ext, load_manifest, lock, manifest_hash};
 use bosun_ports::{Installer, StateStore};
 use bosun_resolve::{
     check_targets, merge_lock, resolve, Freshness, NotApplicable, Outcome, Resolution,
@@ -57,15 +57,21 @@ fn manifest_file(path: Option<PathBuf>) -> Result<PathBuf, CliError> {
     }
 }
 
-fn load(file: &Path) -> Result<Manifest, CliError> {
+/// Load the manifest at `file` and check its `ext` sections against the
+/// backends this build has (§5.4).
+fn load(env: &Env, file: &Path) -> Result<Manifest, CliError> {
     let text = fs::read_to_string(file).map_err(|e| CliError::Io {
         path: file.to_path_buf(),
         detail: e.to_string(),
     })?;
-    load_manifest(&text, file).map_err(|e| CliError::Parse {
+    let parse_err = |detail: String| CliError::Parse {
         what: "manifest".to_string(),
-        detail: e.to_string(),
-    })
+        detail,
+    };
+    let manifest = load_manifest(&text, file).map_err(|e| parse_err(e.to_string()))?;
+    check_ext(&manifest, env.ext_keys())
+        .map_err(|e| parse_err(format!("{}: {e}", file.display())))?;
+    Ok(manifest)
 }
 
 // --- backends --------------------------------------------------------------
@@ -161,7 +167,7 @@ pub fn status(
     pref: &[BackendId],
 ) -> Result<StatusOutput, CliError> {
     let file = manifest_file(path)?;
-    let manifest = load(&file)?;
+    let manifest = load(env, &file)?;
     let hash = manifest_hash(&manifest);
     let resolution = resolve(&manifest, &hash, &env.host(), &env.resolvables(), pref)
         .map_err(|e| CliError::Resolve(e.to_string()))?;
@@ -314,7 +320,7 @@ pub fn lock(
     pref: &[BackendId],
 ) -> Result<LockOutput, CliError> {
     let file = manifest_file(path)?;
-    let manifest = load(&file)?;
+    let manifest = load(env, &file)?;
     let hash = manifest_hash(&manifest);
     let lock_path = file
         .parent()
@@ -524,7 +530,7 @@ pub struct InstallOpts {
 /// `--frozen`), compare to machine state, and plan installs/upgrades/holds.
 pub fn install_plan(env: &Env, opts: InstallOpts, pref: &[BackendId]) -> Result<Plan, CliError> {
     let file = manifest_file(opts.path)?;
-    let manifest = load(&file)?;
+    let manifest = load(env, &file)?;
     let hash = manifest_hash(&manifest);
     // Read state lazily per scope: a user-scope install must not touch (and
     // lock) root-owned system state it has no business reading.

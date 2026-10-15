@@ -16,7 +16,7 @@ pub mod state;
 
 pub use config::UserConfig;
 pub use error::IoError;
-pub use manifest::{load_manifest, manifest_hash, ManifestError};
+pub use manifest::{check_ext, load_manifest, manifest_hash, BackendExtKeys, ManifestError};
 pub use state::FileStateStore;
 
 use bosun_core::vers::scheme_for_type;

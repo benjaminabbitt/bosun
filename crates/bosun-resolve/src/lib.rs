@@ -29,7 +29,7 @@ mod errmsg;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use bosun_core::manifest::{InstallBlock, Manifest, ManifestEntry};
+use bosun_core::manifest::{Ext, InstallBlock, Manifest, ManifestEntry};
 use bosun_core::platform::{Arch, Distro, Os, Selector, Target};
 use bosun_core::record::{LockDocument, LockLeaf, LockPackage, Package, Placement, TargetLock};
 use bosun_core::spec::{SelectError, Spec, SpecError};
@@ -265,7 +265,7 @@ fn resolve_entry(
         &entry.name,
         &chosen.purl_type,
         native,
-        block.asset.as_deref(),
+        block.ext.get(chosen.id.as_str()),
         host,
     )?;
 
@@ -353,9 +353,18 @@ fn effective_block(
             },
             package: entry.package.or(defaults.package),
             spec: entry.spec.or(defaults.spec),
-            asset: entry.asset.or(defaults.asset),
+            ext: merge_ext(defaults.ext, entry.ext),
         }),
     }
+}
+
+/// `entry`'s ext settings over `defaults`', per backend and per key: a key the
+/// entry sets wins, the rest inherit.
+fn merge_ext(mut defaults: Ext, entry: Ext) -> Ext {
+    for (backend, settings) in entry {
+        defaults.entry(backend).or_default().extend(settings);
+    }
+    defaults
 }
 
 /// The most specific selector in `map` that applies to `host`, by the §5.4
@@ -425,20 +434,24 @@ fn choose_backend<'b>(
 /// - `deb`: `pkg:deb/<distro-id>/<name>?arch=<arch>&distro=<codename>` — the
 ///   namespace is the distro ID and the qualifiers carry arch and the distro
 ///   codename (from `VERSION_CODENAME`), omitted when the host has none.
-/// - `github`: `pkg:github/<owner>/<repo>?asset=<template>&binary=<logical>` —
-///   the package id is `owner/repo`; the `binary` qualifier defaults to the
-///   entry's logical name so `- name: ltk` with `package: owner/repo` selects
-///   the `ltk` binary; `asset` is the install block's `asset:` template,
-///   verbatim, when one is given (the backend renders and validates it).
-/// - anything else: `pkg:<type>/<name>` (cargo, generic, …). `asset` applies
-///   only to github, so a fallback backend in the same block ignores it.
+/// - `github`: `pkg:github/<owner>/<repo>?binary=<logical>` — the package id
+///   is `owner/repo`; the `binary` qualifier defaults to the entry's logical
+///   name so `- name: ltk` with `package: owner/repo` selects the `ltk` binary.
+/// - anything else: `pkg:<type>/<name>` (cargo, generic, …).
+///
+/// The chosen backend's `ext` settings (`ext`, already narrowed to that
+/// backend) are added as qualifiers, verbatim, for the backend to read and
+/// validate (github-release's `asset` template). Another backend's section
+/// never reaches this identity. The qualifiers above are set after them, so an
+/// ext key can't replace one.
 fn build_purl(
     name: &str,
     purl_type: &str,
     native: &str,
-    asset: Option<&str>,
+    ext: Option<&BTreeMap<String, String>>,
     host: &Host<'_>,
 ) -> Result<Purl, ResolveError> {
+    let mut qualifiers = ext.cloned().unwrap_or_default();
     let bad_purl = |source| ResolveError::BadPurl {
         name: name.to_string(),
         source,
@@ -448,7 +461,6 @@ fn build_purl(
             let distro = host.distro.ok_or_else(|| ResolveError::NoDistro {
                 name: name.to_string(),
             })?;
-            let mut qualifiers = BTreeMap::new();
             qualifiers.insert("arch".to_string(), host.arch.to_string());
             if let Some(codename) = &distro.version_codename {
                 qualifiers.insert("distro".to_string(), codename.clone());
@@ -464,16 +476,13 @@ fn build_purl(
                         name: name.to_string(),
                         value: native.to_string(),
                     })?;
-            let mut qualifiers = BTreeMap::new();
             qualifiers.insert("binary".to_string(), name.to_string());
-            if let Some(asset) = asset {
-                qualifiers.insert("asset".to_string(), asset.to_string());
-            }
             Purl::from_components("github", Some(owner), repo, None, qualifiers, None)
                 .map_err(bad_purl)
         }
-        other => Purl::from_components(other, None, native, None, BTreeMap::new(), None)
-            .map_err(bad_purl),
+        other => {
+            Purl::from_components(other, None, native, None, qualifiers, None).map_err(bad_purl)
+        }
     }
 }
 
@@ -780,13 +789,20 @@ mod tests {
             backends: backends.iter().map(|s| s.to_string()).collect(),
             package: package.map(str::to_string),
             spec: spec.map(str::to_string),
-            asset: None,
+            ext: Default::default(),
         }
     }
 
-    fn with_asset(mut b: InstallBlock, asset: &str) -> InstallBlock {
-        b.asset = Some(asset.to_string());
+    fn with_ext(mut b: InstallBlock, backend: &str, key: &str, value: &str) -> InstallBlock {
+        b.ext
+            .entry(backend.to_string())
+            .or_default()
+            .insert(key.to_string(), value.to_string());
         b
+    }
+
+    fn with_asset(b: InstallBlock, asset: &str) -> InstallBlock {
+        with_ext(b, "github-release", "asset", asset)
     }
 
     fn entry(name: &str, spec: Option<&str>, install: &[(&str, InstallBlock)]) -> ManifestEntry {
@@ -1046,6 +1062,66 @@ mod tests {
             queried.purl.qualifiers().get("asset").map(String::as_str),
             Some(template)
         );
+    }
+
+    #[test]
+    fn entry_ext_overrides_defaults_per_key_and_inherits_the_rest() {
+        let index = FakeIndex::new(Scheme::Semver, &["0.8.1"]);
+        let host = Host {
+            os: Os::Linux,
+            arch: Arch::Amd64,
+            distro: None,
+        };
+        let defaults = with_ext(
+            with_asset(block(&["github-release"], None, None), "default.tar.gz"),
+            "github-release",
+            "tag",
+            "v{{ version }}",
+        );
+        let m = manifest(
+            &[("linux", defaults)],
+            vec![entry(
+                "duf",
+                Some(">=0.8.0"),
+                &[(
+                    "linux",
+                    with_asset(block(&[], Some("muesli/duf"), None), "duf.tar.gz"),
+                )],
+            )],
+        );
+
+        resolve(&m, "sha256:h", &host, &[github_backend(&index)], &[]).unwrap();
+
+        let (queried, _) = index.last.borrow().clone().unwrap();
+        let q = queried.purl.qualifiers();
+        assert_eq!(q.get("asset").map(String::as_str), Some("duf.tar.gz"));
+        assert_eq!(q.get("tag").map(String::as_str), Some("v{{ version }}"));
+    }
+
+    #[test]
+    fn the_chosen_backends_ext_becomes_its_purl_qualifiers() {
+        let index = FakeIndex::new(Scheme::Semver, &["0.8.1"]);
+        let host = Host {
+            os: Os::Linux,
+            arch: Arch::Amd64,
+            distro: None,
+        };
+        let m = manifest(
+            &[],
+            vec![entry(
+                "duf",
+                Some(">=0.8.0"),
+                &[(
+                    "linux",
+                    with_ext(block(&["cargo"], None, None), "cargo", "features", "x"),
+                )],
+            )],
+        );
+
+        resolve(&m, "sha256:h", &host, &[cargo_backend(&index)], &[]).unwrap();
+
+        let (queried, _) = index.last.borrow().clone().unwrap();
+        assert_eq!(queried.purl.to_string(), "pkg:cargo/duf?features=x");
     }
 
     #[test]

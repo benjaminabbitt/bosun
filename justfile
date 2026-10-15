@@ -34,7 +34,8 @@ install:
 
 # Mutation testing in a disposable tree copy (see docs/design/verprop.md quality
 # bars). A plain copy — not a git worktree — because the shared .git may be
-# read-only; -j1 and TMPDIR off /tmp so the copy's target tree is self-contained.
+# read-only; TMPDIR off /tmp so the copy's target tree is self-contained
+# (--in-place runs mutants one at a time).
 # Usage: just mutants [crates/bosun-core/src/vers.rs]
 mutants target="":
     #!/usr/bin/env bash
@@ -45,9 +46,9 @@ mutants target="":
     export TMPDIR="$copy/tmp"; mkdir -p "$TMPDIR"
     cd "$copy"
     if [ -n "{{target}}" ]; then
-        cargo mutants --in-place -j1 --timeout 120 -f "{{target}}"
+        cargo mutants --in-place --timeout 120 -f "{{target}}"
     else
-        cargo mutants --in-place -j1 --timeout 120
+        cargo mutants --in-place --timeout 120
     fi
 
 # Line coverage over the hermetic suite with cargo-llvm-cov. Pass `html` for a

@@ -117,6 +117,10 @@ pub struct BackendMeta {
     pub vers_type: &'static str,
     /// Whether it resolves once under `any` (cargo, go, npm, …).
     pub platform_independent: bool,
+    /// The keys this backend reads from its `ext:` section of an install
+    /// block (§5.4); any other key there is a manifest error. The values reach
+    /// the backend as purl qualifiers, and it validates them when it reads them.
+    pub ext_keys: &'static [&'static str],
 }
 
 /// in; only those whose probe succeeds are built for the run. `Send + Sync`

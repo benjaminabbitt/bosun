@@ -77,6 +77,9 @@ pub struct Env {
     /// The backend→scheme map (§6) for every compiled-in backend, present or
     /// not, so lock/state versions always read under the right scheme.
     schemes: bosun_io::BackendSchemes,
+    /// The `ext` keys (§5.4) every compiled-in backend declares, present or
+    /// not, so a manifest checks the same on every machine.
+    ext_keys: bosun_io::BackendExtKeys,
     machine: Box<dyn Machine>,
     exec: Exec,
 }
@@ -147,6 +150,11 @@ impl Env {
     /// and covers every compiled-in backend whether or not it is present.
     pub fn schemes(&self) -> bosun_io::BackendSchemes {
         self.schemes.clone()
+    }
+
+    /// The `ext` keys each known backend declares, for checking a manifest.
+    pub fn ext_keys(&self) -> &bosun_io::BackendExtKeys {
+        &self.ext_keys
     }
 
     /// The vers type of a backend, for parsing claim specs (§5.6).
@@ -251,6 +259,18 @@ fn factory_schemes(factories: &[Box<dyn BackendFactory>]) -> bosun_io::BackendSc
         .collect()
 }
 
+/// The `ext` keys each compiled-in backend declares, from factory metadata
+/// alone (no probe), like [`factory_schemes`].
+fn factory_ext_keys(factories: &[Box<dyn BackendFactory>]) -> bosun_io::BackendExtKeys {
+    factories
+        .iter()
+        .map(|f| {
+            let keys = f.meta().ext_keys.iter().map(|k| k.to_string()).collect();
+            (f.id().as_str().to_string(), keys)
+        })
+        .collect()
+}
+
 fn reason_text(reason: &SkipReason) -> String {
     match reason {
         SkipReason::NotPresent => "not present".to_string(),
@@ -278,6 +298,7 @@ fn from_host() -> Result<Env, CliError> {
     // must be known for every compiled-in backend — not only those present this
     // run — so state recorded for an absent backend still reads correctly.
     let schemes = factory_schemes(&factories);
+    let ext_keys = factory_ext_keys(&factories);
 
     let info = HostInfo {
         os,
@@ -317,6 +338,7 @@ fn from_host() -> Result<Env, CliError> {
         backends,
         skipped,
         schemes,
+        ext_keys,
         machine: Box::new(machine),
         exec: Exec::Host { runner, fetcher },
     })
@@ -425,6 +447,20 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
         .collect::<Result<Vec<_>, CliError>>()?;
 
     let schemes = backend_schemes(&backends);
+    // Compiled-in backends keep their declared keys under the seam; a fake
+    // backend the build doesn't have declares none.
+    let fake_runner: Arc<dyn CommandRunner> =
+        Arc::new(bosun_ports::testing::FakeCommandRunner::new());
+    let mut ext_keys = factory_ext_keys(&compiled_in_factories(
+        fake_runner,
+        fetcher.clone(),
+        bin_dir.clone(),
+        os,
+        arch,
+    ));
+    for b in &backends {
+        ext_keys.entry(b.id.as_str().to_string()).or_default();
+    }
     let store = FileStateStore::new(system.clone(), user.clone(), schemes.clone());
     let machine = FakeMachine {
         os,
@@ -444,6 +480,7 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
         backends,
         skipped: Vec::new(),
         schemes,
+        ext_keys,
         machine: Box::new(machine),
         exec: Exec::Fixture(Box::new(FixtureStepRunner::new(
             fx.fail_step,
@@ -556,6 +593,40 @@ mod tests {
         assert_eq!(schemes.get("apt"), Some(&Scheme::Debian));
         assert_eq!(schemes.get("cargo"), Some(&Scheme::Semver));
         assert_eq!(schemes.get("github-release"), Some(&Scheme::Semver));
+    }
+
+    #[test]
+    fn factory_ext_keys_cover_every_compiled_in_backend_without_probing() {
+        let runner: Arc<dyn CommandRunner> = Arc::new(ProcessCommandRunner);
+        let fetcher: Arc<dyn HttpFetcher> = Arc::new(UreqHttpFetcher::new());
+        let factories = compiled_in_factories(
+            runner,
+            fetcher,
+            PathBuf::from("/tmp/bin"),
+            Os::Linux,
+            Arch::Amd64,
+        );
+        let keys = factory_ext_keys(&factories);
+        assert_eq!(keys.get("github-release"), Some(&vec!["asset".to_string()]));
+        assert_eq!(keys.get("apt"), Some(&vec![]));
+        assert_eq!(keys.get("cargo"), Some(&vec![]));
+    }
+
+    #[test]
+    fn a_fixture_env_knows_compiled_in_ext_keys_and_its_own_backends() {
+        // Fake fixture backends declare no ext keys; compiled-in ones keep
+        // theirs, so manifests check the same way under the test seam.
+        let dir = tempfile::tempdir().unwrap();
+        let env = fixture_env(
+            dir.path(),
+            r#"{"os":"linux","arch":"amd64","backends":[
+                {"id":"brew","version":"4.0","purl_type":"brew","vers_type":"generic"}]}"#,
+        );
+        assert_eq!(
+            env.ext_keys().get("github-release"),
+            Some(&vec!["asset".to_string()])
+        );
+        assert_eq!(env.ext_keys().get("brew"), Some(&vec![]));
     }
 
     #[test]

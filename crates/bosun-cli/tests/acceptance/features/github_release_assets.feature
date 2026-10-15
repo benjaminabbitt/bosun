@@ -1,7 +1,7 @@
 Feature: github-release names the archive by template and finds the binary inside it
 
   Releases spell the same platform differently, and put the binary at the
-  archive's root or inside a directory. The `asset:` template names the archive
+  archive's root or inside a directory. The `ext.github-release.asset` template names the archive
   exactly; bosun then finds the one file named after the binary, wherever it is.
 
   Background:
@@ -23,7 +23,9 @@ Feature: github-release names the archive by template and finds the binary insid
             linux:
               backend: github-release
               package: muesli/duf
-              asset: "{{ binary }}_{{ version }}_{{ os }}_{{ arch_goreleaser }}.tar.gz"
+              ext:
+                github-release:
+                  asset: "{{ binary }}_{{ version }}_{{ os }}_{{ arch_goreleaser }}.tar.gz"
       """
     When I run `bosun install . --yes`
     Then it succeeds
@@ -50,7 +52,9 @@ Feature: github-release names the archive by template and finds the binary insid
             linux:
               backend: github-release
               package: charmbracelet/gum
-              asset: "{{ binary }}_{{ version }}_{{ os | title }}_{{ arch_goreleaser }}.tar.gz"
+              ext:
+                github-release:
+                  asset: "{{ binary }}_{{ version }}_{{ os | title }}_{{ arch_goreleaser }}.tar.gz"
       """
     When I run `bosun install . --yes`
     Then it succeeds
@@ -74,7 +78,9 @@ Feature: github-release names the archive by template and finds the binary insid
             linux:
               backend: github-release
               package: muesli/duf
-              asset: "{{ binary }}_{{ version }}_{{ os }}_{{ arch_goreleaser }}.tar.gz"
+              ext:
+                github-release:
+                  asset: "{{ binary }}_{{ version }}_{{ os }}_{{ arch_goreleaser }}.tar.gz"
       """
     When I run `bosun install . --yes`
     Then it succeeds
@@ -95,9 +101,49 @@ Feature: github-release names the archive by template and finds the binary insid
             linux:
               backend: github-release
               package: muesli/duf
-              asset: "{{ binary }}_{{ version }}_{{ platform }}.tar.gz"
+              ext:
+                github-release:
+                  asset: "{{ binary }}_{{ version }}_{{ platform }}.tar.gz"
       """
     When I run `bosun install . --yes`
     Then it fails
     And it reports "unknown variable `platform`"
     And duf is not installed
+
+  Scenario: a misspelt ext key is a manifest error that names the allowed keys
+    Given the manifest:
+      """
+      version: 1
+      targets: [linux/amd64]
+      packages:
+        - name: duf
+          spec: ">=0.8.0|<0.9.0"
+          install:
+            linux:
+              backend: github-release
+              package: muesli/duf
+              ext:
+                github-release:
+                  aset: "duf.tar.gz"
+      """
+    When I run `bosun lock .`
+    Then it fails
+    And it reports "unknown key \"aset\" in ext.github-release (allowed: asset)"
+
+  Scenario: asset written outside ext is an unknown key
+    Given the manifest:
+      """
+      version: 1
+      targets: [linux/amd64]
+      packages:
+        - name: duf
+          spec: ">=0.8.0|<0.9.0"
+          install:
+            linux:
+              backend: github-release
+              package: muesli/duf
+              asset: "duf.tar.gz"
+      """
+    When I run `bosun lock .`
+    Then it fails
+    And it reports "unknown key \"asset\" in an install block"

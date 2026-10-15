@@ -49,7 +49,12 @@ pub struct InstallBlock {
     pub package: Option<String>,
     /// A per-selector spec override.
     pub spec: Option<String>,
-    /// The release asset name, as a template (github-release only). Kept
-    /// verbatim; the backend renders and validates it.
-    pub asset: Option<String>,
+    /// Backend-specific settings, by backend id then key (`ext:
+    /// {github-release: {asset: …}}`). Carried verbatim: each backend declares
+    /// the keys it reads and interprets their values, so this crate stays
+    /// backend-agnostic.
+    pub ext: Ext,
 }
+
+/// Backend-specific install settings: backend id → key → value.
+pub type Ext = BTreeMap<String, BTreeMap<String, String>>;

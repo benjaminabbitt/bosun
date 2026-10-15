@@ -1,6 +1,7 @@
-//! Asset-name templates: the `asset` qualifier (from the manifest's `asset:`
-//! key) is a minijinja template rendered against a fixed set of precomputed
-//! variables, so one manifest line names the right archive for each host.
+//! Asset-name templates: the `asset` qualifier (from the manifest's
+//! `ext.github-release.asset`) is a minijinja template rendered against a
+//! fixed set of precomputed variables, so one manifest line names the right
+//! archive for each host.
 //!
 //! Variable names follow goreleaser's (lower-cased) where they overlap, so a
 //! template can be copied from a project's own `.goreleaser.yaml`. Undefined
@@ -16,7 +17,7 @@ use minijinja::{Environment, UndefinedBehavior};
 
 use crate::errmsg;
 
-/// goreleaser's default archive name, used when no `asset:` is given.
+/// goreleaser's default archive name, used when no `asset` is given.
 pub(super) const DEFAULT_TEMPLATE: &str = "{{ binary }}_{{ version }}_{{ os }}_{{ arch }}.tar.gz";
 
 /// Variables documented but not yet available: each needs host libc detection.

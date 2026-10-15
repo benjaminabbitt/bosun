@@ -610,6 +610,13 @@ Rules (draft syntax):
   current machine wins (exact distro `ID` > `ID_LIKE` match > plain `<os>`), then
   `defaults.install`. No match = the entry doesn't apply on this platform (reported by
   `status`, not an error). Distro detection is below.
+- **`ext`: backend-specific settings.** `ext: {<backend id>: {<key>: <scalar>}}` on an
+  install block (or in `defaults.install`, inherited per key) carries settings only that
+  backend reads, such as github-release's `asset` template. bosun-core carries it verbatim;
+  each backend declares its keys in `BackendMeta::ext_keys`, and the manifest is checked
+  against every compiled-in backend at load, so an unknown backend or key is an error. The
+  chosen backend's section becomes qualifiers on its identity purl, which it validates when
+  it reads them; other backends' sections are ignored.
 - **Defaults keep it sparse:** `package` defaults to `name`; a per-platform `spec` overrides the
   entry's `spec`; `defaults` supplies backend choices, so entries only state
   exceptions.
@@ -1156,7 +1163,7 @@ remote indexes. Traits stay ready; nothing is stubbed.
   records the resolved version and state is the authority for it.
 - `Ref` carries the canonical purl. github-release identity uses purl qualifiers `binary`
   (default: the entry's logical name, set by resolve) and an optional `asset` template, from
-  the install block's `asset:` key (see `docs/asset-templates.md`). The asset template is a
+  the install block's `ext.github-release.asset` (see `docs/asset-templates.md`). The asset template is a
   minijinja template with strict undefined over precomputed variables (`binary`, `version`,
   `tag`, `os`, `arch`, `arch_uname`, `arch_goreleaser`); the default is goreleaser's
   `{{ binary }}_{{ version }}_{{ os }}_{{ arch }}.tar.gz`, matched exactly. A bad template is
