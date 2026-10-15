@@ -11,6 +11,7 @@ pub mod errmsg;
 pub mod error;
 pub mod lock;
 pub mod manifest;
+pub mod manifest_edit;
 pub mod paths;
 pub mod state;
 

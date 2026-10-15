@@ -104,7 +104,7 @@ real to check later):
 
 | command | does |
 |---|---|
-| `add` / `remove` | edit the manifest (`remove` also drops this manifest's claim, and uninstalls only if bosun installed it and no other manifest claims it) |
+| `add <name> --backend … [--package] [--spec] [--on <selector>] [--ext k=v]` / `remove <name> [--plan] [--yes]` | edit one manifest entry, keeping every other byte, then run `lock` on the edited manifest. `add` checks the entry first (ext keys, then a resolve on this machine) and writes nothing on error; without `--spec` it writes the range from the newest version up to the next breaking one (`>=2.0.2\|<3.0.0`, below 1.0 the next minor, apt: any revision of the upstream version); it never installs. `remove` first releases the package (drops this manifest's claim, uninstalls only if bosun installed it and no other manifest claims it, behind the usual confirm), then edits and locks |
 | `refresh` | explicit index refresh, per backend |
 | `install [path] [--plan] [--scope system\|user] [--yes]` | plan → privilege check → confirm → apply: resolve each entry with the local package manager, install, record in the machine state (§4.8, §5.5). **Never uninstalls** (except the old name in a `formerly` migration, §5.4) |
 | `uninstall [path] [--plan] [--scope system\|user] [--yes]` | the inverse of `install` for one manifest: drop all of its claims, then uninstall each package bosun installed that no other manifest still claims; same plan → confirm → apply flow (§9) |
@@ -131,7 +131,7 @@ the same fields.
 | file | format | written by | committed | purpose |
 |---|---|---|---|---|
 | `bosun.yaml` | YAML (annals-yaml subset) | people (and `add`/`remove`/`export`) | yes | the manifest: intent |
-| `bosun.lock` | JSON | bosun only (`lock`, `upgrade`) | yes | resolved versions, per target, built up one platform at a time |
+| `bosun.lock` | JSON | bosun only (`lock`, `upgrade`; `add`/`remove` run `lock`) | yes | resolved versions, per target, built up one platform at a time; a package the manifest no longer lists is dropped from every target |
 | machine state | JSON | bosun only | **no** (one per user, in `$HOME`) | what bosun installed for this user, and which manifests claim it |
 | user config | YAML (annals-yaml subset) | people | no (`<config dir>/bosun/config.yaml`) | preferences, e.g. installer order |
 | user manifest | YAML (annals-yaml subset) | people | no (`<config dir>/bosun/bosun.yaml`) | personal tools; one more claimant |
@@ -1100,8 +1100,8 @@ remote indexes. Traits stay ready; nothing is stubbed.
 
 **Decisions made during implementation:**
 
-- annals is pinned by git rev `3c5fbac`. `annals_yaml::edit` is not published yet, so `add`
-  and `remove` are **left out of the CLI entirely** (no "unavailable" stub) until it lands.
+- annals is pinned by git rev `4f92f43`, the first with `annals_yaml::edit`, which `add`
+  and `remove` use to splice one entry.
 - `rust-toolchain.toml` pins **1.96.1**, matching the host and the agent image; the workspace
   `rust-version` is 1.96.1 too (cargo refuses to build under a lower toolchain).
 - Mutation testing inside agent containers runs `--in-place` on a disposable copy of the tree
@@ -1216,7 +1216,7 @@ lines; every per-crate mutation target met. The dogfood `bosun.yaml` and `bosun.
 committed; the real host install is the user's to run (`bosun install`, then
 `sudo bosun install --scope system`).
 
-**Deferred past M1:** `add` / `remove` (wait for `annals_yaml::edit`); `render` and
+**Deferred past M1:** `render` and
 `Containerfile.bosun` (§8, steps already describable); `upgrade`, `export`, `adopt`, `sources`,
 `formerly` migration; persisted plans; macOS / Windows machines; other backends; remote
 indexes; distinct messages for disjoint-vs-unpublished claim intersections (needs vers interval
@@ -1257,6 +1257,8 @@ scenario in the real-backend tier (skipped for compile time).
 | 12-2 | installed-version scheme from backend metadata (state + lock); idempotency test per backend | landed; 299 tests; github-release idempotency test confirmed red without the fix |
 | 12-3 | scheme map from every compiled-in backend; unknown backend id in lock/state is an error, not Generic | landed; 303 tests + 20 scenarios |
 | 12 | dogfood: `bosun.yaml` (just, jq, ctxloom) committed; plan-only host run (user decision) | manifest committed; host run found 5 bugs (below) → 12-1 |
+| M2-0 | backend-specific settings under `ext:` (`BackendMeta::ext_keys`, checked at load); github-release `asset` moves there | landed |
+| M2-1 | annals-yaml `edit` (annals `4f92f43`); `bosun add` / `bosun remove` (edit, then `lock`); default spec from the newest version; `lock` drops packages the manifest no longer lists on every target | landed; 50 scenarios; annals edit mutation 197/200 viable caught (3 justified) |
 
 **First real-host smoke run (2026-10-14, release build, Debian 13, read-only `--plan` and
 `lock` in a scratch dir).** `backends` found apt 3.0.3, cargo 1.96.1 and github-release; jq

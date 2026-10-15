@@ -558,7 +558,21 @@ pub fn build_uninstall_plan(
     state: &StateDocument,
     installers: &BTreeMap<BackendId, &dyn Installer>,
 ) -> Result<Plan, PortError> {
-    build_removal_plan(state, installers, |claim| claim.manifest == manifest)
+    build_removal_plan(state, installers, |_, claim| claim.manifest == manifest)
+}
+
+/// Build the plan for `bosun remove` (§4.2): drop `manifest`'s claim on the
+/// one package `name`, and uninstall it only if bosun installed it and no
+/// other manifest still claims it. Empty when the manifest never claimed it.
+pub fn build_release_plan(
+    manifest: &Path,
+    name: &str,
+    state: &StateDocument,
+    installers: &BTreeMap<BackendId, &dyn Installer>,
+) -> Result<Plan, PortError> {
+    build_removal_plan(state, installers, |package, claim| {
+        package == name && claim.manifest == manifest
+    })
 }
 
 /// Build the prune plan (§9): drop claims whose manifest no longer exists, and
@@ -570,25 +584,28 @@ pub fn build_prune_plan(
     installers: &BTreeMap<BackendId, &dyn Installer>,
     manifest_present: impl Fn(&Path) -> bool,
 ) -> Result<Plan, PortError> {
-    build_removal_plan(state, installers, |claim| {
+    build_removal_plan(state, installers, |_, claim| {
         !manifest_present(&claim.manifest)
     })
 }
 
-/// Shared walk for uninstall and prune: `drop` selects the claims to remove
-/// from each package.
+/// Shared walk for uninstall, release and prune: `drop` selects, by package
+/// name and claim, the claims to remove from each package.
 fn build_removal_plan(
     state: &StateDocument,
     installers: &BTreeMap<BackendId, &dyn Installer>,
-    drop: impl Fn(&Claim) -> bool,
+    drop: impl Fn(&str, &Claim) -> bool,
 ) -> Result<Plan, PortError> {
     let mut removes = Vec::new();
     let mut drop_claims = Vec::new();
 
     for package in &state.packages {
         for leaf in package.targets.values() {
-            let (dropped, remaining): (Vec<Claim>, Vec<Claim>) =
-                leaf.claimed_by.iter().cloned().partition(&drop);
+            let (dropped, remaining): (Vec<Claim>, Vec<Claim>) = leaf
+                .claimed_by
+                .iter()
+                .cloned()
+                .partition(|c| drop(&package.name, c));
             if dropped.is_empty() {
                 continue;
             }

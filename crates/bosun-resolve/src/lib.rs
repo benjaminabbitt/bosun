@@ -687,6 +687,16 @@ pub fn merge_lock(existing: &LockDocument, fresh: &LockDocument) -> LockDocument
     }
 }
 
+/// `lock` without the packages `manifest` no longer lists, on every target
+/// (§4.5): a removed entry leaves the lock everywhere at once, not one
+/// platform's `bosun lock` at a time. Target headers are kept; whether a
+/// target is still fresh is [`check_targets`]'s to judge.
+pub fn retain_listed(mut lock: LockDocument, manifest: &Manifest) -> LockDocument {
+    lock.packages
+        .retain(|p| manifest.packages.iter().any(|e| e.name == p.name));
+    lock
+}
+
 /// Whether a declared target is recorded in the lock and current (§4.5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Freshness {
@@ -1755,6 +1765,26 @@ mod tests {
         assert_eq!(jq.targets[&ARM64].resolved.as_str(), "1.7.1-2");
         // fd is new this run.
         assert!(merged.packages.iter().any(|p| p.name == "fd"));
+    }
+
+    #[test]
+    fn a_package_gone_from_the_manifest_leaves_the_lock_on_every_target() {
+        let lock = lock_doc(
+            &[(AMD64, "h"), (ARM64, "h-arm"), (DARWIN, "h-mac")],
+            vec![
+                lock_pkg("jq", &[(AMD64, "1.7.1-3"), (ARM64, "1.7.1-2")]),
+                lock_pkg("gone", &[(ARM64, "1.0.0-1"), (DARWIN, "1.0.0-1")]),
+            ],
+        );
+        let m = manifest(&[], vec![entry("jq", Some("1.7.1-3"), &[])]);
+
+        let kept = retain_listed(lock, &m);
+
+        let names: Vec<&str> = kept.packages.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["jq"]);
+        assert_eq!(kept.packages[0].targets.len(), 2);
+        // Target headers are untouched: freshness is lock --check's to judge.
+        assert_eq!(kept.targets.len(), 3);
     }
 
     #[test]

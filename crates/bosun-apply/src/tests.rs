@@ -669,6 +669,69 @@ fn uninstall_ignores_packages_this_manifest_does_not_claim() {
 }
 
 #[test]
+fn release_removes_only_the_named_package_of_this_manifest() {
+    let apt = apt();
+    let st = state(vec![
+        (
+            "jq",
+            leaf(
+                "jq",
+                "1.7.1-3",
+                Origin::Installed,
+                vec![claim("/w/a", ">=1.7")],
+            ),
+        ),
+        (
+            "git",
+            leaf(
+                "git",
+                "2.43.0",
+                Origin::Installed,
+                vec![claim("/w/a", ">=2.40")],
+            ),
+        ),
+    ]);
+    let plan = build_release_plan(Path::new("/w/a"), "jq", &st, &installers(&apt)).unwrap();
+
+    assert_eq!(kinds(&plan), vec![ActionKind::Remove]);
+    assert_eq!(plan.actions[0].name, "jq");
+}
+
+#[test]
+fn release_keeps_a_package_another_manifest_claims() {
+    let apt = apt();
+    let st = state(vec![(
+        "jq",
+        leaf(
+            "jq",
+            "1.7.1-3",
+            Origin::Installed,
+            vec![claim("/w/a", ">=1.7"), claim("/w/b", ">=1.7")],
+        ),
+    )]);
+    let plan = build_release_plan(Path::new("/w/a"), "jq", &st, &installers(&apt)).unwrap();
+
+    assert_eq!(kinds(&plan), vec![ActionKind::DropClaim]);
+    assert_eq!(plan.actions[0].claims, vec![claim("/w/a", ">=1.7")]);
+}
+
+#[test]
+fn release_of_a_package_this_manifest_never_claimed_is_empty() {
+    let apt = apt();
+    let st = state(vec![(
+        "jq",
+        leaf(
+            "jq",
+            "1.7.1-3",
+            Origin::Installed,
+            vec![claim("/w/b", ">=1.7")],
+        ),
+    )]);
+    let plan = build_release_plan(Path::new("/w/a"), "jq", &st, &installers(&apt)).unwrap();
+    assert!(plan.actions.is_empty());
+}
+
+#[test]
 fn prune_drops_claims_of_vanished_manifests_and_removes_orphans() {
     let apt = apt();
     let st = state(vec![

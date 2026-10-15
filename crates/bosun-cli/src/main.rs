@@ -4,6 +4,7 @@
 
 mod cli;
 mod commands;
+mod edit;
 mod env;
 mod error;
 mod fixture;
@@ -39,6 +40,62 @@ fn dispatch(cli: &Cli, format: Format) -> Result<i32, CliError> {
     let pref = commands::preference(&cli.installer);
     let mut out = std::io::stdout().lock();
     match &cli.command {
+        Command::Add {
+            name,
+            backends,
+            package,
+            spec,
+            selector,
+            ext,
+            manifest,
+        } => {
+            let opts = edit::AddOpts {
+                name: name.clone(),
+                backends: backends.clone(),
+                package: package.clone(),
+                spec: spec.clone(),
+                selector: selector.clone(),
+                ext: ext.clone(),
+                manifest: manifest.clone(),
+            };
+            let value = edit::add(&env, opts, &pref)?;
+            emit(&value, format, &mut out)
+        }
+        Command::Remove {
+            name,
+            manifest,
+            plan,
+            scope,
+            yes,
+        } => {
+            let removal = edit::prepare_remove(&env, name, manifest.clone())?;
+            if *plan {
+                return emit(&removal.planned(), format, &mut out);
+            }
+            // Release first: the manifest is edited only once the package is
+            // uninstalled (or its claim dropped), so a refused or failed apply
+            // leaves everything as it was.
+            let report = if removal.plan.actions.is_empty() {
+                None
+            } else {
+                let m = Mutation {
+                    command: "remove",
+                    plan_only: false,
+                    scope: scope.map(Into::into),
+                    yes: *yes,
+                };
+                match apply_mutation(&env, m, &removal.plan, format, &mut out)? {
+                    Applied::Done(report) => Some(report),
+                    Applied::Stopped(code) => return Ok(code),
+                    Applied::Failed(report) => {
+                        render(&report, format, &mut out).map_err(io_err)?;
+                        return Ok(1);
+                    }
+                }
+            };
+            let value = removal.finish(&env, report, &pref)?;
+            emit(&value, format, &mut out)
+        }
         Command::Backends => {
             let value = commands::backends(&env);
             emit(&value, format, &mut out)
@@ -148,20 +205,52 @@ fn run_mutation(
     if m.plan_only {
         return emit(&plan, format, out);
     }
+    match apply_mutation(env, m, &plan, format, out)? {
+        Applied::Stopped(code) => Ok(code),
+        Applied::Done(report) => {
+            render(&report, format, out).map_err(io_err)?;
+            Ok(0)
+        }
+        Applied::Failed(report) => {
+            render(&report, format, out).map_err(io_err)?;
+            Ok(1)
+        }
+    }
+}
+
+/// How the privilege → confirm → apply flow ended.
+enum Applied {
+    /// Stopped before applying (blocking diagnostic, privilege, refused or
+    /// declined confirmation), with the exit code; anything to say was said.
+    Stopped(i32),
+    /// Applied, every action succeeded.
+    Done(bosun_apply::ApplyReport),
+    /// Applied, and some action failed.
+    Failed(bosun_apply::ApplyReport),
+}
+
+/// Privilege → confirm → apply for `plan` (§4.8); the caller renders the report.
+fn apply_mutation(
+    env: &Env,
+    m: Mutation,
+    plan: &Plan,
+    format: Format,
+    out: &mut impl Write,
+) -> Result<Applied, CliError> {
     // A blocking diagnostic (unsatisfiable, empty intersection) refuses apply.
     if plan.has_errors() {
-        render(&plan, format, out).map_err(io_err)?;
-        return Ok(1);
+        render(plan, format, out).map_err(io_err)?;
+        return Ok(Applied::Stopped(1));
     }
     // Privilege is checked against what the plan changes (§5.5).
-    if let Err(e) = check_privilege(&plan, env.machine(), m.scope) {
-        return Ok(render_privilege_error(
+    if let Err(e) = check_privilege(plan, env.machine(), m.scope) {
+        return Ok(Applied::Stopped(render_privilege_error(
             &e,
             env.machine().elevation(),
             m.command,
             format,
             out,
-        ));
+        )));
     }
     // Confirm (§4.8): --yes skips; a TTY prompts; no TTY and no --yes refuses.
     if !m.yes {
@@ -170,14 +259,14 @@ fn run_mutation(
                 "refusing to apply without a terminal; re-run with --yes".to_string(),
             ));
         }
-        eprintln!("{}", Render::text(&plan));
+        eprintln!("{}", Render::text(plan));
         eprint!("Apply? [y/N] ");
         std::io::stderr().flush().ok();
         let mut line = String::new();
         std::io::stdin().read_line(&mut line).map_err(io_err)?;
         if !matches!(line.trim(), "y" | "Y" | "yes" | "Yes") {
             eprintln!("Aborted; nothing changed.");
-            return Ok(0);
+            return Ok(Applied::Stopped(0));
         }
     }
     // Apply each scope the plan touches (a mixed plan was already refused unless
@@ -185,9 +274,9 @@ fn run_mutation(
     let mut report = bosun_apply::ApplyReport {
         outcomes: Vec::new(),
     };
-    for s in apply_scopes(&plan, m.scope) {
+    for s in apply_scopes(plan, m.scope) {
         let part = env
-            .apply(s, &plan)
+            .apply(s, plan)
             .map_err(|e| CliError::Resolve(e.to_string()))?;
         report.outcomes.extend(part.outcomes);
     }
@@ -195,8 +284,11 @@ fn run_mutation(
         .outcomes
         .iter()
         .any(|o| matches!(o.result, bosun_apply::ApplyResult::Failed { .. }));
-    render(&report, format, out).map_err(io_err)?;
-    Ok(if any_failed { 1 } else { 0 })
+    Ok(if any_failed {
+        Applied::Failed(report)
+    } else {
+        Applied::Done(report)
+    })
 }
 
 /// The scopes to apply: the requested one, else every scope the plan touches.

@@ -9,7 +9,8 @@ use bosun_core::{BackendId, Manifest, Scope};
 use bosun_io::{check_ext, load_manifest, lock, manifest_hash};
 use bosun_ports::{Installer, StateStore};
 use bosun_resolve::{
-    check_targets, merge_lock, resolve, Freshness, NotApplicable, Outcome, Resolution,
+    check_targets, merge_lock, resolve, retain_listed, Freshness, NotApplicable, Outcome,
+    Resolution,
 };
 use serde::Serialize;
 
@@ -43,7 +44,7 @@ pub fn preference(flag: &[String]) -> Vec<BackendId> {
     order.into_iter().map(BackendId::new).collect()
 }
 
-fn manifest_file(path: Option<PathBuf>) -> Result<PathBuf, CliError> {
+pub(crate) fn manifest_file(path: Option<PathBuf>) -> Result<PathBuf, CliError> {
     let base = path.unwrap_or_else(|| PathBuf::from("."));
     let file = if base.is_dir() {
         base.join("bosun.yaml")
@@ -59,7 +60,7 @@ fn manifest_file(path: Option<PathBuf>) -> Result<PathBuf, CliError> {
 
 /// Load the manifest at `file` and check its `ext` sections against the
 /// backends this build has (§5.4).
-fn load(env: &Env, file: &Path) -> Result<Manifest, CliError> {
+pub(crate) fn load(env: &Env, file: &Path) -> Result<Manifest, CliError> {
     let text = fs::read_to_string(file).map_err(|e| CliError::Io {
         path: file.to_path_buf(),
         detail: e.to_string(),
@@ -360,7 +361,7 @@ pub fn lock(
         return Ok(lock_output(resolution));
     }
     let merged = match existing {
-        Some(prev) => merge_lock(&prev, &resolution.lock),
+        Some(prev) => retain_listed(merge_lock(&prev, &resolution.lock), &manifest),
         None => resolution.lock.clone(),
     };
     fs::write(&lock_path, lock::to_json(&merged)).map_err(|e| CliError::Io {
@@ -827,7 +828,7 @@ fn read_state(env: &Env, scope: Scope) -> Result<StateDocument, CliError> {
         .map_err(|e| CliError::Environment(e.to_string()))
 }
 
-fn combined_state(env: &Env) -> Result<StateDocument, CliError> {
+pub(crate) fn combined_state(env: &Env) -> Result<StateDocument, CliError> {
     let mut packages = read_state(env, Scope::System)?.packages;
     packages.extend(read_state(env, Scope::User)?.packages);
     Ok(StateDocument {
@@ -858,7 +859,7 @@ fn claim_manifest_path(path: Option<PathBuf>) -> PathBuf {
 /// symlinks when the file exists, else make it absolute without resolving (the
 /// repo is gone — uninstall/prune then match the path bosun recorded while it
 /// still existed, or prune's "manifest no longer exists" check takes over, §9).
-fn canonical_manifest(file: &Path) -> PathBuf {
+pub(crate) fn canonical_manifest(file: &Path) -> PathBuf {
     fs::canonicalize(file)
         .or_else(|_| std::path::absolute(file))
         .unwrap_or_else(|_| file.to_path_buf())

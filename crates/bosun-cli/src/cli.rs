@@ -1,5 +1,4 @@
-//! The clap command-line surface (§4.2, §4.3). M1 read/resolve commands only;
-//! the mutating commands (`install`/`uninstall`/`prune`) are slice 10-2.
+//! The clap command-line surface (§4.2, §4.3).
 
 use std::path::PathBuf;
 
@@ -47,9 +46,54 @@ pub struct Cli {
     pub command: Command,
 }
 
-/// The M1 subcommands.
+/// The subcommands.
 #[derive(Subcommand)]
 pub enum Command {
+    /// Add a package to the manifest, then lock it (never installs).
+    Add {
+        /// bosun's name for the package.
+        name: String,
+        /// The backend to install with; repeat, or comma-separate, for a
+        /// preference list.
+        #[arg(long = "backend", value_delimiter = ',')]
+        backends: Vec<String>,
+        /// The backend's own id for the package, where it differs from the name.
+        #[arg(long)]
+        package: Option<String>,
+        /// The version spec. Default: the newest version, up to the next one
+        /// that may break it (`>=2.0.2|<3.0.0`).
+        #[arg(long, allow_hyphen_values = true)]
+        spec: Option<String>,
+        /// The selector the install block applies to (`linux`, `linux:debian`).
+        /// Default: this machine's OS.
+        #[arg(long = "on")]
+        selector: Option<String>,
+        /// A backend setting under `ext`: `key=value` for the one --backend,
+        /// or `backend.key=value`. Repeatable.
+        #[arg(long)]
+        ext: Vec<String>,
+        /// The manifest directory or file (default: current directory).
+        #[arg(long)]
+        manifest: Option<PathBuf>,
+    },
+    /// Remove a package from the manifest, uninstall it if bosun installed it
+    /// and nothing else wants it, then lock.
+    Remove {
+        /// bosun's name for the package.
+        name: String,
+        /// The manifest directory or file (default: current directory).
+        #[arg(long)]
+        manifest: Option<PathBuf>,
+        /// Show what would happen and stop (changes nothing).
+        #[arg(long)]
+        plan: bool,
+        /// Restrict the uninstall to one install scope.
+        #[arg(long, value_enum)]
+        scope: Option<ScopeArg>,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
     /// List registered backends and why the others were skipped.
     Backends,
     /// Report installed-vs-wanted versions for a manifest.

@@ -26,8 +26,8 @@ bosun-apply = { path = "crates/bosun-apply" }
 bosun-host = { path = "crates/bosun-host" }
 
 # annals — shared by git only, pinned to an exact rev (EUPL-1.2).
-annals-diagnostic = { git = "https://github.com/benjaminabbitt/annals.git", rev = "3c5fbac3d7b29cef40b7aca0b363208a83a085a5" }
-annals-yaml = { git = "https://github.com/benjaminabbitt/annals.git", rev = "3c5fbac3d7b29cef40b7aca0b363208a83a085a5" }
+annals-diagnostic = { git = "https://github.com/benjaminabbitt/annals.git", rev = "4f92f43a375c879c7cb79e2dcc32285c47705f55" }
+annals-yaml = { git = "https://github.com/benjaminabbitt/annals.git", rev = "4f92f43a375c879c7cb79e2dcc32285c47705f55" }
 
 # Version grammars (§6): reference impls where they exist.
 deb-version = "0.1.1"

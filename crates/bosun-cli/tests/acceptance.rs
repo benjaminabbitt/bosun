@@ -104,6 +104,8 @@ struct BosunWorld {
     releases: BTreeMap<(String, String), Release>,
     /// Seeded state packages per scope (`system` / `user`).
     seeded: BTreeMap<String, Vec<Value>>,
+    /// The manifest as the scenario wrote it.
+    manifest: Option<String>,
     code: i32,
     stdout: String,
     stderr: String,
@@ -474,8 +476,15 @@ fn bosun_recorded(
 #[given("the manifest:")]
 fn the_manifest(world: &mut BosunWorld, step: &Step) {
     let p = world.path();
+    let body = docstring(step);
+    fs::write(p.join("bosun.yaml"), &body).unwrap();
+    world.manifest = Some(body);
+}
+
+/// A step's docstring, with cucumber's leading newline taken off.
+fn docstring(step: &Step) -> String {
     let body = step.docstring.clone().expect("step needs a docstring");
-    fs::write(p.join("bosun.yaml"), body).unwrap();
+    body.strip_prefix('\n').map(str::to_string).unwrap_or(body)
 }
 
 // ---- actions ----------------------------------------------------------------
@@ -490,16 +499,10 @@ fn delete_manifest(world: &mut BosunWorld) {
 fn i_run(world: &mut BosunWorld, cmdline: String) {
     let p = world.path();
     fs::write(p.join("fixture.json"), world.fixture().to_string()).unwrap();
-    let args: Vec<String> = cmdline
-        .split_whitespace()
+    let args: Vec<String> = words(&cmdline)
+        .into_iter()
         // a bare `.` means "this project directory".
-        .map(|a| {
-            if a == "." {
-                p.display().to_string()
-            } else {
-                a.to_string()
-            }
-        })
+        .map(|a| if a == "." { p.display().to_string() } else { a })
         .collect();
     let output = Command::new(env!("CARGO_BIN_EXE_bosun"))
         .env("BOSUN_FIXTURE", p.join("fixture.json"))
@@ -513,6 +516,29 @@ fn i_run(world: &mut BosunWorld, cmdline: String) {
     world.code = output.status.code().unwrap_or(-1);
     world.stdout = String::from_utf8_lossy(&output.stdout).to_string();
     world.stderr = String::from_utf8_lossy(&output.stderr).to_string();
+}
+
+/// `cmdline` split at spaces, with a double-quoted word kept whole and its
+/// quotes taken off, as a shell would.
+fn words(cmdline: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quoted = false;
+    for c in cmdline.chars() {
+        match c {
+            '"' => quoted = !quoted,
+            ' ' if !quoted => {
+                if !word.is_empty() {
+                    words.push(std::mem::take(&mut word));
+                }
+            }
+            c => word.push(c),
+        }
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    words
 }
 
 // ---- outcomes ---------------------------------------------------------------
@@ -627,6 +653,34 @@ fn assert_executable(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let mode = fs::metadata(path).unwrap().permissions().mode();
     assert_eq!(mode & 0o111, 0o111, "{} mode {mode:o}", path.display());
+}
+
+#[then("the manifest reads:")]
+fn manifest_reads(world: &mut BosunWorld, step: &Step) {
+    let p = world.path();
+    let got = fs::read_to_string(p.join("bosun.yaml")).unwrap();
+    assert_eq!(
+        got.trim_end(),
+        docstring(step).trim_end(),
+        "bosun.yaml:\n{got}"
+    );
+}
+
+#[then("the manifest is unchanged")]
+fn manifest_unchanged(world: &mut BosunWorld) {
+    let p = world.path();
+    let got = fs::read_to_string(p.join("bosun.yaml")).unwrap();
+    let want = world.manifest.clone().expect("a manifest was given");
+    assert_eq!(got, want, "bosun.yaml changed");
+}
+
+#[then(regex = r"^the lock does not mention (\S+)$")]
+fn lock_omits(world: &mut BosunWorld, pkg: String) {
+    let (text, doc) = world.lock();
+    assert!(
+        !lock_leaves(&doc).any(|(name, _)| name == pkg.as_str()),
+        "{pkg} in bosun.lock:\n{text}"
+    );
 }
 
 #[then("a lock is written")]

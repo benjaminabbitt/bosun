@@ -54,6 +54,30 @@ pub enum IoError {
         /// What could not be converted.
         detail: String,
     },
+    /// `bosun add` named a package the manifest already has.
+    #[error("{kind} {name:?}: {path}", kind = errmsg::DUPLICATE_ENTRY)]
+    DuplicateEntry {
+        /// The manifest.
+        path: PathBuf,
+        /// The package name.
+        name: String,
+    },
+    /// `bosun remove` named a package the manifest does not have.
+    #[error("{kind} {name:?}: {path}", kind = errmsg::NO_SUCH_ENTRY)]
+    NoSuchEntry {
+        /// The manifest.
+        path: PathBuf,
+        /// The package name.
+        name: String,
+    },
+    /// The manifest could not be edited in place.
+    #[error("{kind}: {path} ({detail})", kind = errmsg::EDIT)]
+    Edit {
+        /// The manifest.
+        path: PathBuf,
+        /// What went wrong.
+        detail: String,
+    },
     /// A lock/state leaf names a backend this build does not know, so its
     /// version scheme cannot be determined (§6).
     #[error("{kind}: {backend:?} in {path}", kind = errmsg::UNKNOWN_BACKEND)]

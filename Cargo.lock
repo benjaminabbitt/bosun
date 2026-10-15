@@ -20,12 +20,12 @@ dependencies = [
 [[package]]
 name = "annals-diagnostic"
 version = "0.1.0"
-source = "git+https://github.com/benjaminabbitt/annals.git?rev=3c5fbac3d7b29cef40b7aca0b363208a83a085a5#3c5fbac3d7b29cef40b7aca0b363208a83a085a5"
+source = "git+https://github.com/benjaminabbitt/annals.git?rev=4f92f43a375c879c7cb79e2dcc32285c47705f55#4f92f43a375c879c7cb79e2dcc32285c47705f55"
 
 [[package]]
 name = "annals-yaml"
 version = "0.1.0"
-source = "git+https://github.com/benjaminabbitt/annals.git?rev=3c5fbac3d7b29cef40b7aca0b363208a83a085a5#3c5fbac3d7b29cef40b7aca0b363208a83a085a5"
+source = "git+https://github.com/benjaminabbitt/annals.git?rev=4f92f43a375c879c7cb79e2dcc32285c47705f55#4f92f43a375c879c7cb79e2dcc32285c47705f55"
 dependencies = [
  "annals-diagnostic",
 ]

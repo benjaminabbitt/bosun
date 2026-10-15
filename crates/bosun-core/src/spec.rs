@@ -135,6 +135,61 @@ impl Spec {
     }
 }
 
+/// The spec `bosun add` writes when none is given, from the newest version
+/// (§4.2): any later version that shouldn't break it.
+///
+/// - SemVer: the caret range, `>=X.Y.Z|<(X+1).0.0`; below 1.0 the next minor
+///   (`0.9.1` → `<0.10.0`) and below 0.1 the next patch is the bound.
+///   Build metadata is dropped; a pre-release stays as the lower bound.
+/// - Debian: any revision of the same upstream version, `>=U|<U'~` where `U'`
+///   bumps the last number of `U`'s leading numeric part (`1.7.1-3` →
+///   `>=1.7.1|<1.7.2~`); an epoch is kept on both bounds.
+/// - Otherwise, or when the version has no numeric part to bump: the exact
+///   version.
+pub fn default_spec(latest: &Version) -> String {
+    let exact = latest.as_str().to_string();
+    match latest.scheme() {
+        Scheme::Semver => match semver::Version::parse(latest.as_str()) {
+            Ok(v) => {
+                let floor = if v.pre.is_empty() {
+                    format!("{}.{}.{}", v.major, v.minor, v.patch)
+                } else {
+                    format!("{}.{}.{}-{}", v.major, v.minor, v.patch, v.pre)
+                };
+                let ceiling = match (v.major, v.minor) {
+                    (0, 0) => format!("0.0.{}", v.patch + 1),
+                    (0, minor) => format!("0.{}.0", minor + 1),
+                    (major, _) => format!("{}.0.0", major + 1),
+                };
+                format!(">={floor}|<{ceiling}")
+            }
+            Err(_) => exact,
+        },
+        Scheme::Debian => debian_default(latest.as_str()).unwrap_or(exact),
+        Scheme::Generic => exact,
+    }
+}
+
+/// `>=U|<U'~` for a Debian version (see [`default_spec`]), or `None` when its
+/// upstream part does not start with a number.
+fn debian_default(raw: &str) -> Option<String> {
+    let (epoch, rest) = match raw.split_once(':') {
+        Some((e, r)) => (format!("{e}:"), r),
+        None => (String::new(), raw),
+    };
+    let upstream = rest.rsplit_once('-').map_or(rest, |(u, _)| u);
+    let numeric_len = upstream
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(upstream.len());
+    let numeric = upstream[..numeric_len].trim_end_matches('.');
+    let (head, last) = match numeric.rsplit_once('.') {
+        Some((h, l)) => (format!("{h}."), l),
+        None => (String::new(), numeric),
+    };
+    let bumped = last.parse::<u64>().ok()? + 1;
+    Some(format!(">={epoch}{upstream}|<{epoch}{head}{bumped}~"))
+}
+
 /// A manifest entry's resolvable intent: a logical name (§5.4) and its spec.
 /// Per-target backend/package selection is layered on in later slices.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -257,6 +312,72 @@ mod tests {
         ));
         // The full form stays valid.
         assert!(Spec::new(">=0.6.0", "semver").is_ok());
+    }
+
+    fn default_of(raw: &str, scheme: Scheme) -> String {
+        default_spec(&Version::parse(raw, scheme).unwrap())
+    }
+
+    #[test]
+    fn default_spec_for_semver_is_the_caret_range() {
+        assert_eq!(default_of("2.0.2", Scheme::Semver), ">=2.0.2|<3.0.0");
+        assert_eq!(default_of("10.5.0", Scheme::Semver), ">=10.5.0|<11.0.0");
+    }
+
+    #[test]
+    fn default_spec_below_one_keeps_the_minor() {
+        assert_eq!(default_of("0.9.1", Scheme::Semver), ">=0.9.1|<0.10.0");
+        assert_eq!(default_of("0.0.3", Scheme::Semver), ">=0.0.3|<0.0.4");
+    }
+
+    #[test]
+    fn default_spec_drops_build_metadata_but_keeps_a_prerelease() {
+        assert_eq!(
+            default_of("1.2.3+build.5", Scheme::Semver),
+            ">=1.2.3|<2.0.0"
+        );
+        assert_eq!(
+            default_of("1.2.3-rc.1", Scheme::Semver),
+            ">=1.2.3-rc.1|<2.0.0"
+        );
+    }
+
+    #[test]
+    fn default_spec_for_debian_is_any_revision_of_the_upstream_version() {
+        assert_eq!(default_of("1.7.1-3", Scheme::Debian), ">=1.7.1|<1.7.2~");
+        assert_eq!(
+            default_of("1.7.1-3+deb13u1", Scheme::Debian),
+            ">=1.7.1|<1.7.2~"
+        );
+        assert_eq!(default_of("1.40.0-1", Scheme::Debian), ">=1.40.0|<1.40.1~");
+        assert_eq!(default_of("1:2.3-4", Scheme::Debian), ">=1:2.3|<1:2.4~");
+        assert_eq!(
+            default_of("9.0.0~rc1-1", Scheme::Debian),
+            ">=9.0.0~rc1|<9.0.1~"
+        );
+        assert_eq!(default_of("2.3", Scheme::Debian), ">=2.3|<2.4~");
+    }
+
+    #[test]
+    fn default_spec_is_the_exact_version_when_no_range_fits() {
+        assert_eq!(default_of("beta-1", Scheme::Debian), "beta-1");
+        assert_eq!(default_of("2024.10.1", Scheme::Generic), "2024.10.1");
+    }
+
+    #[test]
+    fn default_spec_parses_back_and_holds_the_version() {
+        for (raw, scheme, ty) in [
+            ("2.0.2", Scheme::Semver, "semver"),
+            ("0.9.1", Scheme::Semver, "semver"),
+            ("1.2.3-rc.1", Scheme::Semver, "semver"),
+            ("1.7.1-3", Scheme::Debian, "deb"),
+            ("1:2.3-4", Scheme::Debian, "deb"),
+            ("beta-1", Scheme::Debian, "deb"),
+        ] {
+            let v = Version::parse(raw, scheme).unwrap();
+            let spec = Spec::new(default_spec(&v), ty).unwrap();
+            assert_eq!(spec.select(std::slice::from_ref(&v)).unwrap(), v, "{raw}");
+        }
     }
 
     #[test]

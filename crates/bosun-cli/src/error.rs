@@ -19,6 +19,8 @@ pub enum CliError {
     Resolve(String),
     /// The host environment could not be assembled (fixture/state/registry).
     Environment(String),
+    /// The command line asks for something that can't be done as written.
+    Usage(String),
 }
 
 impl std::fmt::Display for CliError {
@@ -28,7 +30,7 @@ impl std::fmt::Display for CliError {
             CliError::Io { path, detail } => write!(f, "{}: {detail}", path.display()),
             CliError::Parse { what, detail } => write!(f, "{what}: {detail}"),
             CliError::Resolve(d) => write!(f, "resolve failed: {d}"),
-            CliError::Environment(d) => write!(f, "{d}"),
+            CliError::Environment(d) | CliError::Usage(d) => write!(f, "{d}"),
         }
     }
 }
@@ -43,6 +45,7 @@ impl Diagnostic for CliError {
             CliError::Parse { .. } => "bosun.cli.parse",
             CliError::Resolve(_) => "bosun.cli.resolve",
             CliError::Environment(_) => "bosun.cli.environment",
+            CliError::Usage(_) => "bosun.cli.usage",
         }
     }
 
@@ -61,7 +64,9 @@ impl Diagnostic for CliError {
                     ("detail", detail.clone().into()),
                 ]
             }
-            CliError::Resolve(d) | CliError::Environment(d) => vec![("detail", d.clone().into())],
+            CliError::Resolve(d) | CliError::Environment(d) | CliError::Usage(d) => {
+                vec![("detail", d.clone().into())]
+            }
         }
     }
 }
@@ -84,6 +89,7 @@ mod tests {
             },
             CliError::Resolve("unsatisfiable".to_string()),
             CliError::Environment("no fixture".to_string()),
+            CliError::Usage("--ext needs a backend".to_string()),
         ];
         for case in &cases {
             assert!(!case.to_string().is_empty(), "{case:?}");

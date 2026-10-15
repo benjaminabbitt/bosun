@@ -23,6 +23,6 @@ pub use record::{
     LockDocument, LockLeaf, LockPackage, Package, Placement, StateDocument, StateLeaf,
     StatePackage, TargetLock,
 };
-pub use spec::{Entry, SelectError, Spec, SpecError};
+pub use spec::{default_spec, Entry, SelectError, Spec, SpecError};
 pub use vers::{VersConstraint, VersError, VersOp, VersRange};
 pub use version::{Scheme, Segment, Version, VersionError};
