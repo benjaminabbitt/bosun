@@ -15,8 +15,9 @@ use bosun_ports::{
     ArchiveFormat, Command, CommandRunner, HttpFetcher, HttpRequest, PortError, Step,
 };
 use sha2::{Digest, Sha256};
+use tracing::warn;
 
-use crate::errmsg;
+use crate::{errmsg, logmsg};
 
 /// Runs step lists on the local host.
 pub struct StepExecutor<'a> {
@@ -44,6 +45,7 @@ impl<'a> StepExecutor<'a> {
                 argv,
                 env,
                 scope: _,
+                ok_exits,
             } => {
                 let (program, args) = argv.split_first().ok_or_else(|| PortError::Backend {
                     detail: "empty argv".to_string(),
@@ -54,7 +56,16 @@ impl<'a> StepExecutor<'a> {
                     env: env.clone(),
                 };
                 let out = self.runner.run(&command)?;
+                let ok_exit = ok_exits.iter().find(|e| out.code == Some(e.code));
                 if out.success() {
+                    Ok(())
+                } else if let Some(e) = ok_exit {
+                    warn!(
+                        message = logmsg::OK_EXIT,
+                        program = %program,
+                        code = e.code,
+                        meaning = e.meaning
+                    );
                     Ok(())
                 } else {
                     Err(PortError::CommandFailed {
@@ -370,7 +381,7 @@ mod tests {
     use super::*;
     use bosun_core::Scope;
     use bosun_ports::testing::{FakeCommandRunner, FakeHttpFetcher};
-    use bosun_ports::{ArchiveFormat, HttpResponse, Output};
+    use bosun_ports::{ArchiveFormat, HttpResponse, OkExit, Output};
     use flate2::write::GzEncoder;
     use flate2::Compression;
 
@@ -402,6 +413,7 @@ mod tests {
             ],
             env: vec![("DEBIAN_FRONTEND".into(), "noninteractive".into())],
             scope: Scope::System,
+            ok_exits: Vec::new(),
         }];
         exec_with(&runner, &fetcher, &steps).unwrap();
         let calls = runner.calls();
@@ -426,11 +438,57 @@ mod tests {
             argv: vec!["apt-get".into()],
             env: vec![],
             scope: Scope::System,
+            ok_exits: Vec::new(),
         }];
         assert!(matches!(
             exec_with(&runner, &fetcher, &steps),
             Err(PortError::CommandFailed {
                 code: Some(100),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn run_an_exit_the_step_says_is_success_succeeds() {
+        // msiexec's 3010: installed, a reboot finishes it.
+        let runner = FakeCommandRunner::new().with_output(Output {
+            code: Some(3010),
+            stdout: vec![],
+            stderr: vec![],
+        });
+        let steps = vec![Step::Run {
+            argv: vec!["msiexec".into()],
+            env: vec![],
+            scope: Scope::System,
+            ok_exits: vec![OkExit {
+                code: 3010,
+                meaning: "a reboot is needed to finish",
+            }],
+        }];
+        assert!(exec_with(&runner, &FakeHttpFetcher::new(), &steps).is_ok());
+    }
+
+    #[test]
+    fn run_another_nonzero_exit_still_fails_when_some_are_success() {
+        let runner = FakeCommandRunner::new().with_output(Output {
+            code: Some(1603),
+            stdout: vec![],
+            stderr: vec![],
+        });
+        let steps = vec![Step::Run {
+            argv: vec!["msiexec".into()],
+            env: vec![],
+            scope: Scope::System,
+            ok_exits: vec![OkExit {
+                code: 3010,
+                meaning: "a reboot is needed to finish",
+            }],
+        }];
+        assert!(matches!(
+            exec_with(&runner, &FakeHttpFetcher::new(), &steps),
+            Err(PortError::CommandFailed {
+                code: Some(1603),
                 ..
             })
         ));
@@ -704,6 +762,7 @@ mod tests {
                 argv: vec!["apt-get".into(), "update".into()],
                 env: vec![],
                 scope: Scope::System,
+                ok_exits: Vec::new(),
             }])
             .unwrap();
         assert_eq!(runner.calls().len(), 1);

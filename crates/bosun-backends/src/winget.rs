@@ -114,6 +114,7 @@ fn step(parts: &[&str]) -> Step {
         argv,
         env: vec![],
         scope: Scope::User,
+        ok_exits: Vec::new(),
     }
 }
 
@@ -299,6 +300,7 @@ mod tests {
             argv,
             env: vec![],
             scope: Scope::User,
+            ok_exits: Vec::new(),
         }
     }
 

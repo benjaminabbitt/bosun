@@ -2,7 +2,8 @@
 //! a project attaches to its GitHub release. The release is found the
 //! github-release way ([`ReleaseLookup`]); the asset template is required.
 //!
-//! - `.msi`: `msiexec /i <file> /qn /norestart`.
+//! - `.msi`: `msiexec /i <file> /qn /norestart`; exit 3010 (done, reboot to
+//!   finish) counts as success and is reported.
 //! - `.exe`: the file itself with the manifest's `silent_args`. Installer
 //!   frameworks disagree on silent flags (NSIS `/S`, Inno Setup
 //!   `/VERYSILENT /SUPPRESSMSGBOXES`, …), so bosun never guesses: an `.exe`
@@ -29,7 +30,7 @@ use bosun_core::{
 };
 use bosun_ports::{
     Backend, BackendFactory, BackendMeta, Command, CommandRunner, HostInfo, HttpFetcher, Index,
-    Installer, PortError, Probe, Step, Steps,
+    Installer, OkExit, PortError, Probe, Step, Steps,
 };
 
 use crate::errmsg;
@@ -210,6 +211,24 @@ fn run(argv: Vec<String>) -> Step {
         argv,
         env: vec![],
         scope: Scope::System,
+        ok_exits: Vec::new(),
+    }
+}
+
+/// msiexec's ERROR_SUCCESS_REBOOT_REQUIRED: the install or uninstall worked,
+/// and Windows finishes it at the next reboot (`/norestart` never reboots).
+const MSI_REBOOT_REQUIRED: OkExit = OkExit {
+    code: 3010,
+    meaning: "done; Windows needs a reboot to finish",
+};
+
+/// An msiexec step, which counts [`MSI_REBOOT_REQUIRED`] as success.
+fn msiexec(argv: Vec<String>) -> Step {
+    Step::Run {
+        argv,
+        env: vec![],
+        scope: Scope::System,
+        ok_exits: vec![MSI_REBOOT_REQUIRED],
     }
 }
 
@@ -314,17 +333,17 @@ impl Installer for GithubInstallerBackend {
             .join(&file.name);
         let path = dest.display().to_string();
         let install = if file.name.to_ascii_lowercase().ends_with(".msi") {
-            vec![
+            msiexec(vec![
                 "msiexec".to_string(),
                 "/i".to_string(),
                 path,
                 "/qn".to_string(),
                 "/norestart".to_string(),
-            ]
+            ])
         } else {
             let mut argv = vec![path];
             argv.extend(words(&Self::need(pkg, "silent_args")?));
-            argv
+            run(argv)
         };
         Ok(vec![
             Step::Fetch {
@@ -332,7 +351,7 @@ impl Installer for GithubInstallerBackend {
                 sha256: file.sha256,
                 dest,
             },
-            run(install),
+            install,
         ])
     }
 
@@ -366,7 +385,7 @@ impl Installer for GithubInstallerBackend {
             ),
         })?;
         if entry.msi || (entry.key.starts_with('{') && entry.key.ends_with('}')) {
-            return Ok(vec![run(vec![
+            return Ok(vec![msiexec(vec![
                 "msiexec".to_string(),
                 "/x".to_string(),
                 entry.key,
@@ -399,7 +418,7 @@ mod tests {
 
     use super::*;
     use bosun_ports::testing::{FakeCommandRunner, FakeHttpFetcher};
-    use bosun_ports::Output;
+    use bosun_ports::{OkExit, Output};
 
     const TAG_URL: &str = "https://api.github.com/repos/o/app/releases/tags/v2.0.0";
     const RELEASE: &str = r#"{"tag_name":"v2.0.0","assets":[
@@ -480,6 +499,20 @@ HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Nsis
             argv: strs(argv),
             env: vec![],
             scope: Scope::System,
+            ok_exits: Vec::new(),
+        }
+    }
+
+    /// An msiexec step: 3010 (installed, reboot to finish) is success too.
+    fn msiexec(argv: &[&str]) -> Step {
+        Step::Run {
+            argv: strs(argv),
+            env: vec![],
+            scope: Scope::System,
+            ok_exits: vec![OkExit {
+                code: 3010,
+                meaning: "done; Windows needs a reboot to finish",
+            }],
         }
     }
 
@@ -503,7 +536,7 @@ HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Nsis
                     sha256: None,
                     dest: path.clone(),
                 },
-                system(&[
+                msiexec(&[
                     "msiexec",
                     "/i",
                     &path.display().to_string(),
@@ -627,7 +660,7 @@ HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Nsis
             .unwrap();
         assert_eq!(
             steps,
-            vec![system(&[
+            vec![msiexec(&[
                 "msiexec",
                 "/x",
                 "{0D2C5D3B-1111-2222-3333-444455556666}",
@@ -646,7 +679,7 @@ HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Nsis
             backend(registry(guid_only))
                 .uninstall(&pkg(&[("display_name", "G")]))
                 .unwrap(),
-            vec![system(&[
+            vec![msiexec(&[
                 "msiexec",
                 "/x",
                 "{AAAA-BBBB}",
@@ -659,7 +692,7 @@ HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Nsis
             backend(registry(flagged))
                 .uninstall(&pkg(&[("display_name", "F")]))
                 .unwrap(),
-            vec![system(&["msiexec", "/x", "Named", "/qn", "/norestart"])]
+            vec![msiexec(&["msiexec", "/x", "Named", "/qn", "/norestart"])]
         );
         // A key that only starts with a brace is not a product code.
         let half = "HKEY_LOCAL_MACHINE\\X\\{half\n    DisplayName    REG_SZ    H\n    UninstallString    REG_SZ    u.exe\n";

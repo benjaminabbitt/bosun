@@ -20,6 +20,16 @@ pub trait StepRunner {
     fn execute(&self, steps: &[Step]) -> Result<(), PortError>;
 }
 
+/// An exit code besides 0 that a command uses to mean it succeeded, and what
+/// it says beyond that, which the executor reports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OkExit {
+    /// The exit code.
+    pub code: i32,
+    /// What it means, said to the user when it happens.
+    pub meaning: &'static str,
+}
+
 /// One mutation step.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Step {
@@ -32,6 +42,11 @@ pub enum Step {
         env: Vec<(String, String)>,
         /// The install scope this runs under.
         scope: Scope,
+        /// Exit codes besides 0 that this command uses for success, each with
+        /// what else it says (msiexec's 3010: installed, reboot to finish).
+        /// Usually empty. A container renderer must accept these too, e.g.
+        /// `RUN cmd || [ $? -eq 3010 ]`.
+        ok_exits: Vec<OkExit>,
     },
     /// Download `url` to `dest`, verifying its sha256 when one is known.
     /// Host: bosun fetches and checks. Container: `ADD --checksum=sha256:…

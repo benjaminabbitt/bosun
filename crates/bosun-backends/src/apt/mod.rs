@@ -168,11 +168,13 @@ impl Installer for AptBackend {
                 argv: argv(&["add-apt-repository", "-y", source.id.as_str()]),
                 env: noninteractive(),
                 scope: Scope::System,
+                ok_exits: Vec::new(),
             },
             Step::Run {
                 argv: argv(&["apt-get", "update"]),
                 env: noninteractive(),
                 scope: Scope::System,
+                ok_exits: Vec::new(),
             },
         ])
     }
@@ -188,6 +190,7 @@ impl Installer for AptBackend {
             ]),
             env: noninteractive(),
             scope: Scope::System,
+            ok_exits: Vec::new(),
         }])
     }
 
@@ -218,6 +221,7 @@ impl Installer for AptBackend {
             argv: argv(&["apt-mark", "hold", &pkg.purl.native_id()]),
             env: noninteractive(),
             scope: Scope::System,
+            ok_exits: Vec::new(),
         }])
     }
 
@@ -232,6 +236,7 @@ impl Installer for AptBackend {
             ]),
             env: noninteractive(),
             scope: Scope::System,
+            ok_exits: Vec::new(),
         }])
     }
 
@@ -244,11 +249,13 @@ impl Installer for AptBackend {
                 argv: argv(&["apt-mark", "unhold", &id]),
                 env: noninteractive(),
                 scope: Scope::System,
+                ok_exits: Vec::new(),
             },
             Step::Run {
                 argv: argv(&["apt-get", "remove", "-y", &id]),
                 env: noninteractive(),
                 scope: Scope::System,
+                ok_exits: Vec::new(),
             },
         ])
     }
@@ -284,6 +291,7 @@ mod tests {
             argv: argv.iter().map(|s| s.to_string()).collect(),
             env: vec![("DEBIAN_FRONTEND".to_string(), "noninteractive".to_string())],
             scope: Scope::System,
+            ok_exits: Vec::new(),
         }
     }
 

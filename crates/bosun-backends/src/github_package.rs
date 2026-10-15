@@ -205,6 +205,7 @@ impl GithubPackageBackend {
             argv: argv(parts),
             env: env_for(self.kind),
             scope: Scope::System,
+            ok_exits: Vec::new(),
         }
     }
 
@@ -378,6 +379,7 @@ mod tests {
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
             scope: Scope::System,
+            ok_exits: Vec::new(),
         }
     }
 

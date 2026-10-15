@@ -469,7 +469,7 @@ commands too.
 
 | step | host executor | container renderer |
 |---|---|---|
-| `Run { argv, env, scope }` | `CommandRunner` (privilege per scope, §5.5) | `RUN` with shell-quoted argv |
+| `Run { argv, env, scope, ok_exits }` | `CommandRunner` (privilege per scope, §5.5); an exit listed in `ok_exits` (msiexec's 3010, "done, reboot to finish") is success and is reported | `RUN` with shell-quoted argv, accepting the `ok_exits` codes (`… \|\| [ $? -eq 3010 ]`) |
 | `Fetch { url, sha256?, dest }` | bosun downloads and verifies the checksum when there is one | `ADD [--checksum=sha256:…] <url> <dest>` |
 | `Extract { format, archive, member, dest, mode }` | by `format` (read from the asset name): from a tar (plain, gz, xz, zstd, bzip2) or zip, the one file named `member` at any depth; a single compressed file, decompressed; a raw binary, copied | `RUN tar …` / `unzip …` / a decompressor / `COPY` |
 
@@ -1278,7 +1278,7 @@ scenario in the real-backend tier (skipped for compile time).
 | M2-6 | the lock is the machine's own: version 2, one per manifest in the user state dir (`locks/<sha256 of path>.json`), records its manifest and hash; no cross-target merge; `install --frozen` refuses a missing or stale lock; an older `bosun.lock` beside the manifest is warned about and not read; the repo's committed `bosun.lock` deleted | landed |
 | M3-1 | WindowsMachine (Administrator = High/System integrity label in `whoami /groups`; state `%ProgramData%` / `%LOCALAPPDATA%`, config `%APPDATA%`); github-release on Windows (`<binary>.exe` into `%USERPROFILE%\.local\bin`, `;`-separated case-insensitive PATH check); `Step::Remove` replaces `rm -f`; `just check-win` (zig cc as MinGW) | landed hermetically; workspace type-checks for x86_64-pc-windows-gnu; **unverified on a real Windows host** |
 | M3-2 | winget (user), scoop (user), choco (system) backends; probe only on Windows | landed hermetically (argv and output parsing unit-tested, fixture scenarios); **unverified on a real Windows host** |
-| M3-3 | github-installer: a release's `.msi` (`msiexec /i … /qn /norestart`) or `.exe` (manifest `silent_args`, required); found in the Uninstall registry keys (`reg query`, three views) by `display_name` (`*` suffix = prefix); uninstall `msiexec /x {ProductCode}` or the entry's quiet/plain uninstaller; system scope, no hold, no downgrade | landed (unit tests); **unverified on a real Windows host**; no fixture scenario (the seam has no registry) |
+| M3-3 | github-installer: a release's `.msi` (`msiexec /i … /qn /norestart`) or `.exe` (manifest `silent_args`, required); found in the Uninstall registry keys (`reg query`, three views) by `display_name` (`*` suffix = prefix); uninstall `msiexec /x {ProductCode}` or the entry's quiet/plain uninstaller; msiexec's 3010 (reboot required) is success, reported; system scope, no hold, no downgrade | landed (unit tests); **unverified on a real Windows host**; no fixture scenario (the seam has no registry) |
 
 **First real-host smoke run (2026-10-14, release build, Debian 13, read-only `--plan` and
 `lock` in a scratch dir).** `backends` found apt 3.0.3, cargo 1.96.1 and github-release; jq

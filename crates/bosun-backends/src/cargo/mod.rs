@@ -184,6 +184,7 @@ impl Installer for CargoBackend {
             argv: argv(&["cargo", "install", "--locked", &at(pkg, version)]),
             env: vec![],
             scope: Scope::User,
+            ok_exits: Vec::new(),
         }])
     }
 
@@ -230,6 +231,7 @@ impl Installer for CargoBackend {
             argv: argv(&["cargo", "uninstall", &pkg.purl.native_id()]),
             env: vec![],
             scope: Scope::User,
+            ok_exits: Vec::new(),
         }])
     }
 }
@@ -262,6 +264,7 @@ mod tests {
             argv: argv.iter().map(|s| s.to_string()).collect(),
             env: vec![],
             scope: Scope::User,
+            ok_exits: Vec::new(),
         }
     }
 

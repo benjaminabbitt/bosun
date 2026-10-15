@@ -92,7 +92,9 @@ fn claim_view(c: &Claim) -> ClaimView<'_> {
 
 fn step_view(step: &Step) -> StepView<'_> {
     match step {
-        Step::Run { argv, env, scope } => StepView::Run {
+        Step::Run {
+            argv, env, scope, ..
+        } => StepView::Run {
             argv,
             env: env.iter().map(|(k, v)| [k.as_str(), v.as_str()]).collect(),
             scope: scope_label(*scope),

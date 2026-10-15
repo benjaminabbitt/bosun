@@ -205,6 +205,7 @@ impl FixtureInstaller {
             argv,
             env: Vec::new(),
             scope: self.scope,
+            ok_exits: Vec::new(),
         }]
     }
 }
