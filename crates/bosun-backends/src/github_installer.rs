@@ -646,7 +646,13 @@ HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Nsis
             backend(registry(guid_only))
                 .uninstall(&pkg(&[("display_name", "G")]))
                 .unwrap(),
-            vec![system(&["msiexec", "/x", "{AAAA-BBBB}", "/qn", "/norestart"])]
+            vec![system(&[
+                "msiexec",
+                "/x",
+                "{AAAA-BBBB}",
+                "/qn",
+                "/norestart"
+            ])]
         );
         let flagged = "HKEY_LOCAL_MACHINE\\X\\Named\n    DisplayName    REG_SZ    F\n    WindowsInstaller    REG_DWORD    0x1\n";
         assert_eq!(
