@@ -1169,7 +1169,9 @@ remote indexes. Traits stay ready; nothing is stubbed.
   `{{ binary }}_{{ version }}_{{ os }}_{{ arch }}.tar.gz`, matched exactly. A bad template is
   an error at resolve, through `Index::checksum`. The binary is located in the archive by file
   name at any depth (exactly one match). A published checksum is verified; none published means
-  install, warn and record none.
+  install, warn and record none. An optional `tag` qualifier (`ext.github-release.tag`) is a
+  literal tag pattern with one `{{ version }}` (`jq-{{ version }}`): release lookup uses it
+  instead of `v<version>`/`<version>`, and version listing keeps only tags that fit it.
 - Resolve takes a narrow `Host { os, arch, distro }` and `ResolvableBackend { id, purl_type,
   vers_type, platform_independent, index }` values built by the CLI from the registry, and
   the manifest hash passed in, so bosun-resolve depends on neither bosun-host nor bosun-io.

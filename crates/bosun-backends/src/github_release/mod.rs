@@ -35,6 +35,7 @@ use tracing::warn;
 use crate::{errmsg, logmsg};
 
 mod checksum;
+mod tag;
 mod template;
 
 const BACKEND: &str = "github-release";
@@ -72,7 +73,7 @@ impl BackendFactory for GithubReleaseFactory {
             purl_type: "github",
             vers_type: "semver",
             platform_independent: false,
-            ext_keys: &["asset"],
+            ext_keys: &["asset", "tag"],
         }
     }
 
@@ -180,6 +181,15 @@ fn version_from_tag(tag: &str) -> Option<Version> {
     Version::parse(tag.strip_prefix('v').unwrap_or(tag), Scheme::Semver).ok()
 }
 
+/// The package's tag pattern, from its `tag` qualifier; `None` without one.
+fn tag_pattern(pkg: &Ref) -> Result<Option<tag::TagPattern>, PortError> {
+    pkg.purl
+        .qualifiers()
+        .get("tag")
+        .map(|t| tag::TagPattern::parse(t).map_err(|detail| PortError::Backend { detail }))
+        .transpose()
+}
+
 impl GithubReleaseBackend {
     /// The binary name: the purl's `binary` qualifier, else the purl's name
     /// (the repo segment). The shared ctxloom repo would set `binary` to keep
@@ -284,7 +294,7 @@ impl GithubReleaseBackend {
     ) -> Result<(String, String, ArchiveFormat, Option<String>), PortError> {
         let repo = pkg.purl.native_id();
         let binary = Self::binary_of(pkg);
-        let release = self.fetch_release(&repo, version)?;
+        let release = self.fetch_release(&repo, version, tag_pattern(pkg)?.as_ref())?;
         let expected = self.expected_asset(pkg, &binary, version, &release.tag_name)?;
         let format = ArchiveFormat::of(&expected).ok_or_else(|| PortError::Backend {
             detail: format!("{repo}: {expected:?} is {}", errmsg::NOT_A_BINARY),
@@ -299,12 +309,22 @@ impl GithubReleaseBackend {
         ))
     }
 
-    fn fetch_release(&self, repo: &str, version: &Version) -> Result<Release, PortError> {
-        // Try a `v`-prefixed tag first, then the bare version.
-        for tag in [
-            format!("v{}", version.as_str()),
-            version.as_str().to_string(),
-        ] {
+    /// The release for `version`: tagged as `pattern` says, else `v<version>`
+    /// or `<version>`.
+    fn fetch_release(
+        &self,
+        repo: &str,
+        version: &Version,
+        pattern: Option<&tag::TagPattern>,
+    ) -> Result<Release, PortError> {
+        let tags = match pattern {
+            Some(p) => vec![p.tag_for(version.as_str())],
+            None => vec![
+                format!("v{}", version.as_str()),
+                version.as_str().to_string(),
+            ],
+        };
+        for tag in &tags {
             let url = format!("https://api.github.com/repos/{repo}/releases/tags/{tag}");
             let resp = self
                 .fetcher
@@ -318,7 +338,7 @@ impl GithubReleaseBackend {
             });
         }
         Err(PortError::Backend {
-            detail: format!("no release tagged v{0} or {0} in {repo}", version.as_str()),
+            detail: format!("no release tagged {} in {repo}", tags.join(" or ")),
         })
     }
 }
@@ -330,6 +350,13 @@ impl Index for GithubReleaseBackend {
 
     fn query_available(&self, pkg: &Ref, _target: &Target) -> Result<Vec<Version>, PortError> {
         let repo = pkg.purl.native_id();
+        let pattern = tag_pattern(pkg)?;
+        let version_of = |tag: &str| match &pattern {
+            Some(p) => p
+                .version_in(tag)
+                .and_then(|v| Version::parse(v, Scheme::Semver).ok()),
+            None => version_from_tag(tag),
+        };
         let mut versions = Vec::new();
         for page in 1.. {
             let url =
@@ -343,11 +370,7 @@ impl Index for GithubReleaseBackend {
                     detail: format!("{url}: {e}"),
                 })?;
             let count = releases.len();
-            versions.extend(
-                releases
-                    .iter()
-                    .filter_map(|r| version_from_tag(&r.tag_name)),
-            );
+            versions.extend(releases.iter().filter_map(|r| version_of(&r.tag_name)));
             if count < 100 {
                 break; // last page
             }
@@ -593,6 +616,88 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, PortError::Backend { detail }
             if detail.contains(crate::errmsg::ASSET_NOT_YET)));
+    }
+
+    fn with_qualifiers(base: &str, pairs: &[(&str, &str)]) -> Ref {
+        let p: bosun_core::Purl = base.parse().unwrap();
+        let mut q = p.qualifiers().clone();
+        for (k, v) in pairs {
+            q.insert(k.to_string(), v.to_string());
+        }
+        Ref::new(
+            bosun_core::Purl::from_components(p.ty(), p.namespace(), p.name(), None, q, None)
+                .unwrap(),
+        )
+    }
+
+    const KUSTOMIZE_RELEASES: &str = r#"[
+        {"tag_name":"kyaml/v0.21.3","assets":[]},
+        {"tag_name":"kustomize/v5.8.3","assets":[]},
+        {"tag_name":"api/v0.21.3","assets":[]},
+        {"tag_name":"kustomize/v5.8.0","assets":[]},
+        {"tag_name":"kustomize/vnext","assets":[]}]"#;
+
+    #[test]
+    fn a_tag_template_lists_only_the_tags_that_fit_it() {
+        let list =
+            "https://api.github.com/repos/kubernetes-sigs/kustomize/releases?per_page=100&page=1";
+        let fetcher = Arc::new(FakeHttpFetcher::new().with_body(list, KUSTOMIZE_RELEASES));
+        let pkg = with_qualifiers(
+            "pkg:github/kubernetes-sigs/kustomize",
+            &[("tag", "kustomize/v{{ version }}")],
+        );
+        let mut versions: Vec<String> = backend(fetcher, PathBuf::from("/b"))
+            .query_available(&pkg, &"linux/amd64".parse().unwrap())
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().to_string())
+            .collect();
+        versions.sort();
+        assert_eq!(versions, vec!["5.8.0", "5.8.3"]);
+    }
+
+    #[test]
+    fn without_a_tag_template_a_prefixed_tag_is_not_a_version() {
+        let list = "https://api.github.com/repos/jqlang/jq/releases?per_page=100&page=1";
+        let fetcher = Arc::new(
+            FakeHttpFetcher::new().with_body(list, r#"[{"tag_name":"jq-1.8.2","assets":[]}]"#),
+        );
+        let versions = backend(fetcher, PathBuf::from("/b"))
+            .query_available(&gh("pkg:github/jqlang/jq"), &"linux/amd64".parse().unwrap())
+            .unwrap();
+        assert!(versions.is_empty());
+    }
+
+    #[test]
+    fn install_finds_the_release_by_its_tag_template() {
+        let tag_url = "https://api.github.com/repos/jqlang/jq/releases/tags/jq-1.8.2";
+        let release = r#"{"tag_name":"jq-1.8.2","assets":[
+            {"name":"jq-linux-amd64","browser_download_url":"https://x/jq-linux-amd64"}]}"#;
+        let fetcher = Arc::new(FakeHttpFetcher::new().with_body(tag_url, release));
+        let pkg = with_qualifiers(
+            "pkg:github/jqlang/jq",
+            &[
+                ("tag", "jq-{{ version }}"),
+                ("asset", "jq-{{ os }}-{{ arch }}"),
+            ],
+        );
+        let steps = backend(fetcher, PathBuf::from("/b"))
+            .install_exact(&pkg, &sem("1.8.2"))
+            .unwrap();
+        assert!(
+            matches!(&steps[0], Step::Fetch { url, .. } if url == "https://x/jq-linux-amd64"),
+            "{steps:?}"
+        );
+    }
+
+    #[test]
+    fn a_bad_tag_template_is_an_error_naming_it() {
+        let pkg = with_qualifiers("pkg:github/jqlang/jq", &[("tag", "jq-1.8.2")]);
+        let err = backend(Arc::new(FakeHttpFetcher::new()), PathBuf::from("/b"))
+            .query_available(&pkg, &"linux/amd64".parse().unwrap())
+            .unwrap_err();
+        assert!(matches!(err, PortError::Backend { detail }
+            if detail.contains(crate::errmsg::TAG_TEMPLATE) && detail.contains("jq-1.8.2")));
     }
 
     #[test]

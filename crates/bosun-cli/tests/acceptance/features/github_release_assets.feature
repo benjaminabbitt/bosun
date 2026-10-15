@@ -128,7 +128,7 @@ Feature: github-release names the archive by template and finds the binary insid
       """
     When I run `bosun lock .`
     Then it fails
-    And it reports "unknown key \"aset\" in ext.github-release (allowed: asset)"
+    And it reports "unknown key \"aset\" in ext.github-release (allowed: asset, tag)"
 
   Scenario: asset written outside ext is an unknown key
     Given the manifest:

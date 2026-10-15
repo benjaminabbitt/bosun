@@ -20,3 +20,6 @@ pub const ASSET_BRACE: &str =
 /// The asset a template names is not a binary bosun can install (a package,
 /// signature or checksum file).
 pub const NOT_A_BINARY: &str = "not a binary bosun can install";
+
+/// A github-release `tag` template is not a literal tag with one `{{ version }}`.
+pub const TAG_TEMPLATE: &str = "invalid tag template";

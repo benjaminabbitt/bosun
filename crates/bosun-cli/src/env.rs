@@ -607,7 +607,10 @@ mod tests {
             Arch::Amd64,
         );
         let keys = factory_ext_keys(&factories);
-        assert_eq!(keys.get("github-release"), Some(&vec!["asset".to_string()]));
+        assert_eq!(
+            keys.get("github-release"),
+            Some(&vec!["asset".to_string(), "tag".to_string()])
+        );
         assert_eq!(keys.get("apt"), Some(&vec![]));
         assert_eq!(keys.get("cargo"), Some(&vec![]));
     }
@@ -624,7 +627,7 @@ mod tests {
         );
         assert_eq!(
             env.ext_keys().get("github-release"),
-            Some(&vec!["asset".to_string()])
+            Some(&vec!["asset".to_string(), "tag".to_string()])
         );
         assert_eq!(env.ext_keys().get("brew"), Some(&vec![]));
     }

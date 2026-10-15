@@ -406,7 +406,7 @@ fn release_archive(asset: &str, binary: &str, dir: Option<&str>) -> Vec<u8> {
 }
 
 #[given(
-    regex = r"^(\S+/\S+) (v\S+) publishes (\S+\.(?:tar(?:\.\w+)?|zip)) with (\S+) (?:at its root|in (\S+)/)$"
+    regex = r"^(\S+/\S+) (\S+) publishes (\S+\.(?:tar(?:\.\w+)?|zip)) with (\S+) (?:at its root|in (\S+)/)$"
 )]
 fn release_publishes(
     world: &mut BosunWorld,
@@ -423,7 +423,7 @@ fn release_publishes(
 
 /// A release asset that is the binary itself, or the binary alone compressed
 /// (`restic_0.18.1_linux_amd64.bz2`).
-#[given(regex = r"^(\S+/\S+) (v\S+) publishes (\S+) holding just the binary$")]
+#[given(regex = r"^(\S+/\S+) (\S+) publishes (\S+) holding just the binary$")]
 fn release_publishes_binary(world: &mut BosunWorld, repo: String, tag: String, asset: String) {
     let suffix = asset.rsplit_once('.').map_or("", |(_, s)| s).to_string();
     let body = compressed(&suffix, &binary_bytes(&asset));

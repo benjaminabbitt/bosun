@@ -102,6 +102,25 @@ so writing `musl` into the template is usually right anyway.
 | trivy         | `trivy_0.67.2_Linux-64bit.tar.gz`                    | `{{ binary }}_{{ version }}_{{ os \| title }}-{% if arch == "amd64" %}64bit{% else %}{{ arch \| upper }}{% endif %}.tar.gz` |
 
 ripgrep's binary is `rg`, so the template spells the archive's `ripgrep` literally.
+## Release tags
+
+bosun looks a version's release up by its tag: `v<version>`, then `<version>`. A project that
+tags differently sets `tag`, the tag with `{{ version }}` where the version goes:
+
+```yaml
+ext:
+  github-release:
+    tag: "jq-{{ version }}"            # jq-1.8.2
+    asset: "jq-{{ os }}-{{ arch }}"
+```
+
+`bun-v{{ version }}` and `kustomize/v{{ version }}` work the same way. Only tags that fit the
+pattern are versions, so in a repository that releases several tools (kustomize also tags
+`kyaml/…` and `api/…`) bosun lists just the one named. The rest of the pattern is literal:
+`{{ version }}` must appear exactly once, and nothing else may be a placeholder. In the asset
+template, `{{ tag }}` is the whole tag (`kustomize/v5.8.3`); `{{ tag | replace('kustomize/', '') }}`
+gives `v5.8.3`.
+
 ## Formats
 
 bosun reads how the asset is packed from its name:
