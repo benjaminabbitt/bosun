@@ -38,7 +38,7 @@ fn main() {
 /// Run the selected command, render its value, and return the exit code.
 fn dispatch(cli: &Cli, format: Format) -> Result<i32, CliError> {
     let env = env::assemble()?;
-    let pref = commands::preference(&cli.installer);
+    let pref = commands::preference(&env, &cli.installer)?;
     let mut out = std::io::stdout().lock();
     match &cli.command {
         Command::Add {

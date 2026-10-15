@@ -1,4 +1,4 @@
-//! The M1 read/resolve commands (§4.2): `backends`, `status`, `lock [--check]`.
+//! The M1 read/resolve commands (§4.2): `backends`, `status`, `lock`.
 //! Each returns one typed value; the mutating commands are slice 10-2.
 
 use std::fs;
@@ -15,30 +15,84 @@ use crate::env::Env;
 use crate::error::CliError;
 use crate::output::Render;
 
-/// The installer preference order (§5.3): command-line flag, then
-/// `BOSUN_INSTALLER`, then user config; the manifest's own order is applied
-/// per entry inside the resolver.
-pub fn preference(flag: &[String]) -> Vec<BackendId> {
-    let mut order: Vec<String> = Vec::new();
-    let mut add = |items: Vec<String>| {
-        for item in items {
-            if !item.is_empty() && !order.contains(&item) {
-                order.push(item);
-            }
-        }
+/// The installer preference order (§5.3) for this machine: the command-line
+/// flag, `BOSUN_INSTALLER`, the user config, then the built-in order. The
+/// manifest says only which backends are acceptable, never in what order.
+pub fn preference(env: &Env, flag: &[String]) -> Result<Vec<BackendId>, CliError> {
+    let config = match bosun_io::paths::config_path() {
+        Ok(path) => config_installer(&path)?,
+        // No home directory: no user config to read.
+        Err(_) => Vec::new(),
     };
-    add(flag.to_vec());
-    if let Ok(env) = std::env::var("BOSUN_INSTALLER") {
-        add(env.split(',').map(|s| s.trim().to_string()).collect());
-    }
-    if let Ok(path) = bosun_io::paths::config_path() {
-        if let Ok(text) = fs::read_to_string(&path) {
-            if let Ok(cfg) = bosun_io::config::from_yaml(&text, &path) {
-                add(cfg.installer);
-            }
+    let registered: Vec<(BackendId, Scope)> = env
+        .resolvables()
+        .iter()
+        .filter_map(|b| env.installer_for(&b.id).map(|i| (b.id.clone(), i.scope())))
+        .collect();
+    let from_env = std::env::var("BOSUN_INSTALLER").ok();
+    Ok(preference_order(
+        flag,
+        from_env.as_deref(),
+        &config,
+        &registered,
+    ))
+}
+
+/// The preference order from each source, highest first, each name once. The
+/// built-in order, last, is every registered backend with user-scope ones
+/// before system-scope ones (so nothing asks for root or Administrator when a
+/// user-scope backend can do it), each group in registration order.
+pub(crate) fn preference_order(
+    flag: &[String],
+    from_env: Option<&str>,
+    config: &[String],
+    registered: &[(BackendId, Scope)],
+) -> Vec<BackendId> {
+    let built_in = [Scope::User, Scope::System].into_iter().flat_map(|scope| {
+        registered
+            .iter()
+            .filter(move |(_, s)| *s == scope)
+            .map(|(id, _)| id.as_str().to_string())
+    });
+    let env_names = from_env
+        .into_iter()
+        .flat_map(|v| v.split(','))
+        .map(|s| s.trim().to_string());
+    let mut order: Vec<String> = Vec::new();
+    for name in flag
+        .iter()
+        .cloned()
+        .chain(env_names)
+        .chain(config.iter().cloned())
+        .chain(built_in)
+    {
+        if !name.is_empty() && !order.contains(&name) {
+            order.push(name);
         }
     }
     order.into_iter().map(BackendId::new).collect()
+}
+
+/// The `installer` order from the user config at `path`; none when there is
+/// no config file. A config that doesn't load is an error, never a silently
+/// dropped preference.
+pub(crate) fn config_installer(path: &Path) -> Result<Vec<String>, CliError> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(CliError::Io {
+                path: path.to_path_buf(),
+                detail: e.to_string(),
+            })
+        }
+    };
+    bosun_io::config::from_yaml(&text, path)
+        .map(|cfg| cfg.installer)
+        .map_err(|e| CliError::Parse {
+            what: "config".to_string(),
+            detail: e.to_string(),
+        })
 }
 
 pub(crate) fn manifest_file(path: Option<PathBuf>) -> Result<PathBuf, CliError> {
@@ -852,15 +906,107 @@ impl Render for ApplyReport {
 mod tests {
     use super::*;
 
+    fn ids(order: &[BackendId]) -> Vec<&str> {
+        order.iter().map(BackendId::as_str).collect()
+    }
+
+    fn strings(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn registered(v: &[(&str, Scope)]) -> Vec<(BackendId, Scope)> {
+        v.iter().map(|(id, s)| (BackendId::new(*id), *s)).collect()
+    }
+
     #[test]
-    fn preference_dedups_and_drops_empty_flag_entries() {
-        // The dedup guard is `!empty && !already-present`: a repeated id
-        // appears once, an empty string never. (Robust to any BOSUN_INSTALLER
-        // or config entries the host might contribute: those add neither a
-        // duplicate "apt" nor an empty id.)
-        let order = preference(&["apt".to_string(), String::new(), "apt".to_string()]);
-        let ids: Vec<&str> = order.iter().map(BackendId::as_str).collect();
-        assert_eq!(ids.iter().filter(|id| **id == "apt").count(), 1);
-        assert!(!ids.iter().any(|id| id.is_empty()));
+    fn flag_then_env_then_config_then_the_built_in_order() {
+        let order = preference_order(
+            &strings(&["brew"]),
+            Some("cargo"),
+            &strings(&["apt"]),
+            &registered(&[("winget", Scope::User)]),
+        );
+        assert_eq!(ids(&order), vec!["brew", "cargo", "apt", "winget"]);
+    }
+
+    #[test]
+    fn the_built_in_order_puts_user_scope_before_system_in_registration_order() {
+        // So with no preference stated, nothing needs root or Administrator
+        // when a user-scope backend can do it.
+        let order = preference_order(
+            &[],
+            None,
+            &[],
+            &registered(&[
+                ("apt", Scope::System),
+                ("cargo", Scope::User),
+                ("choco", Scope::System),
+                ("scoop", Scope::User),
+            ]),
+        );
+        assert_eq!(ids(&order), vec!["cargo", "scoop", "apt", "choco"]);
+    }
+
+    #[test]
+    fn a_stated_preference_wins_over_the_scope_rule() {
+        let order = preference_order(
+            &[],
+            None,
+            &strings(&["apt"]),
+            &registered(&[("cargo", Scope::User), ("apt", Scope::System)]),
+        );
+        assert_eq!(ids(&order), vec!["apt", "cargo"]);
+    }
+
+    #[test]
+    fn env_is_comma_separated_and_trimmed() {
+        let order = preference_order(&[], Some(" scoop , winget "), &[], &[]);
+        assert_eq!(ids(&order), vec!["scoop", "winget"]);
+    }
+
+    #[test]
+    fn repeats_appear_once_and_empty_names_never() {
+        let order = preference_order(
+            &strings(&["apt", "", "apt"]),
+            Some("apt,,cargo"),
+            &strings(&["cargo"]),
+            &registered(&[("apt", Scope::System)]),
+        );
+        assert_eq!(ids(&order), vec!["apt", "cargo"]);
+    }
+
+    #[test]
+    fn a_missing_config_file_states_no_preference() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            config_installer(&dir.path().join("config.yaml")).unwrap(),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn a_config_that_exists_but_cannot_be_read_is_an_error() {
+        // A directory where the file should be: present, but unreadable.
+        let dir = tempfile::tempdir().unwrap();
+        let err = config_installer(dir.path()).unwrap_err();
+        assert!(matches!(err, CliError::Io { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn a_config_file_that_does_not_load_is_an_error_naming_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, "version: 1\ninstallers: [cargo]\n").unwrap();
+        let err = config_installer(&path).unwrap_err();
+        assert!(matches!(err, CliError::Parse { .. }), "{err:?}");
+        assert!(err.to_string().contains("installers"), "{err}");
+    }
+
+    #[test]
+    fn a_config_file_gives_its_installer_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        fs::write(&path, "installer: [scoop, winget]\n").unwrap();
+        assert_eq!(config_installer(&path).unwrap(), vec!["scoop", "winget"]);
     }
 }

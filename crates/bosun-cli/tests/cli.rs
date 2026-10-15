@@ -182,7 +182,8 @@ fn text_format_renders_human_lines() {
 fn installer_preference_picks_among_the_acceptable_backends() {
     let manifest = "version: 2\npackages:\n  - name: fd\n    spec: \">=1.0.0|<2.0.0\"\n    install:\n      linux: {backends: {apt: {}, cargo: {}}}\n";
 
-    // Default: no preference, so the first registered backend (apt) wins.
+    // Default: no preference, and both are user scope in this fixture, so the
+    // first registered backend (apt) wins.
     let dir = project_with(manifest);
     let default = bosun(dir.path())
         .args(["--format", "json", "lock"])

@@ -555,9 +555,11 @@ trait BackendFactory {
 | command-line flag | `--installer brew,cargo` |
 | environment | `BOSUN_INSTALLER=brew,cargo` |
 | user config | `<config dir>/bosun/config.yaml`: `installer: [brew, cargo]` |
-| built in | the order backends are registered in (`bosun backends`) |
+| built in | every registered backend, user-scope ones before system-scope ones (so nothing needs root or Administrator when a user-scope backend can do it), each group in the order `bosun backends` lists them |
 
-  Each level is an ordered list; backends it doesn't mention fall back to the next level.
+  Each level is an ordered list; backends it doesn't mention fall back to the next level. A user
+  config that doesn't load (unknown key, a newer `version`) is an error, never a silently
+  dropped preference.
 
 ### 5.4 Package identity and name mapping
 
@@ -1280,6 +1282,7 @@ scenario in the real-backend tier (skipped for compile time).
 | M2-2 | github-release archive formats (tar gz/xz/zst/bz2, zip, single compressed, raw); `tag` template | landed |
 | M2-3 | github-deb / github-rpm: a release's `.deb` / `.rpm` through apt-get / dnf, system scope, cache `/var/cache/bosun`; presence verified with dpkg-query / rpm -q; apt holds, dnf doesn't claim one | landed hermetically; real apt/dnf run not done (github-rpm unverified: no Fedora host) |
 | M2-4 | manifest version 2: `backends` map (acceptable set + options, `package` per backend), no order and no `targets`; `any` selector and bare-block shorthand; 1 → 2 migration; config `version` (0 → 1); `bosun migrate`; `lock --check` removed | landed |
+| M2-5 | preference is the machine's: flag > `BOSUN_INSTALLER` > config > built in (user scope before system, then registration order); a config that fails to load is an error | landed |
 | M3-1 | WindowsMachine (Administrator = High/System integrity label in `whoami /groups`; state `%ProgramData%` / `%LOCALAPPDATA%`, config `%APPDATA%`); github-release on Windows (`<binary>.exe` into `%USERPROFILE%\.local\bin`, `;`-separated case-insensitive PATH check); `Step::Remove` replaces `rm -f`; `just check-win` (zig cc as MinGW) | landed hermetically; workspace type-checks for x86_64-pc-windows-gnu; **unverified on a real Windows host** |
 | M3-2 | winget (user), scoop (user), choco (system) backends; probe only on Windows | landed hermetically (argv and output parsing unit-tested, fixture scenarios); **unverified on a real Windows host** |
 | M3-3 | github-installer: a release's `.msi` (`msiexec /i … /qn /norestart`) or `.exe` (manifest `silent_args`, required); found in the Uninstall registry keys (`reg query`, three views) by `display_name` (`*` suffix = prefix); uninstall `msiexec /x {ProductCode}` or the entry's quiet/plain uninstaller; system scope, no hold, no downgrade | landed (unit tests); **unverified on a real Windows host**; no fixture scenario (the seam has no registry) |
