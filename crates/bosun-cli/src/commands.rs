@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use bosun_core::record::{LockDocument, LockLeaf, LockPackage, Package, StateDocument};
+use bosun_core::record::{LockDocument, LockLeaf, LockPackage, Package, StateDocument, StateLeaf};
 use bosun_core::{BackendId, Manifest, Scope, Spec};
 use bosun_io::{check_options, load_manifest, lock, manifest_hash};
 use bosun_ports::{Installer, StateStore};
@@ -209,17 +209,56 @@ struct PackageStatus {
     present: bool,
     wanted: String,
     up_to_date: bool,
+    /// Every manifest that claims it, from bosun state; empty when unmanaged.
+    claimed_by: Vec<ClaimStatus>,
 }
 
-/// Report installed-vs-wanted for each applicable package. A package present on
-/// the machine but not in bosun state is shown as present-but-unmanaged (it
-/// would be accepted, §4.6), not "not installed".
-pub fn status(
-    env: &Env,
-    path: Option<PathBuf>,
-    pref: &[BackendId],
-) -> Result<StatusOutput, CliError> {
-    let file = manifest_file(path)?;
+/// One claim on a managed package (§4.6), as `status` shows it.
+#[derive(Serialize)]
+struct ClaimStatus {
+    /// The claiming manifest's absolute path.
+    manifest: String,
+    /// The spec it asked for, as recorded (`vers:<type>/<constraints>`).
+    spec: String,
+    /// The OS user who claimed it (system scope only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user: Option<String>,
+    /// False once the manifest is gone: `prune` drops such a claim (§9).
+    manifest_exists: bool,
+}
+
+fn claim_statuses(claims: &[Claim]) -> Vec<ClaimStatus> {
+    claims
+        .iter()
+        .map(|c| ClaimStatus {
+            manifest: c.manifest.display().to_string(),
+            spec: c.spec.clone(),
+            user: c.user.clone(),
+            manifest_exists: c.manifest.exists(),
+        })
+        .collect()
+}
+
+/// One line per claim, under its package's line.
+fn claim_lines(claims: &[ClaimStatus], lines: &mut Vec<String>) {
+    for c in claims {
+        let mut line = format!("  claimed by {} ({})", c.manifest, c.spec);
+        if let Some(user) = &c.user {
+            line.push_str(&format!(" as {user}"));
+        }
+        if !c.manifest_exists {
+            line.push_str(", manifest gone");
+        }
+        lines.push(line);
+    }
+}
+
+/// Report installed-vs-wanted for each applicable package of the manifest at
+/// `path`, with every manifest that claims it. A package present on the machine
+/// but not in bosun state is shown as present-but-unmanaged (it would be
+/// accepted, §4.6), not "not installed".
+pub fn status(env: &Env, path: PathBuf, pref: &[BackendId]) -> Result<StatusOutput, CliError> {
+    let file = manifest_file(Some(path))?;
     let manifest = load(env, &file)?;
     let hash = manifest_hash(&manifest);
     let resolution = resolve(&manifest, &hash, &env.host(), &env.resolvables(), pref)
@@ -245,9 +284,10 @@ pub fn status(
             } => {
                 // bosun state is authoritative for what it manages; a package it
                 // does not record is checked live on the machine (§4.6 A).
-                let managed_version = installed_version(&[&system, &user], &entry.name);
-                let (installed, managed, present) = match managed_version {
-                    Some(v) => (Some(v), true, true),
+                let leaf = managed_leaf(&[&system, &user], &entry.name);
+                let claimed_by = leaf.map_or_else(Vec::new, |l| claim_statuses(&l.claimed_by));
+                let (installed, managed, present) = match leaf {
+                    Some(l) => (Some(l.installed.as_str().to_string()), true, true),
                     None => match live_presence(env, &resolution, &entry.name, target, backend) {
                         Some(v) => (v, false, true),
                         None => (None, false, false),
@@ -262,6 +302,7 @@ pub fn status(
                     present,
                     wanted: version.as_str().to_string(),
                     up_to_date,
+                    claimed_by,
                 });
             }
             Outcome::NotApplicable(na) => {
@@ -324,6 +365,7 @@ impl Render for StatusOutput {
                 }
             };
             lines.push(format!("{:<16} {:<8} {}", p.name, p.backend, state));
+            claim_lines(&p.claimed_by, &mut lines);
         }
         for d in &self.diagnostics {
             lines.push(d.clone());
@@ -333,6 +375,81 @@ impl Render for StatusOutput {
         } else {
             lines.join("\n")
         }
+    }
+}
+
+/// `status` with no manifest: everything bosun manages on this machine (§4.2),
+/// both scopes, each with the manifests that claim it.
+#[derive(Serialize)]
+pub struct MachineStatus {
+    packages: Vec<ManagedStatus>,
+}
+
+#[derive(Serialize)]
+struct ManagedStatus {
+    name: String,
+    scope: &'static str,
+    target: String,
+    backend: String,
+    installed: String,
+    /// `installed` (bosun put it there) or `accepted` (found present, §4.6).
+    origin: &'static str,
+    claimed_by: Vec<ClaimStatus>,
+}
+
+/// Read both scopes' machine state; no manifest is needed.
+pub fn machine_status(env: &Env) -> Result<MachineStatus, CliError> {
+    let mut packages = Vec::new();
+    for scope in [Scope::System, Scope::User] {
+        let doc = env
+            .state
+            .read(scope)
+            .map_err(|e| CliError::Environment(e.to_string()))?;
+        for pkg in &doc.packages {
+            for (target, leaf) in &pkg.targets {
+                packages.push(ManagedStatus {
+                    name: pkg.name.clone(),
+                    scope: scope_label(scope),
+                    target: target.to_string(),
+                    backend: leaf.placement.backend.as_str().to_string(),
+                    installed: leaf.installed.as_str().to_string(),
+                    origin: origin_label(leaf.origin),
+                    claimed_by: claim_statuses(&leaf.claimed_by),
+                });
+            }
+        }
+    }
+    Ok(MachineStatus { packages })
+}
+
+impl Render for MachineStatus {
+    fn text(&self) -> String {
+        if self.packages.is_empty() {
+            return "bosun manages nothing on this machine".to_string();
+        }
+        let mut lines = Vec::new();
+        for p in &self.packages {
+            lines.push(format!(
+                "{:<16} {:<8} {} ({}, {})",
+                p.name, p.backend, p.installed, p.origin, p.scope
+            ));
+            claim_lines(&p.claimed_by, &mut lines);
+        }
+        lines.join("\n")
+    }
+}
+
+fn scope_label(scope: Scope) -> &'static str {
+    match scope {
+        Scope::System => "system",
+        Scope::User => "user",
+    }
+}
+
+fn origin_label(origin: Origin) -> &'static str {
+    match origin {
+        Origin::Installed => "installed",
+        Origin::Accepted => "accepted",
     }
 }
 
@@ -726,15 +843,11 @@ impl Render for LockOutput {
 
 // --- helpers ---------------------------------------------------------------
 
-fn installed_version(docs: &[&StateDocument], name: &str) -> Option<String> {
-    for doc in docs {
-        if let Some(pkg) = doc.packages.iter().find(|p| p.name == name) {
-            if let Some(leaf) = pkg.targets.values().next() {
-                return Some(leaf.installed.as_str().to_string());
-            }
-        }
-    }
-    None
+/// The state leaf bosun records for `name`, from the first scope that has it.
+fn managed_leaf<'a>(docs: &[&'a StateDocument], name: &str) -> Option<&'a StateLeaf> {
+    docs.iter()
+        .find_map(|doc| doc.packages.iter().find(|p| p.name == name))
+        .and_then(|pkg| pkg.targets.values().next())
 }
 
 fn na_text(na: &NotApplicable) -> String {

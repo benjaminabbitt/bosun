@@ -570,21 +570,35 @@ fn bosun_recorded(
     } else {
         "/other/bosun.yaml".to_string()
     };
+    let target = format!("{}/{}", m.os, m.arch);
+    let claim = json!({"manifest": manifest, "spec": format!("vers:{}/{spec}", b.meta.vers_type)});
     let entry = json!({
         "name": pkg,
         "targets": {
-            format!("{}/{}", m.os, m.arch): {
+            &target: {
                 "backend": b.id,
                 "purl": purl,
                 "installed": version,
                 "origin": origin,
-                "claimedBy": [{"manifest": manifest, "spec": format!("vers:{}/{spec}", b.meta.vers_type)}],
+                "claimedBy": [],
             }
         }
     });
     let scope = b.meta.scope.to_string();
     let packages = world.seeded.entry(scope.clone()).or_default();
-    packages.push(entry);
+    // A package seeded again gains a claim, as state records one package per
+    // name with every manifest that claims it.
+    let at = match packages.iter().position(|p| p["name"] == pkg.as_str()) {
+        Some(at) => at,
+        None => {
+            packages.push(entry);
+            packages.len() - 1
+        }
+    };
+    packages[at]["targets"][&target]["claimedBy"]
+        .as_array_mut()
+        .unwrap()
+        .push(claim);
     let doc = json!({"stateVersion": 1, "packages": packages});
     let dir = p.join("state").join(scope);
     fs::create_dir_all(&dir).unwrap();
@@ -633,9 +647,23 @@ fn delete_manifest(world: &mut BosunWorld) {
 
 #[when(regex = r"^I run `bosun (.+)`$")]
 fn i_run(world: &mut BosunWorld, cmdline: String) {
+    // run from the project directory, so a relative path like
+    // `./bosun.yaml` names this project's manifest.
+    let p = world.path();
+    run_bosun(world, &cmdline, &p);
+}
+
+#[when(regex = r"^I run `bosun (.+)` in an empty directory$")]
+fn i_run_elsewhere(world: &mut BosunWorld, cmdline: String) {
+    let empty = world.path().join("elsewhere");
+    fs::create_dir_all(&empty).unwrap();
+    run_bosun(world, &cmdline, &empty);
+}
+
+fn run_bosun(world: &mut BosunWorld, cmdline: &str, cwd: &Path) {
     let p = world.path();
     fs::write(p.join("fixture.json"), world.fixture().to_string()).unwrap();
-    let args: Vec<String> = words(&cmdline)
+    let args: Vec<String> = words(cmdline)
         .into_iter()
         // a bare `.` means "this project directory".
         .map(|a| if a == "." { p.display().to_string() } else { a })
@@ -646,9 +674,7 @@ fn i_run(world: &mut BosunWorld, cmdline: String) {
         // the user config is this scenario's own, never the developer's.
         .env("XDG_CONFIG_HOME", p.join("config"))
         .env("APPDATA", p.join("config"))
-        // run from the project directory, so a relative path like
-        // `./bosun.yaml` names this project's manifest.
-        .current_dir(&p)
+        .current_dir(cwd)
         .args(&args)
         .output()
         .expect("run bosun");
@@ -742,6 +768,100 @@ fn has_recorded(world: &mut BosunWorld, pkg: String, version: String) {
 fn recorded_nothing(world: &mut BosunWorld, pkg: String) {
     let state = world.state_text();
     assert!(!state.contains(&pkg), "state:\n{state}");
+}
+
+/// This project's manifest as bosun records it in a claim: absolute, canonical.
+fn this_manifest(world: &mut BosunWorld) -> String {
+    let p = world.path();
+    fs::canonicalize(p.join("bosun.yaml"))
+        .unwrap()
+        .display()
+        .to_string()
+}
+
+#[then(regex = r#"^it says the claim of this project's manifest with spec "(.+)"$"#)]
+fn says_this_claim(world: &mut BosunWorld, spec: String) {
+    let line = format!("claimed by {} ({spec})", this_manifest(world));
+    assert!(
+        world.stdout.contains(&line),
+        "want {line:?} in:\n{}",
+        world.stdout
+    );
+}
+
+/// The `claimed_by` array of package `pkg` in a JSON `status` output.
+fn json_claims(world: &BosunWorld, pkg: &str) -> Vec<Value> {
+    let doc: Value = serde_json::from_str(&world.stdout)
+        .unwrap_or_else(|e| panic!("{e}; stdout:\n{}", world.stdout));
+    let found = doc["packages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|p| p["name"] == pkg)
+        .unwrap_or_else(|| panic!("no {pkg} in:\n{}", world.stdout));
+    found["claimed_by"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{pkg} has no claimed_by array:\n{}", world.stdout))
+        .clone()
+}
+
+fn assert_json_claim(world: &BosunWorld, pkg: &str, manifest: &str, spec: &str, exists: bool) {
+    let claims = json_claims(world, pkg);
+    let want = json!({"manifest": manifest, "spec": spec, "manifest_exists": exists});
+    assert!(
+        claims.contains(&want),
+        "want {want} among {pkg}'s claims:\n{}",
+        world.stdout
+    );
+}
+
+#[then(regex = r#"^the JSON for (\S+) claims "(.+)" with "(.+)", manifest (gone|present)$"#)]
+fn json_claims_other(
+    world: &mut BosunWorld,
+    pkg: String,
+    manifest: String,
+    spec: String,
+    state: String,
+) {
+    assert_json_claim(world, &pkg, &manifest, &spec, state == "present");
+}
+
+#[then(
+    regex = r#"^the JSON for (\S+) claims this project's manifest with "(.+)", manifest (gone|present)$"#
+)]
+fn json_claims_this(world: &mut BosunWorld, pkg: String, spec: String, state: String) {
+    let manifest = this_manifest(world);
+    assert_json_claim(world, &pkg, &manifest, &spec, state == "present");
+}
+
+#[then(regex = r"^the JSON for (\S+) has no claims$")]
+fn json_no_claims(world: &mut BosunWorld, pkg: String) {
+    assert_eq!(
+        json_claims(world, &pkg),
+        Vec::<Value>::new(),
+        "{}",
+        world.stdout
+    );
+}
+
+#[then(regex = r#"^the JSON for (\S+) says scope "(\S+)", origin "(\S+)", installed "(\S+)"$"#)]
+fn json_managed(
+    world: &mut BosunWorld,
+    pkg: String,
+    scope: String,
+    origin: String,
+    installed: String,
+) {
+    let doc: Value = serde_json::from_str(&world.stdout).unwrap();
+    let found = doc["packages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|p| p["name"] == pkg.as_str())
+        .unwrap_or_else(|| panic!("no {pkg} in:\n{}", world.stdout));
+    assert_eq!(found["scope"], scope.as_str(), "{found}");
+    assert_eq!(found["origin"], origin.as_str(), "{found}");
+    assert_eq!(found["installed"], installed.as_str(), "{found}");
 }
 
 #[then(regex = r#"^the claim names this project's manifest by its absolute path, not "(.+)"$"#)]

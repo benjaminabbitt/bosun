@@ -102,10 +102,11 @@ fn dispatch(cli: &Cli, format: Format) -> Result<i32, CliError> {
             let value = commands::backends(&env);
             emit(&value, format, &mut out)
         }
-        Command::Status { path } => {
+        Command::Status { path: Some(path) } => {
             let value = commands::status(&env, path.clone(), &pref)?;
             emit(&value, format, &mut out)
         }
+        Command::Status { path: None } => emit(&commands::machine_status(&env)?, format, &mut out),
         Command::Lock { path } => {
             let value = commands::lock(&env, path.clone(), &pref)?;
             emit(&value, format, &mut out)

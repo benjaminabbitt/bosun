@@ -100,9 +100,10 @@ pub enum Command {
     },
     /// List registered backends and why the others were skipped.
     Backends,
-    /// Report installed-vs-wanted versions for a manifest.
+    /// Report installed-vs-wanted versions for a manifest, and who claims each;
+    /// with no manifest, everything bosun manages on this machine.
     Status {
-        /// The manifest directory or file (default: current directory).
+        /// The manifest directory or file (default: no manifest, machine-wide).
         path: Option<PathBuf>,
     },
     /// Resolve the manifest for this machine and write its lock, keeping the

@@ -264,6 +264,99 @@ fn status_reflects_installed_state() {
     assert_eq!(jq["up_to_date"], true);
 }
 
+/// System state for jq, claimed by this project (as user ben) and by a
+/// manifest that no longer exists.
+fn claimed_jq_state(dir: &Path) -> String {
+    let this = dir.join("bosun.yaml").display().to_string();
+    let state = format!(
+        r#"{{"stateVersion":1,"packages":[
+          {{"name":"jq","targets":{{"linux/amd64":{{"backend":"apt","purl":"pkg:deb/debian/jq?arch=amd64&distro=bookworm","installed":"1.7.1-3","origin":"installed","claimedBy":[
+            {{"manifest":"{this}","spec":"vers:deb/>=1.6","user":"ben"}},
+            {{"manifest":"/gone/bosun.yaml","spec":"vers:deb/>=1.7"}}]}}}}}}
+        ]}}"#
+    );
+    write_system_state(dir, &state);
+    this
+}
+
+#[test]
+fn status_json_pins_each_package_and_its_claims() {
+    let dir = project();
+    let this = claimed_jq_state(dir.path());
+    let run = bosun(dir.path())
+        .args(["--format", "json", "status"])
+        .arg(dir.path())
+        .assert()
+        .success();
+    let json = stdout_json(&run.get_output().stdout);
+    let jq = json["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "jq")
+        .unwrap();
+    assert_eq!(
+        *jq,
+        serde_json::json!({
+            "name": "jq",
+            "backend": "apt",
+            "installed": "1.7.1-3",
+            "managed": true,
+            "present": true,
+            "wanted": "1.7.1-3",
+            "up_to_date": true,
+            "claimed_by": [
+                {"manifest": this, "spec": "vers:deb/>=1.6", "user": "ben", "manifest_exists": true},
+                {"manifest": "/gone/bosun.yaml", "spec": "vers:deb/>=1.7", "manifest_exists": false}
+            ]
+        })
+    );
+}
+
+#[test]
+fn status_without_a_path_pins_the_machine_wide_json() {
+    let dir = project();
+    let this = claimed_jq_state(dir.path());
+    // Run from a directory with no manifest: none is needed.
+    let run = bosun(dir.path())
+        .current_dir(dir.path().join("state"))
+        .args(["--format", "json", "status"])
+        .assert()
+        .success();
+    assert_eq!(
+        stdout_json(&run.get_output().stdout),
+        serde_json::json!({"packages": [{
+            "name": "jq",
+            "scope": "system",
+            "target": "linux/amd64",
+            "backend": "apt",
+            "installed": "1.7.1-3",
+            "origin": "installed",
+            "claimed_by": [
+                {"manifest": this, "spec": "vers:deb/>=1.6", "user": "ben", "manifest_exists": true},
+                {"manifest": "/gone/bosun.yaml", "spec": "vers:deb/>=1.7", "manifest_exists": false}
+            ]
+        }]})
+    );
+}
+
+#[test]
+fn status_without_a_path_renders_claims_as_text() {
+    let dir = project();
+    let this = claimed_jq_state(dir.path());
+    let run = bosun(dir.path())
+        .args(["--format", "text", "status"])
+        .assert()
+        .success();
+    let text = String::from_utf8_lossy(&run.get_output().stdout).to_string();
+    assert_eq!(
+        text.trim_end(),
+        format!(
+            "jq               apt      1.7.1-3 (installed, system)\n  claimed by {this} (vers:deb/>=1.6) as ben\n  claimed by /gone/bosun.yaml (vers:deb/>=1.7), manifest gone"
+        )
+    );
+}
+
 #[test]
 fn a_non_applicable_entry_is_reported_with_its_reason() {
     let manifest = "version: 2\npackages:\n  - name: mac-only\n    spec: \">=1.0.0|<2.0.0\"\n    install:\n      darwin: {backend: cargo}\n";
