@@ -1319,28 +1319,23 @@ committed; the real host install is the user's to run (`bosun install`, then
 `sudo bosun install --scope system`).
 
 **Since M1** (the M2 and M3 slices below): manifest version 2, the per-machine lock, `add` /
-`remove` / `migrate` / `upgrade`, more github release kinds, Windows (hermetic only), apply
-without a terminal, and claims in `status`. `just test` runs 546 tests and 114 scenarios.
+`remove` / `migrate` / `upgrade` / `export`, more github release kinds, Windows (hermetic only),
+apply without a terminal, claims in `status`, and Linux breadth: release selectors and libc
+(§5.4), dnf and apk. `just test` runs 722 tests and 158 scenarios.
 
-**Next, in order.** Linux first, because selection must settle on deb, rpm and musl before
-more is built on it, and the dogfood manifest resolves only on Debian 13 until release
-selectors exist:
+**Next, in order.**
 
-1. **Linux breadth:** release selectors and libc (§5.4), then the dnf and apk backends, so
-   selection is proven on deb, rpm and musl. apk needs Appendix-A-level research first.
-2. **Containers and language backends:** `render` and `Containerfile.bosun` (§8, waiting on a
-   remote apt `Index`, §11), npm and uv.
-3. **macOS, and Windows on a real host:** the macOS machine, brew (research first), and
+1. **Containers and language backends:** the remote apt `Index` (§4.7), then `render` and
+   `Containerfile.bosun` (§8), npm and uv.
+2. **macOS, and Windows on a real host:** the macOS machine, brew (research first), and
    verifying scoop, winget, choco and github-installer on Windows.
 
 Other backends (pacman, zypper, snap, flatpak, `go install`, gem) wait until wanted.
 
-**Still deferred:** `export`, `adopt`, `sources`, `formerly` migration; persisted plans;
-distinct messages for disjoint-vs-unpublished claim intersections (needs vers interval
-algebra); ltk / taskloom / harp in the dogfood (§11); a cargo scenario in the real-backend tier
-(skipped for compile time). Not expressible in the acceptance seam yet: an absent backend (the
-fixture always registers it), github-release's fetch into `~/.local/bin` (fake installers plan
-generic steps), and answering "n" at the prompt (needs a pty).
+**Still deferred:** `adopt`, `sources`, `formerly` migration; persisted plans; distinct
+messages for disjoint-vs-unpublished claim intersections (needs vers interval algebra); a cargo
+scenario in the real-backend tier (skipped for compile time); answering "n" at the prompt runs
+under a pty on Unix only.
 
 **Slice status:**
 
@@ -1391,6 +1386,12 @@ generic steps), and answering "n" at the prompt (needs a pty).
 | M3-3 | github-installer: a release's `.msi` (`msiexec /i … /qn /norestart`) or `.exe` (manifest `silent_args`, required); found in the Uninstall registry keys (`reg query`, three views) by `display_name` (`*` suffix = prefix); uninstall `msiexec /x {ProductCode}` or the entry's quiet/plain uninstaller; msiexec's 3010 (reboot required) is success, reported; system scope, no hold, no downgrade | landed (unit tests); **unverified on a real Windows host**; no fixture scenario (the seam has no registry) |
 | M2-10 | with no terminal, every confirm (install, uninstall, prune, remove, migrate) applies, still printing what it applies to stderr; `--yes` only skips a terminal's prompt | landed |
 | M2-11 | `status [path]` lists every claim on each package (manifest, spec, user, whether the manifest still exists); with no path, everything bosun manages on the machine; `install` records a `claim` on a package bosun installed for another project | landed |
+| M2-12 | release selectors `linux:<distro>@<release>`: the release is the purl `distro` value a block's backend gives this machine (deb codename, rpm `<ID>-<VERSION_ID>`); exact `ID` only | landed; checked in Debian 12/13 and Ubuntu 22.04/24.04 containers |
+| M2-13 | libc: family from `/bin/sh`'s ELF interpreter, version from running it; `linux:gnu` / `linux:musl[@<vers generic range>]` ranked between `ID_LIKE` and `<os>`; `{{ libc }}` / `{{ rust_target }}` templates; shown in `backends` / `status` | landed; checked in Debian, Ubuntu and Alpine containers |
+| M2-14 | dnf backend (dnf4 and dnf5): repoquery / `rpm -q`, versionlock hold (unheld with a warning when dnf4 lacks the plugin); RPM ordering (rpmvercmp) | landed; real tier in Fedora 41 and Rocky 9 |
+| M2-15 | apk backend: `apk policy` index, installs pinned in the world file, `pkg:apk` identity with no `distro`; Alpine ordering (apk-tools 3) | landed; real tier in Alpine 3.20/3.21/3.23 (`just acceptance-real-musl`) |
+| M2-16 | `bosun export`: per backend, what the user installed by hand (apt manual minus base priorities, `cargo install --list`, apk world, bosun-installed releases), merged into the manifest, then `lock` | landed |
+| M2-17 | acceptance seam: absent backends, github-release planning into `~/.local/bin`, the confirmation prompt under a pty; a backend whose program is missing is "not present" | landed |
 
 **First real-host smoke run (2026-10-14, release build, Debian 13, read-only `--plan` and
 `lock` in a scratch dir).** `backends` found apt 3.0.3, cargo 1.96.1 and github-release; jq
