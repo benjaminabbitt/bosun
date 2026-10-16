@@ -1,14 +1,15 @@
 //! Real-backend acceptance (§11, tier 2): runs the real `bosun` binary against
-//! real apt / dnf / github-release, **mutating the container**. Guarded twice — it
-//! refuses to run unless `BOSUN_ACCEPTANCE_REAL=1` *and* a container marker is
+//! real apt / dnf / apk / github-release, **mutating the container**. Guarded
+//! twice — it refuses to run unless `BOSUN_ACCEPTANCE_REAL=1` *and* a container marker is
 //! present — so `cargo test --workspace` (which builds and runs this binary)
 //! stays hermetic and a developer cannot run it on a workstation by mistake.
 //! Run it with `just acceptance-real` inside a disposable container.
 //!
 //! State is redirected via `HOME` (user scope + the github bin dir land in a
-//! temp dir); system-scope apt/dnf state lives at its real `/var/lib/bosun`
-//! path, cleaned at the start of each system scenario. A tagged scenario runs
-//! only where what it needs is installed (`@apt`, `@dnf`, `@dnf4`, `@github`).
+//! temp dir); system-scope apt/dnf/apk state lives at its real
+//! `/var/lib/bosun` path, cleaned at the start of each system scenario. Each
+//! tag names a program the scenario needs on `PATH` (`@apt-get`, `@dnf`,
+//! `@dnf-3` for dnf4, `@apk`, `@useradd @runuser`); it runs only where all are.
 
 use std::fs;
 #[cfg(unix)]
@@ -95,6 +96,60 @@ fn clean_dnf(_w: &mut RealWorld, pkg: String) {
     let _ = fs::remove_file("/var/lib/bosun/state.json");
     let _ = run("dnf", &["versionlock", "delete", &pkg]);
     let _ = run("dnf", &["remove", "-y", &pkg]);
+}
+
+#[given("the apk index is refreshed")]
+fn apk_refresh(_w: &mut RealWorld) {
+    let (code, out) = run("apk", &["update"]);
+    assert_eq!(code, 0, "apk update failed: {out}");
+}
+
+#[given(expr = "the system state is clean of {word} installed through apk")]
+fn apk_clean(_w: &mut RealWorld, pkg: String) {
+    let _ = fs::remove_file("/var/lib/bosun/state.json");
+    let _ = run("apk", &["del", &pkg]);
+}
+
+#[then(expr = "apk reports {word} installed")]
+fn apk_installed(_w: &mut RealWorld, pkg: String) {
+    let (code, out) = run("apk", &["info", "-e", &pkg]);
+    assert_eq!(code, 0, "apk info -e {pkg}: {out}");
+}
+
+#[then(expr = "apk reports {word} not installed")]
+fn apk_absent(_w: &mut RealWorld, pkg: String) {
+    let (code, out) = run("apk", &["info", "-e", &pkg]);
+    assert_ne!(code, 0, "apk still reports {pkg} installed: {out}");
+}
+
+/// The lines of apk's world file that name `pkg`, with or without a
+/// constraint.
+fn world_entries(pkg: &str) -> Vec<String> {
+    let world = fs::read_to_string("/etc/apk/world").expect("read /etc/apk/world");
+    world
+        .lines()
+        .filter(|l| {
+            l.strip_prefix(pkg)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(['=', '<', '>', '~', '@']))
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+#[then(expr = "the apk world pins {word} to its installed version")]
+fn world_pins(_w: &mut RealWorld, pkg: String) {
+    let (code, installed) = run("apk", &["info", "-e", "-v", &pkg]);
+    assert_eq!(code, 0, "apk info -e -v {pkg}: {installed}");
+    let version = installed
+        .trim()
+        .strip_prefix(&format!("{pkg}-"))
+        .unwrap_or_else(|| panic!("apk info -e -v {pkg}: {installed}"));
+    assert_eq!(world_entries(&pkg), vec![format!("{pkg}={version}")]);
+}
+
+#[then(expr = "the apk world does not name {word}")]
+fn world_lacks(_w: &mut RealWorld, pkg: String) {
+    assert_eq!(world_entries(&pkg), Vec::<String>::new());
 }
 
 #[given("the manifest:")]
@@ -200,6 +255,17 @@ fn assert_exit(w: &RealWorld, code: i32) {
 #[then("it succeeds")]
 fn succeeds(w: &mut RealWorld) {
     assert_exit(w, 0);
+}
+
+#[then("it fails")]
+fn fails(w: &mut RealWorld) {
+    assert_exit(w, 1);
+}
+
+#[then(expr = "it reports {string}")]
+fn reports(w: &mut RealWorld, needle: String) {
+    let all = format!("{}{}", w.stdout, w.stderr);
+    assert!(all.contains(&needle), "output:\n{all}");
 }
 
 #[then("it reports changes pending")]
@@ -332,29 +398,10 @@ fn enabled() -> bool {
             || std::env::var_os("container").is_some())
 }
 
-/// Whether `program` runs here (`<program> --version` exits 0).
-fn present(program: &str) -> bool {
-    Command::new(program)
-        .arg("--version")
-        .output()
-        .is_ok_and(|o| o.status.success())
-}
-
-/// Whether the host's `dnf` is dnf4 (dnf5 names itself on its first line).
-fn dnf4() -> bool {
-    let (code, out) = run("dnf", &["--version"]);
-    code == 0 && !out.starts_with("dnf5")
-}
-
-/// Whether everything a scenario's tags ask for is on this host.
-fn runs_here(tags: &[String]) -> bool {
-    tags.iter().all(|tag| match tag.as_str() {
-        "apt" => present("apt-get"),
-        "dnf" => present("dnf"),
-        "dnf4" => present("dnf") && dnf4(),
-        "github" => present("runuser"),
-        _ => true,
-    })
+/// Whether `program` is on `PATH`.
+fn on_path(program: &str) -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(program).is_file()))
 }
 
 fn main() {
@@ -365,13 +412,19 @@ fn main() {
         );
         return;
     }
-    // One scenario at a time: they share the container's package database
-    // and system state.
+    // Each tag names a program the scenario needs on PATH (`@apt-get`,
+    // `@dnf-3` for dnf4, `@apk`), so one suite runs in Debian, Fedora,
+    // RHEL-family and Alpine containers. One scenario at a time: they share
+    // the container's package database and system state.
     futures::executor::block_on(
         RealWorld::cucumber()
             .max_concurrent_scenarios(1)
-            .filter_run_and_exit("tests/acceptance_real/features", |_, _, scenario| {
-                runs_here(&scenario.tags)
+            .filter_run_and_exit("tests/acceptance_real/features", |feature, _, scenario| {
+                feature
+                    .tags
+                    .iter()
+                    .chain(&scenario.tags)
+                    .all(|t| on_path(t))
             }),
     );
 }

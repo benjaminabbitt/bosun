@@ -1,11 +1,11 @@
 Feature: real backends against a disposable container
 
-  A tagged scenario runs only where what it needs is installed: its package
-  manager (`@apt`, `@dnf`; `@dnf4` only under dnf4), or `runuser` to act as a
-  non-root user (`@github`). So one feature serves Debian, Fedora and
-  RHEL-family containers.
+  Each tag names a program the scenario needs on `PATH`: its package
+  manager (`@apt-get`, `@dnf`, `@apk`; `@dnf-3` only under dnf4), or
+  `useradd` and `runuser` to act as a non-root user. So one feature serves
+  Debian, Fedora, RHEL-family and Alpine containers.
 
-  @apt
+  @apt-get
   Scenario: apt installs and holds a package, then prune removes and unholds it
     Given the apt index is refreshed
     And the system state is clean
@@ -53,7 +53,7 @@ Feature: real backends against a disposable container
     And rpm reports tree not installed
     And dnf reports tree not locked
 
-  @dnf4
+  @dnf-3
   Scenario: dnf4 without the versionlock plugin installs unheld and says so
     Given the dnf index is refreshed
     And dnf has no versionlock command
@@ -80,7 +80,7 @@ Feature: real backends against a disposable container
     And rpm reports tree not installed
 
   # github-release is user scope, so it runs as a non-root user (§5.5).
-  @github
+  @useradd @runuser
   Scenario: github-release verifies the checksum and installs an executable
     Given the manifest:
       """
@@ -100,3 +100,43 @@ Feature: real backends against a disposable container
     Then it succeeds
     And the binary ctxloom exists and is executable
     And the bin dir has no temp files
+
+  @apk
+  Scenario: apk installs a package pinned in the world, then prune deletes it
+    Given the apk index is refreshed
+    And the system state is clean of tree installed through apk
+    And the manifest:
+      """
+      version: 2
+      packages:
+        - name: tree
+          spec: ">=2.0"
+          install:
+            linux:alpine: {backend: apk}
+      """
+    When I run `bosun install . --yes --scope system`
+    Then it succeeds
+    And apk reports tree installed
+    And the apk world pins tree to its installed version
+    When the manifest is deleted
+    And I run `bosun prune --yes --scope system`
+    Then it succeeds
+    And apk reports tree not installed
+    And the apk world does not name tree
+
+  # A branch carries one version of a package; an older one is gone.
+  @apk
+  Scenario: apk offers only the version its branch carries
+    Given the apk index is refreshed
+    And the manifest:
+      """
+      version: 2
+      packages:
+        - name: tree
+          spec: "1.8.0-r0"
+          install:
+            linux:alpine: {backend: apk}
+      """
+    When I run `bosun lock .`
+    Then it fails
+    And it reports "unsatisfiable"

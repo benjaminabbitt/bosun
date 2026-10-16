@@ -89,3 +89,28 @@ acceptance:
 # Set BOSUN_ACCEPTANCE_REAL=1 so the real-backend scenarios run.
 acceptance-real:
     BOSUN_ACCEPTANCE_REAL=1 cargo test -p bosun-cli --test acceptance_real -- --nocapture
+
+# Tier 2 on musl, run from the host: build bosun and the real-backend tests
+# static for x86_64-unknown-linux-musl (needs that rustup target and zig, whose
+# `zig cc` compiles ring's C), then run them in a disposable Alpine container
+# with this checkout mounted read-only at its own path. Scenarios whose
+# programs the image lacks (apt-get, runuser) are skipped.
+acceptance-real-musl image="docker.io/library/alpine:3.23":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    cat > "$tmp/cc" <<'SH'
+    #!/bin/sh
+    for a in "$@"; do shift; case "$a" in --target=*) ;; *) set -- "$@" "$a";; esac; done
+    exec zig cc -target x86_64-linux-musl -fno-sanitize=undefined "$@"
+    SH
+    printf '#!/bin/sh\nexec zig ar "$@"\n' > "$tmp/ar"
+    chmod +x "$tmp/cc" "$tmp/ar"
+    tests="$(CC_x86_64_unknown_linux_musl="$tmp/cc" AR_x86_64_unknown_linux_musl="$tmp/ar" \
+        cargo test -p bosun-cli --test acceptance_real --target x86_64-unknown-linux-musl \
+        --no-run --message-format=json \
+        | jq -r 'select(.target.name == "acceptance_real" and .executable != null) | .executable')"
+    root="$(pwd)"
+    podman run --rm -v "$root:$root:ro" -w "$root/crates/bosun-cli" \
+        -e BOSUN_ACCEPTANCE_REAL=1 "{{image}}" "$tests"
