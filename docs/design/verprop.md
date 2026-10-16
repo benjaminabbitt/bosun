@@ -399,7 +399,9 @@ Plan: 1 to remove, 1 stale claim to drop.
 ```
 
 **Actions:** `ensure-source`, `install`, `upgrade`, `downgrade`, `migrate` (`formerly`),
-`accept` (record only, no change), `adopt` (explicit only: `accepted` → `installed`),
+`accept` (record only, no change), `claim` (record this project's claim on a package bosun
+already installed at the resolved version, e.g. for another project; version and origin
+unchanged), `adopt` (explicit only: `accepted` → `installed`),
 `hold` / `unhold` — the `install` plan. `remove` (`installed` origin only, no remaining
 claims) and `drop-claim` — the `uninstall` and `prune` plans, and `remove <name>`. Each carries scope,
 backend, package ID, from → to version, the claim(s) that drove it, and the privilege it needs.
@@ -1202,7 +1204,7 @@ remote indexes. Traits stay ready; nothing is stubbed.
   needs vers interval algebra, deferred. Reporting lockfiles a plain `install` doesn't match is
   the command layer's job.
 - **Plan exit code counts package changes only** (install / upgrade / downgrade / hold /
-  remove). Claim bookkeeping (`accept`, `drop-claim`) is shown and applied but exits 0, so
+  remove). Claim bookkeeping (`accept`, `claim`, `drop-claim`) is shown and applied but exits 0, so
   `install --plan` stays a drift check on a fresh CI machine whose tools are already present.
 - **Unsupported capability degrades** (§5.2): a hold the backend can't do is a warning and is
   skipped; a downgrade it can't do is an error diagnostic for that package, not a failure of

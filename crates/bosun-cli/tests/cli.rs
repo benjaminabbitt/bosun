@@ -811,10 +811,11 @@ fn install_respects_another_projects_claim_range() {
         .assert()
         .code(0);
     let json = stdout_json(&assert.get_output().stdout);
-    assert!(
-        json["actions"].as_array().unwrap().is_empty(),
-        "cross-claim clamps to 14.0.0, no upgrade: {json}"
-    );
+    // Clamped to 14.0.0, so nothing is installed; only A's claim is recorded.
+    let actions = json["actions"].as_array().unwrap();
+    assert_eq!(actions.len(), 1, "cross-claim clamps to 14.0.0: {json}");
+    assert_eq!(actions[0]["action"], "claim", "no upgrade: {json}");
+    assert_eq!(actions[0]["from"], "14.0.0", "{json}");
 }
 
 #[test]

@@ -71,3 +71,19 @@ Feature: install, upgrade and cross-claim resolution at user scope (cargo)
     When I run `bosun --format json install . --yes`
     Then it fails
     And it says "jointly satisfied"
+
+  Scenario: a tool another project installed gains this project's claim, so pruning that project keeps it
+    Given bosun installed ripgrep 14.1.1 for another project wanting ">=14.0.0"
+    When I run `bosun --format json install . --plan`
+    Then it succeeds
+    And it says "claim"
+    When I run `bosun install . --yes`
+    Then it succeeds
+    When I run `bosun --format json status .`
+    Then the JSON for ripgrep claims this project's manifest with "vers:cargo/>=14.0.0|<15.0.0", manifest present
+    When I run `bosun --format json install . --plan`
+    Then it succeeds
+    And it does not say "claim"
+    When I run `bosun prune --yes`
+    Then it succeeds
+    And bosun has recorded ripgrep 14.1.1

@@ -160,6 +160,21 @@ impl<'a, S: StateStore> HostApplier<'a, S> {
                 drop_claim(doc, &action.name, self.target, &action.claims);
                 Ok(())
             }
+            ActionKind::Claim => {
+                let leaf = doc
+                    .packages
+                    .iter_mut()
+                    .find(|p| p.name == action.name)
+                    .and_then(|p| p.targets.get_mut(&self.target))
+                    .ok_or_else(|| PortError::Backend {
+                        detail: format!(
+                            "{}: claim on a package state does not record",
+                            action.name
+                        ),
+                    })?;
+                leaf.claimed_by = self.stamp(&action.claims);
+                Ok(())
+            }
         }
     }
 

@@ -23,8 +23,8 @@ mod view;
 
 pub use applier::{ActionOutcome, ApplyReport, ApplyResult, Driver, HostApplier};
 
-use std::collections::BTreeMap;
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 use bosun_core::record::StateDocument;
 use bosun_core::spec::Spec;
@@ -53,12 +53,16 @@ pub enum ActionKind {
     /// Drop a manifest's claim on a package that stays installed (another
     /// manifest still wants it, or it was only accepted).
     DropClaim,
+    /// Record a manifest's claim on a package bosun installed that is already
+    /// at the resolved version (another project installed it, or this one's
+    /// spec changed): no change to the machine, version or origin.
+    Claim,
 }
 
 impl ActionKind {
     /// Whether this action mutates the machine through the package manager and
-    /// so is subject to the privilege check (§5.5). `Accept` and `DropClaim`
-    /// are state-only, so an all-accepted plan needs no elevation.
+    /// so is subject to the privilege check (§5.5). `Accept`, `Claim` and
+    /// `DropClaim` are state-only, so an all-accepted plan needs no elevation.
     pub fn changes_machine(self) -> bool {
         matches!(
             self,
@@ -80,6 +84,7 @@ impl ActionKind {
             ActionKind::Hold => "hold",
             ActionKind::Remove => "remove",
             ActionKind::DropClaim => "drop-claim",
+            ActionKind::Claim => "claim",
         }
     }
 }
@@ -296,8 +301,8 @@ impl Plan {
 
     /// The `terraform plan -detailed-exitcode` style code (§4.8): `1` if any
     /// diagnostic is an error, else `2` if any action changes a package
-    /// (install/upgrade/downgrade/hold/remove), else `0`. Pure `accept` and
-    /// `drop-claim` are shown and applied but do not count, so a drift check on
+    /// (install/upgrade/downgrade/hold/remove), else `0`. Pure `accept`,
+    /// `claim` and `drop-claim` are shown and applied but do not count, so a drift check on
     /// a machine whose tools are already present exits `0`.
     pub fn exit_code(&self) -> i32 {
         if self.has_errors() {
@@ -324,6 +329,9 @@ pub enum Current {
         version: Option<Version>,
         /// How it came to be present.
         origin: Origin,
+        /// The claims bosun state records on it; empty when state doesn't
+        /// record it (found present on the machine).
+        claimed_by: Vec<Claim>,
     },
 }
 
@@ -353,6 +361,19 @@ pub struct Managed<'a> {
     pub checksum: Option<Checksum>,
 }
 
+/// Whether `recorded` (bosun state) already holds exactly the claims `wanted`:
+/// the same manifests asking the same specs. The user state stamps on a
+/// system-scope claim is not part of what the manifest asks.
+fn same_claims(recorded: &[Claim], wanted: &[Claim]) -> bool {
+    let asks = |claims: &[Claim]| -> BTreeSet<(PathBuf, String)> {
+        claims
+            .iter()
+            .map(|c| (c.manifest.clone(), c.spec.clone()))
+            .collect()
+    };
+    asks(recorded) == asks(wanted)
+}
+
 /// Does `version` satisfy every claim's vers set?
 fn satisfies_all(version: &Version, claims: &[Claim], vers_type: &str) -> bool {
     claims
@@ -375,6 +396,7 @@ pub fn build_install_plan(
     let mut upgrades = Vec::new();
     let mut downgrades = Vec::new();
     let mut accepts = Vec::new();
+    let mut claim_actions = Vec::new();
     let mut holds = Vec::new();
     let mut diagnostics = carried;
 
@@ -389,17 +411,40 @@ pub fn build_install_plan(
             Current::Present {
                 version,
                 origin: Origin::Installed,
-            } => match version {
-                Some(v) => match v.cmp(&m.resolved) {
-                    std::cmp::Ordering::Equal => None, // already at the resolved version
-                    std::cmp::Ordering::Less => Some((ActionKind::Upgrade, Some(v.clone()))),
-                    std::cmp::Ordering::Greater => Some((ActionKind::Downgrade, Some(v.clone()))),
-                },
-                None => None, // present, version unknown: trust state, no churn
-            },
+                claimed_by,
+            } => {
+                let change = match version {
+                    Some(v) => match v.cmp(&m.resolved) {
+                        std::cmp::Ordering::Equal => None, // already at the resolved version
+                        std::cmp::Ordering::Less => Some((ActionKind::Upgrade, Some(v.clone()))),
+                        std::cmp::Ordering::Greater => {
+                            Some((ActionKind::Downgrade, Some(v.clone())))
+                        }
+                    },
+                    None => None, // present, version unknown: trust state, no churn
+                };
+                // Nothing to install, but the claims behind it may be new (another
+                // project installed it) or changed (this one's spec moved): record
+                // them, or the package goes with the last claim state knows of.
+                if change.is_none() && !same_claims(claimed_by, &m.claims) {
+                    claim_actions.push(Action {
+                        kind: ActionKind::Claim,
+                        name: m.name.clone(),
+                        scope,
+                        backend: m.backend.clone(),
+                        purl: m.purl.clone(),
+                        from: version.clone(),
+                        to: None,
+                        claims: m.claims.clone(),
+                        steps: Vec::new(),
+                    });
+                }
+                change
+            }
             Current::Present {
                 version,
                 origin: Origin::Accepted,
+                ..
             } => {
                 let satisfied = version
                     .as_ref()
@@ -502,6 +547,7 @@ pub fn build_install_plan(
     actions.append(&mut upgrades);
     actions.append(&mut downgrades);
     actions.append(&mut accepts);
+    actions.append(&mut claim_actions);
     actions.append(&mut holds);
     Ok(Plan {
         actions,

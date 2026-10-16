@@ -1107,6 +1107,7 @@ fn managed_from_lock<'a>(
         if let Current::Present {
             version: Some(v),
             origin: Origin::Accepted,
+            ..
         } = &current
         {
             if v.as_str() != leaf.resolved.as_str() {
@@ -1164,6 +1165,7 @@ fn current_for(
         return Ok(Current::Present {
             version: Some(leaf.installed.clone()),
             origin: leaf.origin,
+            claimed_by: leaf.claimed_by.clone(),
         });
     }
     match installer
@@ -1173,6 +1175,7 @@ fn current_for(
         Installed::Present { version } => Ok(Current::Present {
             version,
             origin: Origin::Accepted,
+            claimed_by: Vec::new(),
         }),
         Installed::Absent => Ok(Current::Absent),
     }

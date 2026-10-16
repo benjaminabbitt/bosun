@@ -242,6 +242,7 @@ fn install_plan_upgrades_when_installed_is_lower() {
     let current = Current::Present {
         version: Some(deb("1.7.0-1")),
         origin: Origin::Installed,
+        claimed_by: vec![],
     };
     let m = managed("jq", "1.7.1-3", current, &apt, vec![]);
     let plan = build_install_plan(&[m], vec![]).unwrap();
@@ -257,6 +258,7 @@ fn install_plan_downgrades_when_installed_is_higher() {
     let current = Current::Present {
         version: Some(deb("1.8.0-1")),
         origin: Origin::Installed,
+        claimed_by: vec![],
     };
     let m = managed("jq", "1.7.1-3", current, &apt, vec![]);
     let plan = build_install_plan(&[m], vec![]).unwrap();
@@ -275,6 +277,7 @@ fn install_plan_does_nothing_when_already_at_the_resolved_version() {
     let current = Current::Present {
         version: Some(deb("1.7.1-3")),
         origin: Origin::Installed,
+        claimed_by: vec![],
     };
     let m = managed("jq", "1.7.1-3", current, &apt, vec![]);
     let plan = build_install_plan(&[m], vec![]).unwrap();
@@ -283,12 +286,85 @@ fn install_plan_does_nothing_when_already_at_the_resolved_version() {
     assert_eq!(plan.exit_code(), 0);
 }
 
+fn claim_by(path: &str, spec: &str, user: &str) -> Claim {
+    Claim {
+        user: Some(user.to_string()),
+        ..claim(path, spec)
+    }
+}
+
+#[test]
+fn install_plan_records_a_new_claim_on_a_package_already_at_the_resolved_version() {
+    // Another project installed jq; this one wants it too, at the same version.
+    let apt = apt();
+    let current = Current::Present {
+        version: Some(deb("1.7.1-3")),
+        origin: Origin::Installed,
+        claimed_by: vec![claim_by("/w/b", ">=1.7", "ann")],
+    };
+    let claims = vec![claim_by("/w/b", ">=1.7", "ann"), claim("/w/a", ">=1.6")];
+    let m = managed("jq", "1.7.1-3", current, &apt, claims.clone());
+    let plan = build_install_plan(&[m], vec![]).unwrap();
+
+    assert_eq!(kinds(&plan), vec![ActionKind::Claim]);
+    let action = &plan.actions[0];
+    assert_eq!(action.claims, claims);
+    assert!(action.steps.is_empty(), "a claim runs nothing");
+    assert_eq!(plan.exit_code(), 0, "state-only: no drift");
+}
+
+#[test]
+fn install_plan_records_a_changed_spec_on_a_package_already_at_the_resolved_version() {
+    let apt = apt();
+    let current = Current::Present {
+        version: Some(deb("1.7.1-3")),
+        origin: Origin::Installed,
+        claimed_by: vec![claim("/w/a", ">=1.6")],
+    };
+    let m = managed("jq", "1.7.1-3", current, &apt, vec![claim("/w/a", ">=1.7")]);
+    let plan = build_install_plan(&[m], vec![]).unwrap();
+
+    assert_eq!(kinds(&plan), vec![ActionKind::Claim]);
+}
+
+#[test]
+fn install_plan_records_a_new_claim_when_the_installed_version_is_unknown() {
+    let apt = apt();
+    let current = Current::Present {
+        version: None,
+        origin: Origin::Installed,
+        claimed_by: vec![],
+    };
+    let m = managed("jq", "1.7.1-3", current, &apt, vec![claim("/w/a", ">=1.6")]);
+    let plan = build_install_plan(&[m], vec![]).unwrap();
+
+    assert_eq!(kinds(&plan), vec![ActionKind::Claim]);
+}
+
+#[test]
+fn install_plan_does_nothing_when_its_claim_is_already_recorded() {
+    // State stamps a system-scope claim with its user; the claim the project
+    // brings has none yet. Same manifest and spec is the same claim.
+    let apt = apt();
+    let current = Current::Present {
+        version: Some(deb("1.7.1-3")),
+        origin: Origin::Installed,
+        claimed_by: vec![claim_by("/w/a", ">=1.6", "ben"), claim("/w/b", ">=1.7")],
+    };
+    let claims = vec![claim("/w/b", ">=1.7"), claim("/w/a", ">=1.6")];
+    let m = managed("jq", "1.7.1-3", current, &apt, claims);
+    let plan = build_install_plan(&[m], vec![]).unwrap();
+
+    assert!(plan.actions.is_empty(), "{:?}", kinds(&plan));
+}
+
 #[test]
 fn install_plan_accepts_a_present_satisfying_accepted_package() {
     let apt = apt();
     let current = Current::Present {
         version: Some(deb("2.43.0")),
         origin: Origin::Accepted,
+        claimed_by: vec![],
     };
     let m = managed(
         "git",
@@ -318,6 +394,7 @@ fn install_plan_warns_when_an_accepted_package_no_longer_satisfies() {
     let current = Current::Present {
         version: Some(deb("2.39.0")),
         origin: Origin::Accepted,
+        claimed_by: vec![],
     };
     let m = managed(
         "git",
@@ -392,6 +469,7 @@ fn install_plan_orders_installs_then_upgrades_then_holds() {
         Current::Present {
             version: Some(deb("1.0-1")),
             origin: Origin::Installed,
+            claimed_by: vec![],
         },
         &apt,
         vec![],
@@ -480,6 +558,7 @@ fn an_unsupported_downgrade_is_an_error_that_skips_the_action() {
         current: Current::Present {
             version: Some(Version::parse("2.0.0", Scheme::Semver).unwrap()),
             origin: Origin::Installed,
+            claimed_by: vec![],
         },
         installer: &frozen,
         checksum: None,
@@ -635,6 +714,7 @@ fn an_accept_only_plan_needs_no_elevation() {
     let current = Current::Present {
         version: Some(deb("2.43.0")),
         origin: Origin::Accepted,
+        claimed_by: vec![],
     };
     let m = managed(
         "git",
@@ -1258,6 +1338,7 @@ fn apply_accept_records_a_claim_without_running_steps() {
     let current = Current::Present {
         version: Some(deb("2.43.0")),
         origin: Origin::Accepted,
+        claimed_by: vec![],
     };
     let plan = build_install_plan(
         &[managed(
@@ -1340,6 +1421,54 @@ fn apply_remove_runs_uninstall_and_drops_the_package() {
     );
     assert_eq!(exec.ran()[0][0], "remove");
     assert!(store.snapshot().packages.is_empty());
+}
+
+#[test]
+fn apply_claim_records_the_claims_and_keeps_version_and_origin() {
+    let apt = verifying(Scope::System, true, true, Installed::Absent);
+    let insts: BTreeMap<BackendId, &dyn Installer> =
+        BTreeMap::from([(BackendId::new("apt"), &apt as &dyn Installer)]);
+    let store = FakeStateStore::with(prestate(
+        "jq",
+        "1.7.1-3",
+        Origin::Installed,
+        vec![claim_by("/w/b", ">=1.7", "ann")],
+    ));
+    let current = Current::Present {
+        version: Some(deb("1.7.1-3")),
+        origin: Origin::Installed,
+        claimed_by: vec![claim_by("/w/b", ">=1.7", "ann")],
+    };
+    let claims = vec![claim_by("/w/b", ">=1.7", "ann"), claim("/w/a", ">=1.6")];
+    let plan =
+        build_install_plan(&[managed("jq", "1.7.1-3", current, &apt, claims)], vec![]).unwrap();
+
+    let exec = FakeStepRunner::ok();
+    let applier = HostApplier::new(
+        Scope::System,
+        AMD64,
+        Some("babbitt".to_string()),
+        &exec,
+        &insts,
+        &store,
+    );
+    let report = applier.apply(&plan).unwrap();
+
+    assert_eq!(
+        results(&report),
+        vec![(ActionKind::Claim, ApplyResult::Applied)]
+    );
+    assert!(exec.ran().is_empty(), "a claim runs no steps");
+    let leaf = &store.snapshot().packages[0].targets[&AMD64];
+    assert_eq!(leaf.origin, Origin::Installed, "still bosun's to prune");
+    assert_eq!(leaf.installed.as_str(), "1.7.1-3");
+    assert_eq!(
+        leaf.claimed_by,
+        vec![
+            claim_by("/w/b", ">=1.7", "ann"),
+            claim_by("/w/a", ">=1.6", "babbitt")
+        ]
+    );
 }
 
 #[test]
