@@ -29,22 +29,34 @@ enum Kind {
     Invalid,
 }
 
-/// Suffixes in apk's order; the empty slot is "no suffix", so an index
-/// below it is a pre-release.
-const SUFFIXES: [&str; 10] = [
-    "alpha", "beta", "pre", "rc", "", "cvs", "svn", "git", "hg", "p",
-];
+/// The pre-release suffixes, in order: each sorts below no suffix at all.
+const PRE_RELEASE: [&str; 4] = ["alpha", "beta", "pre", "rc"];
 
-/// Where "no suffix" sits in [`SUFFIXES`].
-const NO_SUFFIX: usize = 4;
+/// The other suffixes, in order: each sorts above no suffix at all.
+const POST_RELEASE: [&str; 5] = ["cvs", "svn", "git", "hg", "p"];
+
+/// A suffix's rank: negative for a pre-release, from 0 for the rest.
+fn suffix_rank(name: &str) -> Option<i8> {
+    let at = |list: &[&str]| list.iter().position(|s| *s == name);
+    match at(&PRE_RELEASE) {
+        Some(i) => Some(i as i8 - PRE_RELEASE.len() as i8),
+        None => at(&POST_RELEASE).map(|i| i as i8),
+    }
+}
 
 /// One token: its kind, its text (digits without the `.`, the letter, the
-/// suffix name, the hash) and, for a suffix, its rank in [`SUFFIXES`].
+/// suffix name, the hash) and, for a suffix, its [`suffix_rank`].
 #[derive(Clone, Copy, Debug)]
 struct Token<'a> {
     kind: Kind,
     text: &'a str,
-    suffix: usize,
+    suffix: i8,
+}
+
+impl Token<'_> {
+    fn is_pre_release(&self) -> bool {
+        self.kind == Kind::Suffix && self.suffix < 0
+    }
 }
 
 /// Reads tokens off a version string, each kind checked against the one
@@ -76,7 +88,7 @@ impl<'a> Tokens<'a> {
         Token {
             kind,
             text,
-            suffix: NO_SUFFIX,
+            suffix: 0,
         }
     }
 
@@ -96,7 +108,7 @@ impl<'a> Tokens<'a> {
             return Token {
                 kind: Kind::End,
                 text: "",
-                suffix: NO_SUFFIX,
+                suffix: 0,
             };
         };
         let last = self.last;
@@ -118,7 +130,7 @@ impl<'a> Tokens<'a> {
             b'_' if last <= Kind::SuffixNo => {
                 self.rest = &self.rest[1..];
                 let name = self.take(|b| b.is_ascii_lowercase());
-                match SUFFIXES.iter().position(|s| !s.is_empty() && *s == name) {
+                match suffix_rank(name) {
                     Some(rank) => Token {
                         suffix: rank,
                         ..self.token(Kind::Suffix, name)
@@ -157,7 +169,7 @@ pub(super) fn is_prerelease(raw: &str) -> bool {
     let mut tokens = Tokens::new(raw);
     let mut t = tokens.first();
     while t.kind < Kind::End {
-        if t.kind == Kind::Suffix && t.suffix < NO_SUFFIX {
+        if t.is_pre_release() {
             return true;
         }
         t = tokens.next_token();
@@ -200,10 +212,10 @@ pub(super) fn compare(a: &str, b: &str) -> Ordering {
     }
     // Equal so far: the side that goes on is greater, unless what it goes on
     // with is a pre-release suffix.
-    if ta.kind == Kind::Suffix && ta.suffix < NO_SUFFIX {
+    if ta.is_pre_release() {
         return Ordering::Less;
     }
-    if tb.kind == Kind::Suffix && tb.suffix < NO_SUFFIX {
+    if tb.is_pre_release() {
         return Ordering::Greater;
     }
     tb.kind.cmp(&ta.kind)
@@ -337,6 +349,7 @@ mod tests {
             "1.0-1",
             "1.0-r1-r2",
             "1.0~ab_rc1",
+            "1.0~ab~cd",
             "1.0..1",
             "1.0.",
             "1.0 ",
