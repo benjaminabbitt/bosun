@@ -114,7 +114,7 @@ real to check later):
 | `status` | what bosun manages on this machine and which manifests claim it (drift is `install --plan`'s job) |
 | `adopt <name>` | explicitly take ownership of an existing install: `accepted` → `installed` (§4.6) |
 | `lock` | resolve the manifest for this machine (its platform, plus platform-independent `any` entries) and write this machine's lock for it, keeping each version it already pins while that still fits (§4.5, §7). Warns when an older bosun's `bosun.lock` sits beside the manifest: it is no longer read |
-| `migrate [path] [--plan] [--yes]` | rewrite an older-version manifest as the current version (loading migrates in memory anyway; this writes it, so `add` / `remove` can edit it). annals edits only the entries the migration changes (`Loader::upgrade_keeping`), so comments elsewhere stay; when it can't edit in place it writes the whole file and says comments are not kept. It shows the result and confirms first, and keeps the original as `<file>.v<N>` |
+| `migrate [path] [--plan] [--yes]` | rewrite an older-version manifest as the current version (loading migrates in memory anyway; this writes it, so `add` / `remove` can edit it). annals edits only the entries the migration changes (`Loader::upgrade_keeping`), so comments elsewhere stay; when it can't edit in place it writes the whole file and says comments are not kept. It shows the result and confirms first (§4.8), and keeps the original as `<file>.v<N>` |
 | `install --frozen` | install exactly what this machine's lock records; never re-resolves, never writes the lock; errors when there is no lock for this manifest, or the manifest changed since it was locked (§7) |
 | `render args\|env\|json` | versions for a target platform as build args, env lines, or a JSON versions file (§8.3) |
 | `backends` | registered backends, their versions, and why others were skipped (§5.3) |
@@ -415,9 +415,11 @@ backend, package ID, from → to version, the claim(s) that drove it, and the pr
   pending, `1` error — so `bosun install --plan` doubles as a CI drift check.
 - **`--format json`** emits the plan as typed actions: the same value `install` executes.
 
-**Confirmation (proposed):** on a terminal `install` shows the plan and asks before applying;
-`--yes` skips the prompt; with no terminal and no `--yes` it refuses rather than guessing,
-so container builds use `RUN bosun install --yes`.
+**Confirmation:** on a terminal `install`, `uninstall`, `prune`, `remove` and `migrate` show
+what they will change and ask before applying; `--yes` skips the prompt. With no terminal (CI,
+a container build, a pipe) nobody is there to answer, so they apply without asking, still
+printing what they apply to stderr for the log. `--plan` is how a non-interactive run looks
+first.
 
 **Persisted plans: supported by design, not implemented in v1.** The plan is a serializable
 value that already carries what a saved plan needs to be checked before apply:
@@ -1035,8 +1037,6 @@ Future driver: CI.
   `remove` and `export` make, including entries inside compact `- name: …` items.
 - Distro detection (§5.4): confirm `ID_LIKE` matching, deferring release qualifiers, and
   `render --distro`.
-- `install` confirmation (§4.8): prompt on a terminal, `--yes` to skip, refuse without a
-  terminal unless `--yes` (proposed), or proceed automatically when non-interactive?
 - Remote `Index` per backend (§4.7, later): confirm which are feasible (Homebrew API,
   winget-pkgs, apt `Packages`, dnf repodata), which `render --target` and container builds
   for another platform need now that the lock is per machine.

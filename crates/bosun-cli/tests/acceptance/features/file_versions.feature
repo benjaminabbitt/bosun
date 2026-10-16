@@ -99,16 +99,25 @@ Feature: every file bosun reads carries a format version, and older ones migrate
     Then it succeeds
     And the lock pins ripgrep 14.1.1
 
-  Scenario: migrate without --yes and no terminal refuses and changes nothing
+  Scenario: migrate without --yes and no terminal rewrites without asking
     Given the manifest:
       """
       version: 1
       packages: []
       """
     When I run `bosun migrate .`
-    Then it fails
-    And it reports "re-run with --yes"
-    And the manifest is unchanged
+    Then it succeeds
+    And it warns "no terminal to ask; applying"
+    And the manifest reads:
+      """
+      version: 2
+      packages: []
+      """
+    And the file bosun.yaml.v1 reads:
+      """
+      version: 1
+      packages: []
+      """
 
   Scenario: migrate leaves a current manifest alone
     Given the manifest:

@@ -41,10 +41,13 @@ Feature: install, upgrade and cross-claim resolution at user scope (cargo)
     Then it succeeds
     And it says "applied"
 
-  Scenario: no terminal and no --yes refuses to apply
+  Scenario: no terminal and no --yes applies without asking, and says so
     When I run `bosun --format json install .`
-    Then it fails
-    And it says "bosun.cli.environment"
+    Then it succeeds
+    And it says "applied"
+    And bosun has recorded ripgrep 14.1.1
+    And it warns "no terminal to ask; applying"
+    And it does not warn "[y/N]"
 
   Scenario: an installed-lower package that fits is kept, and upgrade moves it
     Given bosun installed ripgrep 14.0.0 for another project wanting ">=14.0.0|<15.0.0"

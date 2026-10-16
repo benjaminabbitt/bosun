@@ -398,19 +398,29 @@ fn install_applies_and_records_state() {
 }
 
 #[test]
-fn install_without_a_terminal_and_without_yes_refuses() {
+fn install_without_a_terminal_and_without_yes_applies_and_logs_the_plan() {
     let dir = apply_project(USER_MANIFEST);
-    // assert_cmd gives no TTY; no --yes → refuse (exit 1), nothing installed.
+    // assert_cmd gives no TTY; no --yes → nobody to ask, so it applies, and the
+    // plan it applied is on stderr for the log.
     let assert = bosun(dir.path())
         .args(["--format", "json", "install"])
         .arg(dir.path())
         .assert()
-        .code(1);
-    assert_eq!(
-        stdout_json(&assert.get_output().stdout)["error"],
-        "bosun.cli.environment"
+        .success();
+    let out = assert.get_output();
+    assert_eq!(stdout_json(&out.stdout)["outcomes"][0]["result"], "applied");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("install    ripgrep"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("no terminal to ask; applying"),
+        "stderr: {stderr}"
     );
-    assert!(!state_file(dir.path()).exists());
+    assert!(!stderr.contains("[y/N]"), "stderr: {stderr}");
+    let state = fs::read_to_string(state_file(dir.path())).unwrap();
+    assert!(
+        state.contains("\"installed\": \"14.1.1\""),
+        "state: {state}"
+    );
 }
 
 #[test]

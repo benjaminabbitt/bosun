@@ -273,7 +273,7 @@ fn apply_mutation(
             out,
         )));
     }
-    // Confirm (§4.8): --yes skips; a TTY prompts; no TTY and no --yes refuses.
+    // Confirm (§4.8): --yes skips; a TTY prompts; no TTY applies.
     if !m.yes && !confirm(&Render::text(plan), "Apply?")? {
         return Ok(Applied::Stopped(0));
     }
@@ -299,15 +299,15 @@ fn apply_mutation(
     })
 }
 
-/// Show `shown` and ask `question` on the terminal (stderr). No terminal is a
-/// refusal naming `--yes`; anything but yes is a decline, said as such.
+/// Show `shown` and ask `question` on the terminal (stderr); anything but yes
+/// is a decline, said as such. No terminal (CI, a container build, a pipe) is
+/// yes: nobody is there to answer, so `shown` is still printed for the log.
 pub(crate) fn confirm(shown: &str, question: &str) -> Result<bool, CliError> {
-    if !std::io::stdin().is_terminal() {
-        return Err(CliError::Environment(
-            "refusing to apply without a terminal; re-run with --yes".to_string(),
-        ));
-    }
     eprintln!("{shown}");
+    if !std::io::stdin().is_terminal() {
+        eprintln!("{question} no terminal to ask; applying.");
+        return Ok(true);
+    }
     eprint!("{question} [y/N] ");
     std::io::stderr().flush().ok();
     let mut line = String::new();
