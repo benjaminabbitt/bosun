@@ -29,6 +29,57 @@ Feature: real backends against a disposable container
     And dpkg reports hello not installed
     And apt-mark reports hello not held
 
+  # apt refuses to change a held package under -y, so bosun releases its own
+  # hold before it moves the package to another version.
+  @apt-get
+  Scenario: apt moves a package it holds up and down, holding each version
+    Given the system state is clean
+    And a local apt repository offers bosun-probe 1.0-1 and 2.0-1
+    And the manifest:
+      """
+      version: 2
+      packages:
+        - name: bosun-probe
+          spec: "1.0-1"
+          install:
+            linux:debian: {backend: apt}
+      """
+    When I run `bosun install . --yes --scope system`
+    Then it succeeds
+    And dpkg reports bosun-probe at 1.0-1
+    And apt-mark reports bosun-probe held
+    When the manifest becomes:
+      """
+      version: 2
+      packages:
+        - name: bosun-probe
+          spec: "2.0-1"
+          install:
+            linux:debian: {backend: apt}
+      """
+    And I run `bosun install . --yes --scope system`
+    Then it succeeds
+    And dpkg reports bosun-probe at 2.0-1
+    And apt-mark reports bosun-probe held
+    When the manifest becomes:
+      """
+      version: 2
+      packages:
+        - name: bosun-probe
+          spec: "1.0-1"
+          install:
+            linux:debian: {backend: apt}
+      """
+    And I run `bosun install . --yes --scope system`
+    Then it succeeds
+    And dpkg reports bosun-probe at 1.0-1
+    And apt-mark reports bosun-probe held
+    When the manifest is deleted
+    And I run `bosun prune --yes --scope system`
+    Then it succeeds
+    And dpkg reports bosun-probe not installed
+    And apt-mark reports bosun-probe not held
+
   @dnf
   Scenario: dnf installs and versionlocks a package, then prune removes and unlocks it
     Given the dnf index is refreshed

@@ -5,6 +5,11 @@
 //!
 //! Non-interactive per Appendix B: `-y` plus `DEBIAN_FRONTEND=noninteractive`.
 //! A downgrade passes `--allow-downgrades` only on the explicit downgrade path.
+//!
+//! bosun holds what it installs (`apt-mark hold`), and apt refuses to change a
+//! held package under `-y` ("Held packages were changed and -y was used
+//! without --allow-change-held-packages"), so every version change and
+//! removal releases the hold first; `unhold` of an unheld package exits 0.
 
 use std::sync::Arc;
 
@@ -167,6 +172,16 @@ pub fn user_installs(runner: &dyn CommandRunner) -> Result<UserInstalls, PortErr
 }
 
 /// Run `program args`, its stdout when it exits with one of `ok`.
+/// The step that releases `pkg`'s hold, so apt may change or remove it.
+fn unhold(pkg: &Ref) -> Step {
+    Step::Run {
+        argv: argv(&["apt-mark", "unhold", &pkg.purl.native_id()]),
+        env: noninteractive(),
+        scope: Scope::System,
+        ok_exits: Vec::new(),
+    }
+}
+
 fn run_ok(
     runner: &dyn CommandRunner,
     program: &str,
@@ -256,18 +271,21 @@ impl Installer for AptBackend {
     }
 
     fn install_exact(&self, pkg: &Ref, version: &Version) -> Result<Steps, PortError> {
-        Ok(vec![Step::Run {
-            argv: argv(&[
-                "apt-get",
-                "install",
-                "-y",
-                "--no-install-recommends",
-                &pinned(pkg, version),
-            ]),
-            env: noninteractive(),
-            scope: Scope::System,
-            ok_exits: Vec::new(),
-        }])
+        Ok(vec![
+            unhold(pkg),
+            Step::Run {
+                argv: argv(&[
+                    "apt-get",
+                    "install",
+                    "-y",
+                    "--no-install-recommends",
+                    &pinned(pkg, version),
+                ]),
+                env: noninteractive(),
+                scope: Scope::System,
+                ok_exits: Vec::new(),
+            },
+        ])
     }
 
     fn verify_installed(&self, pkg: &Ref) -> Result<Installed, PortError> {
@@ -302,18 +320,21 @@ impl Installer for AptBackend {
     }
 
     fn downgrade(&self, pkg: &Ref, version: &Version) -> Result<Steps, PortError> {
-        Ok(vec![Step::Run {
-            argv: argv(&[
-                "apt-get",
-                "install",
-                "-y",
-                "--allow-downgrades",
-                &pinned(pkg, version),
-            ]),
-            env: noninteractive(),
-            scope: Scope::System,
-            ok_exits: Vec::new(),
-        }])
+        Ok(vec![
+            unhold(pkg),
+            Step::Run {
+                argv: argv(&[
+                    "apt-get",
+                    "install",
+                    "-y",
+                    "--allow-downgrades",
+                    &pinned(pkg, version),
+                ]),
+                env: noninteractive(),
+                scope: Scope::System,
+                ok_exits: Vec::new(),
+            },
+        ])
     }
 
     fn user_installs(&self) -> Result<UserInstalls, PortError> {
@@ -321,18 +342,12 @@ impl Installer for AptBackend {
     }
 
     fn uninstall(&self, pkg: &Ref) -> Result<Steps, PortError> {
-        let id = pkg.purl.native_id();
         // Release the hold first, so a package bosun installed and held leaves
         // no lingering hold once removed (§9).
         Ok(vec![
+            unhold(pkg),
             Step::Run {
-                argv: argv(&["apt-mark", "unhold", &id]),
-                env: noninteractive(),
-                scope: Scope::System,
-                ok_exits: Vec::new(),
-            },
-            Step::Run {
-                argv: argv(&["apt-get", "remove", "-y", &id]),
+                argv: argv(&["apt-get", "remove", "-y", &pkg.purl.native_id()]),
                 env: noninteractive(),
                 scope: Scope::System,
                 ok_exits: Vec::new(),
@@ -376,17 +391,22 @@ mod tests {
     }
 
     #[test]
-    fn install_exact_pins_the_version() {
+    fn install_exact_releases_the_hold_then_pins_the_version() {
+        // apt refuses to change a held package under -y, and bosun holds what
+        // it installs, so moving to another version releases the hold first.
         let b = backend(Arc::new(FakeCommandRunner::new()));
         assert_eq!(
             b.install_exact(&reff("fd-find"), &deb("9.0.0-1")).unwrap(),
-            vec![run_step(&[
-                "apt-get",
-                "install",
-                "-y",
-                "--no-install-recommends",
-                "fd-find=9.0.0-1"
-            ])]
+            vec![
+                run_step(&["apt-mark", "unhold", "fd-find"]),
+                run_step(&[
+                    "apt-get",
+                    "install",
+                    "-y",
+                    "--no-install-recommends",
+                    "fd-find=9.0.0-1"
+                ]),
+            ]
         );
     }
 
@@ -399,13 +419,16 @@ mod tests {
         );
         assert_eq!(
             b.downgrade(&reff("jq"), &deb("1.7.1-3")).unwrap(),
-            vec![run_step(&[
-                "apt-get",
-                "install",
-                "-y",
-                "--allow-downgrades",
-                "jq=1.7.1-3"
-            ])]
+            vec![
+                run_step(&["apt-mark", "unhold", "jq"]),
+                run_step(&[
+                    "apt-get",
+                    "install",
+                    "-y",
+                    "--allow-downgrades",
+                    "jq=1.7.1-3"
+                ]),
+            ]
         );
         assert_eq!(
             b.uninstall(&reff("jq")).unwrap(),

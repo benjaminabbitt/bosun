@@ -24,6 +24,9 @@ use tempfile::TempDir;
 #[derive(Debug, Default, World)]
 struct RealWorld {
     home: Option<TempDir>,
+    /// Whether this scenario set up the local apt repository, which goes
+    /// once it ends.
+    local_repo: bool,
     code: i32,
     stdout: String,
     stderr: String,
@@ -152,7 +155,80 @@ fn world_lacks(_w: &mut RealWorld, pkg: String) {
     assert_eq!(world_entries(&pkg), Vec::<String>::new());
 }
 
+/// Where the local apt repository lives, and the source list naming it.
+const LOCAL_REPO: &str = "/srv/bosun-apt";
+const LOCAL_SOURCE: &str = "/etc/apt/sources.list.d/bosun-probe.list";
+
+/// A flat apt repository at [`LOCAL_REPO`] offering `pkg` at `old` and
+/// `new`: empty `Architecture: all` packages built with `dpkg-deb`, indexed
+/// by hand, trusted, and the index refreshed. Whatever an earlier run left of
+/// `pkg` is removed first; the repository goes when the scenario ends.
+#[given(regex = r"^a local apt repository offers (\S+) (\S+) and (\S+)$")]
+fn local_apt_repo(w: &mut RealWorld, pkg: String, old: String, new: String) {
+    use sha2::Digest;
+    w.local_repo = true;
+    let _ = run("apt-mark", &["unhold", &pkg]);
+    let _ = run("apt-get", &["remove", "-y", &pkg]);
+    let repo = Path::new(LOCAL_REPO);
+    let _ = fs::remove_dir_all(repo);
+    fs::create_dir_all(repo).unwrap();
+    let mut index = String::new();
+    for version in [&old, &new] {
+        let root = repo.join(format!("{pkg}-{version}"));
+        fs::create_dir_all(root.join("DEBIAN")).unwrap();
+        let control = format!(
+            "Package: {pkg}\nVersion: {version}\nArchitecture: all\n\
+             Maintainer: bosun <bosun@example.invalid>\nDescription: bosun test package\n"
+        );
+        fs::write(root.join("DEBIAN/control"), &control).unwrap();
+        let file = format!("{pkg}_{version}_all.deb");
+        let deb = repo.join(&file);
+        let (code, out) = run(
+            "dpkg-deb",
+            &[
+                "--root-owner-group",
+                "--build",
+                &root.display().to_string(),
+                &deb.display().to_string(),
+            ],
+        );
+        assert_eq!(code, 0, "dpkg-deb: {out}");
+        let bytes = fs::read(&deb).unwrap();
+        let sha256 = sha2::Sha256::digest(&bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        index.push_str(&format!(
+            "{control}Filename: ./{file}\nSize: {}\nSHA256: {sha256}\n\n",
+            bytes.len()
+        ));
+    }
+    fs::write(repo.join("Packages"), index).unwrap();
+    fs::write(
+        LOCAL_SOURCE,
+        format!("deb [trusted=yes] file:{LOCAL_REPO} ./\n"),
+    )
+    .unwrap();
+    let (code, out) = run("apt-get", &["update"]);
+    assert_eq!(code, 0, "apt-get update failed: {out}");
+}
+
+/// Remove the local apt repository, its source and the index apt fetched
+/// from it, so apt no longer offers its packages.
+fn remove_local_repo() {
+    let _ = fs::remove_file(LOCAL_SOURCE);
+    let _ = fs::remove_dir_all(LOCAL_REPO);
+    let lists = Path::new("/var/lib/apt/lists");
+    let prefix = LOCAL_REPO.trim_start_matches('/').replace('/', "_");
+    for entry in fs::read_dir(lists).into_iter().flatten().flatten() {
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
 #[given("the manifest:")]
+#[when("the manifest becomes:")]
 fn a_manifest(w: &mut RealWorld, step: &Step) {
     let p = w.home();
     fs::write(
@@ -283,6 +359,13 @@ fn dpkg_installed(_w: &mut RealWorld, pkg: String) {
     let (code, out) = run("dpkg-query", &["-W", "-f=${db:Status-Status}", &pkg]);
     assert_eq!(code, 0, "dpkg-query failed: {out}");
     assert_eq!(out.trim(), "installed", "dpkg status: {out}");
+}
+
+#[then(expr = "dpkg reports {word} at {word}")]
+fn dpkg_version(_w: &mut RealWorld, pkg: String, version: String) {
+    let (code, out) = run("dpkg-query", &["-W", "-f=${Version}", &pkg]);
+    assert_eq!(code, 0, "dpkg-query failed: {out}");
+    assert_eq!(out.trim(), version, "dpkg version: {out}");
 }
 
 #[then(expr = "dpkg reports {word} not installed")]
@@ -419,6 +502,12 @@ fn main() {
     futures::executor::block_on(
         RealWorld::cucumber()
             .max_concurrent_scenarios(1)
+            .after(|_, _, _, _, world| {
+                if world.is_some_and(|w| w.local_repo) {
+                    remove_local_repo();
+                }
+                Box::pin(async {})
+            })
             .filter_run_and_exit("tests/acceptance_real/features", |feature, _, scenario| {
                 feature
                     .tags
