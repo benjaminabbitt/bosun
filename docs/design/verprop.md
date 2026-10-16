@@ -46,8 +46,8 @@ existing tool: it delegates to native PMs and reconciles. It is the wrong base f
 
 Its extra backends are tracked in [FUTURE.md](FUTURE.md).
 
-**Remaining escape hatch (not yet researched):** a custom apt/brew backend for `mise`. mise
-pins well, but only for language ecosystems.
+A custom apt/brew backend for `mise` (which pins well, but only for language ecosystems) was
+the last alternative considered; bosun was built greenfield instead.
 
 ## 3. Language: Rust
 
@@ -496,9 +496,10 @@ Behavior differs per tier: language → just re-assert exact every run; versione
 set a hold; rolling-OS → warn pin is best-effort + fall back to a downloaded artifact;
 universal-app → install the channel or commit, then hold.
 
-snap and flatpak are in v1 because they're heavily used on desktop Linux: snap ships by default
-on Ubuntu, and flatpak (with Flathub) on Fedora Workstation, Linux Mint and SteamOS. The
-mechanics in the row above are unverified (§11).
+snap and flatpak are heavily used on desktop Linux (snap ships by default on Ubuntu, flatpak
+with Flathub on Fedora Workstation, Linux Mint and SteamOS), but they wait until wanted, as do
+pacman, zypper, `go install` and gem; the next backends are dnf, apk, npm and uv, then brew
+(§13). The mechanics in the snap/flatpak row are unverified.
 
 Properties worth designing around:
 
@@ -610,11 +611,13 @@ packages:
 
 Rules (draft syntax):
 
-- **Selectors:** `install` keys are `any`, `<os>` or `<os>:<distro>`; the most specific match
-  for the current machine wins (exact distro `ID` > `ID_LIKE` match > plain `<os>` > `any`),
-  then `defaults.install`. A bare block under `install` (its keys are block keys, not
-  selectors) is `any`; mixing the two is an error. No match = the entry doesn't apply on this
-  platform (reported by `status`, not an error). Distro detection is below.
+- **Selectors:** `install` keys are `any`, `<os>` or `<os>:<distro>`, and (decided, not built
+  yet) `<os>:<distro>@<release>` and the libc selectors `<os>:<libc>[@<range>]` (below); the
+  most specific match for the current machine wins (`<distro>@<release>` > exact distro `ID` >
+  `ID_LIKE` match > plain `<os>` > `any`), then `defaults.install`. A bare block under
+  `install` (its keys are block keys, not selectors) is `any`; mixing the two is an error. No
+  match = the entry doesn't apply on this platform (reported by `status`, not an error).
+  Distro and libc detection are below.
 - **`backends`: the acceptable backends and their options.** `backends: {<backend id>:
   {<option>: <scalar>}}`; `backend: <id>` with an optional `package:` is the shorthand for one
   backend whose only option is its package. **`package`** is bosun's option, which every
@@ -644,35 +647,86 @@ Rules (draft syntax):
   package names across hundreds of repositories. A suggestion source only, never a runtime
   dependency (its API is rate-limited).
 
-#### Distro detection (proposed)
+#### Distro detection
 
 Source: `/etc/os-release` (systemd/freedesktop standard; fallback `/usr/lib/os-release`),
 present on essentially every current distro and container base image. It is plain
-`KEY=value` lines, so a small hand-written parser suffices. Fields used:
+`KEY=value` lines, so a small hand-written parser suffices. Fields used, and the release
+token each distro gets (below):
 
-| distro | `ID` | `ID_LIKE` | `VERSION_ID` |
-|---|---|---|---|
-| Ubuntu 24.04 | `ubuntu` | `debian` | `24.04` |
-| Debian 12 | `debian` | — | `12` |
-| Linux Mint | `linuxmint` | `ubuntu debian` | `22` |
-| Fedora 41 | `fedora` | — | `41` |
-| RHEL / Rocky | `rhel` / `rocky` | `fedora` / `rhel centos fedora` | `9.4` |
-| Amazon Linux 2023 | `amzn` | `fedora` | `2023` |
-| openSUSE Tumbleweed | `opensuse-tumbleweed` | `opensuse suse` | — |
-| Arch / Manjaro | `arch` / `manjaro` | — / `arch` | — |
-| Alpine | `alpine` | — | `3.20.3` |
+| distro | `ID` | `ID_LIKE` | `VERSION_ID` | `VERSION_CODENAME` | release token |
+|---|---|---|---|---|---|
+| Ubuntu 24.04 | `ubuntu` | `debian` | `24.04` | `noble` | `noble` |
+| Debian 12 | `debian` | — | `12` | `bookworm` | `bookworm` |
+| Linux Mint | `linuxmint` | `ubuntu debian` | `22` | `wilma` | `wilma` |
+| Fedora 41 | `fedora` | — | `41` | — | `fedora-41` |
+| RHEL / Rocky | `rhel` / `rocky` | `fedora` / `rhel centos fedora` | `9.4` | — | `rhel-9.4` / `rocky-9.4` |
+| Amazon Linux 2023 | `amzn` | `fedora` | `2023` | — | `amzn-2023` |
+| openSUSE Tumbleweed | `opensuse-tumbleweed` | `opensuse suse` | — | — | — |
+| Arch / Manjaro | `arch` / `manjaro` | — / `arch` | — | — | — |
+| Alpine | `alpine` | — | `3.20.3` | — | — |
 
-(Typical values; confirm against real images during implementation.)
+(Typical values. The Debian, Ubuntu and Alpine rows have been checked in containers; Alpine's
+`VERSION_ID` is a point release.)
 
-- `linux:<distro>` matches when `ID` equals it **or** `ID_LIKE` contains it, so Ubuntu, Mint
-  and Pop!_OS all match `linux:debian` without being listed.
-- Release qualifiers (`linux:ubuntu@24.04`, matching `VERSION_ID`) are reserved syntax for
-  later, for packages renamed between releases of one distro.
-- No os-release file (e.g. a `scratch` image): no distro, so only plain `linux` selectors
-  apply. Legacy files (`/etc/redhat-release`, `lsb_release`) are not supported.
+- **`ID_LIKE` (DECIDED, built):** `linux:<distro>` matches when `ID` equals it **or**
+  `ID_LIKE` contains it, so Ubuntu, Mint and Pop!_OS all match `linux:debian` without being
+  listed. An exact `ID` match outranks an `ID_LIKE` one.
+- **Release selectors (DECIDED, not built yet):** `linux:<distro>@<release>`, for a package
+  that differs between releases of one distro. apt-only manifests need them: `just` is absent
+  from Debian 12 and Ubuntu 22.04, 1.21 on Ubuntu 24.04 and 1.40 on Debian 13; `jq` is 1.6 on
+  bookworm and jammy, 1.7.1 on trixie and noble. Without them, a manifest written on one
+  release fails to resolve on another.
+  - **The release token is the purl `distro` qualifier value** (§5.6), matched exactly, so a
+    selector and the identity bosun records use one vocabulary: deb distros (`ID` or `ID_LIKE`
+    `debian`) use `VERSION_CODENAME` (`linux:debian@bookworm`, `linux:ubuntu@noble`); rpm
+    distros (`ID` or `ID_LIKE` `fedora`, `rhel` or `suse`) use `<ID>-<VERSION_ID>`
+    (`linux:fedora@fedora-41`), as in the official purl suite. No prefix or numeric rule on
+    `VERSION_ID` (`ubuntu@24` names nothing).
+  - The `<distro>` of a release selector matches `ID` only: a release is a release of that
+    distro, and `ID_LIKE` carries none.
+  - A distro whose package type has no `distro` rule (Arch, Alpine) gets no release
+    selectors.
+- **Missing facts are never an error by themselves.** os-release is optional, and so is
+  every field after `ID`:
+  - No os-release file (e.g. a `scratch` image): no distro, so only `any` and plain `linux`
+    selectors apply. A backend whose identity needs the distro (apt's `pkg:deb/<ID>/…`) can't
+    resolve there, and says so. Legacy files (`/etc/redhat-release`, `lsb_release`) are not
+    supported.
+  - No release token (rolling distros such as Arch and Tumbleweed; a deb distro without
+    `VERSION_CODENAME`; an rpm distro without `VERSION_ID`): no `@<release>` selector
+    matches, the exact-`ID`, `ID_LIKE` and plain selectors still do, and the purl carries no
+    `distro` qualifier. Debian testing and sid have a codename but no `VERSION_ID`, so deb
+    release selectors still work there.
 - **`render` needs the distro supplied:** a Docker platform string (`linux/amd64`) doesn't say
-  which distro the base image is, so `render` takes `--distro ubuntu@24.04` (or reads it from
-  a manifest target declaration) to pick selectors.
+  which distro the base image is, so `render` takes it in selector form (`--distro
+  ubuntu@noble`), or reads the image's own os-release (§8.2).
+
+#### libc (DECIDED, not built yet)
+
+On Linux the C library is a machine fact beside OS, arch and distro. A dynamically linked
+release binary depends on libc, not on the distro: a glibc build doesn't run on Alpine (musl),
+and one linked against a newer glibc fails on an older one. Neither purl nor the OCI platform
+carries libc, so bosun reuses existing vocabularies rather than inventing one:
+
+- **Family:** `gnu` | `musl`, the environment field of a Rust target triple. Selectors
+  `linux:gnu` and `linux:musl`; github-release's `{{ libc }}` and `{{ rust_target }}` asset
+  template variables ([asset-templates.md](../asset-templates.md)), which are refused until
+  detection exists.
+- **Version:** a glibc floor in the manylinux sense (PEP 600: `manylinux_2_31` runs on glibc
+  2.31 and later) is a vers range on the selector: `linux:gnu@>=2.31`.
+- **Detection:** the family from the `PT_INTERP` of `/bin/sh` (`ld-musl-*` is musl,
+  `ld-linux-*` glibc); the version by running that loader through the `CommandRunner` port
+  (glibc's prints it for `--version`; musl's prints its banner, version included, to stderr
+  and exits 1). Never from bosun's own libc (`gnu_get_libc_version`): bosun ships as a static
+  musl binary, so its own libc says nothing about the machine. Checked in containers: glibc
+  2.36 (Debian 12), 2.41 (Debian 13), 2.35 (Ubuntu 22.04), 2.39 (Ubuntu 24.04); musl 1.2.5
+  (Alpine 3.20).
+- No `/bin/sh`, or a statically linked one: libc unknown. libc selectors don't match, and a
+  template that uses `{{ libc }}` is an error, as now.
+
+Open: how a libc selector ranks against distro selectors, and the version scheme for its
+range (§11).
 
 ### 5.5 Machine interface and privilege
 
@@ -759,7 +813,9 @@ bosun does not invent a package-ID or version-range syntax. It uses the package-
 - The manifest stays sparse. `install.<selector>.package` is the backend's native ID
   (defaulting to `name`), or a full purl where that's clearer. bosun builds the canonical
   purl from the backend's purl type plus host facts. For deb/rpm the namespace is the distro
-  `ID`, with `arch` and `distro` qualifiers; a source becomes the standard `repository_url`
+  `ID`, with `arch` and `distro` qualifiers; `distro` is the release token (§5.4: deb
+  `VERSION_CODENAME`, rpm `<ID>-<VERSION_ID>`, the latter waiting on an rpm-typed backend) and
+  is left out when the machine has none. A source becomes the standard `repository_url`
   qualifier.
 - The lockfile and machine state record that purl (unversioned) per target, alongside
   `backend` and `resolved`/`installed`. It replaces the separate `package` and `source`
@@ -881,9 +937,9 @@ image builds are the same mechanism. Both of the first two shapes are supported 
   edited. Chain it with `docker build --build-arg BASE=<image>` or a bake file that uses the
   base as a named build context. A tool bump rebuilds only the tool layer, not the base.
   Rendering needs the base image's distro (for selectors and purl namespace): declared per
-  target (`--distro debian@12`), or read once from the image's `/etc/os-release`. Versions
-  for a platform other than the rendering machine's need remote indexes (§4.7); until then
-  this is rendered inside the base image, or from exact specs.
+  target (`--distro debian@bookworm`, §5.4), or read once from the image's `/etc/os-release`.
+  Versions for a platform other than the rendering machine's need remote indexes (§4.7);
+  until then this is rendered inside the base image, or from exact specs.
 - **in-build execution inside that layer** is the alternative when the distro can't be known
   ahead of time: the generated layer `COPY`s the static bosun binary and runs
   `bosun install --yes`, which reads the real base's os-release.
@@ -1022,30 +1078,31 @@ Future driver: CI.
 - **Optional ctxloom complement:** a structural-review agent (LLM design-judgment — connascence,
   boundary fit, over-engineering) that complements, not overlaps, the static gate.
 
-## 11. Open questions / next steps
+## 11. Open questions
 
-- ~~metapac as a base~~ — decided against (§2). Still open: a quick look at a mise custom
-  backend before committing to greenfield.
-- Verify exact pin/hold/install-exact mechanics for the un-researched backends (scoop, winget,
-  brew, pacman, zypper, apk, snap, flatpak; go install, cargo install, gem) — same
-  command-level rigor as the apt/dnf/uv/npm reference in §A. For snap: can a non-publisher
-  install a specific `--revision`, or only a channel? For flatpak: how are past commits
-  discovered and installed (`remote-info --log`, `update --commit`)?
-- Nail the manifest schema (`bosun.yaml`): top-level `targets`, `sources`, `defaults`;
-  entry = {name, backend, spec (vers), source?, per-target overrides?}.
-- Confirm the name. `bosun` is the working name. The `bosun` crate on crates.io is taken,
-  which doesn't matter while bosun ships only as release binaries (§3.1).
-- annals-yaml's comment-preserving editor: confirm it covers every manifest edit `add`,
-  `remove` and `export` make, including entries inside compact `- name: …` items.
-- Distro detection (§5.4): confirm `ID_LIKE` matching, deferring release qualifiers, and
-  `render --distro`.
-- Remote `Index` per backend (§4.7, later): confirm which are feasible (Homebrew API,
-  winget-pkgs, apt `Packages`, dnf repodata), which `render --target` and container builds
-  for another platform need now that the lock is per machine.
-- Dogfood (§12): how do ltk, taskloom and harp install, given that only `ctxloom` is published
-  as a release asset? Confirm the `github-release` backend and its two exceptions to §9 (bosun
-  verifies checksums; bosun picks a bin directory); decide how a family of entries shares one
-  release version; find out how reprise ships.
+- **Name.** `bosun` is the working name. The `bosun` crate on crates.io is taken, which
+  doesn't matter while bosun ships only as release binaries (§3.1). Keep it, or rename before
+  the first public release?
+- **libc selector rank (§5.4).** Where does `linux:gnu` / `linux:musl` sit against the distro
+  selectors when both match? Options: below `ID_LIKE` and above plain `<os>` (a distro names
+  a package source, libc only a binary's ABI), above every distro selector, or forbid mixing
+  libc and distro selectors in one entry. A ranged `linux:gnu@>=2.31` outranks a bare
+  `linux:gnu` either way.
+- **libc version scheme (§5.4).** Which vers scheme compares glibc and musl versions in a
+  `linux:gnu@<range>` selector? Options: bosun's generic chunk ordering (§5.6, as for types
+  with no vers definition), SemVer (doesn't fit two-part `2.31`), or a dedicated `glibc` type.
+- **Release selectors where purl has no `distro` rule.** The rule gives Alpine and Arch no
+  `@<release>`. Alpine's repositories are per branch (`v3.20`) and its `VERSION_ID` is a point
+  release (`3.20.10`), so when apk lands: leave Alpine without release selectors, or match its
+  branch (`alpine@3.20`)?
+- **Remote indexes (§4.7).** `render` for another platform, `Containerfile.bosun` with
+  versions decided ahead of the build, and the ctxloom dev container dogfood (§12) wait on a
+  remote `Index` (apt `Packages` first). Build it after Linux breadth, or keep it deferred
+  while in-build execution (§8.2) covers containers?
+- **The rest of the ctxloom family (§12).** ltk, taskloom and harp aren't release assets, and
+  reprise's distribution is unknown. Do they join the dogfood once published (and how do four
+  entries that release together share one version: a shared spec, or a `lock` warning when
+  they diverge), or stay out?
 
 ## 12. Dogfood
 
@@ -1093,7 +1150,7 @@ What dogfooding forces into v1 (proposed):
 3. **Pre-release versions:** the family is at `0.7.0-pre1`; ordering (§6) must place it below
    `0.7.0`, and selection never picks a pre-release unless the spec names one (§5.6).
 4. **Families sharing one release:** four entries that must move together. Either the manifest
-   gets a way to share one `spec` across entries, or `lock` warns when they diverge.
+   gets a way to share one `spec` across entries, or `lock` warns when they diverge (open, §11).
 5. **Shadowing installs:** this machine already has the family as local dev builds in
    `~/go/bin` (version strings like `v0.7.0-…-dirty`, matching no release) and just/jq from apt.
    apt's are `accepted` (§4.6). A bosun-installed release binary that a dev build shadows on
@@ -1128,7 +1185,9 @@ remote indexes. Traits stay ready; nothing is stubbed.
   `rust-version` is 1.96.1 too (cargo refuses to build under a lower toolchain).
 - Mutation testing inside agent containers runs `--in-place` on a disposable copy of the tree
   with `TMPDIR` off `/tmp`: the shared `.git` is read-only there, so `git worktree add` fails.
-- The dogfood `bosun.yaml` targets plain `linux:debian`, not a specific release.
+- The dogfood `bosun.yaml` targets plain `linux:debian`, not a specific release, so it
+  resolves only on Debian 13 (Debian 12 and Ubuntu 22.04 have no `just`); release
+  selectors (§5.4) are the fix.
 - ~~Range grammar is per version scheme (semver `VersionReq` / AND-ed comparators)~~ —
   superseded by vers (§5.6), slice 4b.
 - **No policies (user decision):** tolerant, exact/range modes and `deviation` are removed;
@@ -1197,7 +1256,8 @@ remote indexes. Traits stay ready; nothing is stubbed.
 - Resolve takes a narrow `Host { os, arch, distro }` and `ResolvableBackend { id, purl_type,
   vers_type, platform_independent, index }` values built by the CLI from the registry, and
   the manifest hash passed in, so bosun-resolve depends on neither bosun-host nor bosun-io.
-  Install blocks hold an ordered `backends` list (the YAML accepts a scalar or a sequence).
+  Install blocks hold an ordered `backends` list (the YAML accepts a scalar or a sequence);
+  manifest version 2 replaced it with an unordered set (§5.3).
   The deb `distro` qualifier is os-release `VERSION_CODENAME`.
 - An empty claim intersection is one refusal (listing each manifest's spec and what's
   available) whether the specs are disjoint or nothing published fits; telling those apart
@@ -1240,12 +1300,29 @@ lines; every per-crate mutation target met. The dogfood `bosun.yaml` and `bosun.
 committed; the real host install is the user's to run (`bosun install`, then
 `sudo bosun install --scope system`).
 
-**Deferred past M1:** `render` and
-`Containerfile.bosun` (§8, steps already describable); `upgrade`, `export`, `adopt`, `sources`,
-`formerly` migration; persisted plans; macOS / Windows machines; other backends; remote
-indexes; distinct messages for disjoint-vs-unpublished claim intersections (needs vers interval
-algebra); ltk / taskloom / harp in the dogfood (not published as release assets); a cargo
-scenario in the real-backend tier (skipped for compile time).
+**Since M1** (the M2 and M3 slices below): manifest version 2, the per-machine lock, `add` /
+`remove` / `migrate` / `upgrade`, more github release kinds, Windows (hermetic only), apply
+without a terminal, and claims in `status`. `just test` runs 546 tests and 114 scenarios.
+
+**Next, in order.** Linux first, because selection must settle on deb, rpm and musl before
+more is built on it, and the dogfood manifest resolves only on Debian 13 until release
+selectors exist:
+
+1. **Linux breadth:** release selectors and libc (§5.4), then the dnf and apk backends, so
+   selection is proven on deb, rpm and musl. apk needs Appendix-A-level research first.
+2. **Containers and language backends:** `render` and `Containerfile.bosun` (§8, waiting on a
+   remote apt `Index`, §11), npm and uv.
+3. **macOS, and Windows on a real host:** the macOS machine, brew (research first), and
+   verifying scoop, winget, choco and github-installer on Windows.
+
+Other backends (pacman, zypper, snap, flatpak, `go install`, gem) wait until wanted.
+
+**Still deferred:** `export`, `adopt`, `sources`, `formerly` migration; persisted plans;
+distinct messages for disjoint-vs-unpublished claim intersections (needs vers interval
+algebra); ltk / taskloom / harp in the dogfood (§11); a cargo scenario in the real-backend tier
+(skipped for compile time). Not expressible in the acceptance seam yet: an absent backend (the
+fixture always registers it), github-release's fetch into `~/.local/bin` (fake installers plan
+generic steps), and answering "n" at the prompt (needs a pty).
 
 **Slice status:**
 
@@ -1294,6 +1371,8 @@ scenario in the real-backend tier (skipped for compile time).
 | M3-1 | WindowsMachine (Administrator = High/System integrity label in `whoami /groups`; state `%ProgramData%` / `%LOCALAPPDATA%`, config `%APPDATA%`); github-release on Windows (`<binary>.exe` into `%USERPROFILE%\.local\bin`, `;`-separated case-insensitive PATH check); `Step::Remove` replaces `rm -f`; `just check-win` (zig cc as MinGW) | landed hermetically; workspace type-checks for x86_64-pc-windows-gnu; **unverified on a real Windows host** |
 | M3-2 | winget (user), scoop (user), choco (system) backends; probe only on Windows | landed hermetically (argv and output parsing unit-tested, fixture scenarios); **unverified on a real Windows host** |
 | M3-3 | github-installer: a release's `.msi` (`msiexec /i … /qn /norestart`) or `.exe` (manifest `silent_args`, required); found in the Uninstall registry keys (`reg query`, three views) by `display_name` (`*` suffix = prefix); uninstall `msiexec /x {ProductCode}` or the entry's quiet/plain uninstaller; msiexec's 3010 (reboot required) is success, reported; system scope, no hold, no downgrade | landed (unit tests); **unverified on a real Windows host**; no fixture scenario (the seam has no registry) |
+| M2-10 | with no terminal, every confirm (install, uninstall, prune, remove, migrate) applies, still printing what it applies to stderr; `--yes` only skips a terminal's prompt | landed |
+| M2-11 | `status [path]` lists every claim on each package (manifest, spec, user, whether the manifest still exists); with no path, everything bosun manages on the machine; `install` records a `claim` on a package bosun installed for another project | landed |
 
 **First real-host smoke run (2026-10-14, release build, Debian 13, read-only `--plan` and
 `lock` in a scratch dir).** `backends` found apt 3.0.3, cargo 1.96.1 and github-release; jq
