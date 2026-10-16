@@ -7,10 +7,10 @@
 //! literal `any` for platform-independent backends (cargo, go, npm, …). It is
 //! serialised as that string, so it can key a JSON object directly.
 //!
-//! [`Selector`] is the manifest `install` key: `any`, `<os>` or
-//! `<os>:<distro>` (§5.4). Matching a selector against a concrete machine (ID vs ID_LIKE
-//! precedence, distro facts) belongs to resolution, not here; this type is
-//! only the parsed key.
+//! [`Selector`] is the manifest `install` key: `any`, `<os>`, `<os>:<distro>`
+//! or `<os>:<distro>@<release>` (§5.4). Matching a selector against a concrete
+//! machine (release vs ID vs ID_LIKE precedence, distro facts) belongs to
+//! resolution, not here; this type is only the parsed key.
 
 use std::fmt;
 use std::str::FromStr;
@@ -55,8 +55,8 @@ pub enum Target {
     },
 }
 
-/// A manifest `install` selector key (§5.4): every OS, an OS, or an OS
-/// narrowed to a distro family.
+/// A manifest `install` selector key (§5.4): every OS, an OS, an OS narrowed
+/// to a distro family, or one release of a distro.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Selector {
     /// Any machine (`any`), for backends no OS ties down (npm, cargo, …); the
@@ -66,6 +66,10 @@ pub enum Selector {
     Os(Os),
     /// This OS narrowed to a distro (its `ID` or an `ID_LIKE` family).
     OsDistro(Os, String),
+    /// One release of a distro (`linux:debian@bookworm`): the distro's own
+    /// `ID`, and the release spelled as its packages' purl `distro` qualifier
+    /// ([`Distro::release`]).
+    OsDistroRelease(Os, String, String),
 }
 
 /// Why a platform string could not be parsed.
@@ -80,7 +84,7 @@ pub enum PlatformError {
     /// Not of the form `os/arch` (or `any`).
     #[error("{kind}: {0}", kind = errmsg::PLATFORM_INVALID_TARGET)]
     InvalidTarget(String),
-    /// Not of the form `os` or `os:distro`.
+    /// Not of the form `any`, `os`, `os:distro` or `os:distro@release`.
     #[error("{kind}: {0}", kind = errmsg::PLATFORM_INVALID_SELECTOR)]
     InvalidSelector(String),
 }
@@ -185,15 +189,25 @@ impl Selector {
     pub fn os(&self) -> Option<Os> {
         match self {
             Selector::Any => None,
-            Selector::Os(os) | Selector::OsDistro(os, _) => Some(*os),
+            Selector::Os(os) | Selector::OsDistro(os, _) | Selector::OsDistroRelease(os, ..) => {
+                Some(*os)
+            }
         }
     }
 
-    /// The distro family, when the selector names one.
+    /// The distro, when the selector names one.
     pub fn distro(&self) -> Option<&str> {
         match self {
             Selector::Any | Selector::Os(_) => None,
-            Selector::OsDistro(_, d) => Some(d),
+            Selector::OsDistro(_, d) | Selector::OsDistroRelease(_, d, _) => Some(d),
+        }
+    }
+
+    /// The release, when the selector names one.
+    pub fn release(&self) -> Option<&str> {
+        match self {
+            Selector::OsDistroRelease(_, _, release) => Some(release),
+            _ => None,
         }
     }
 }
@@ -204,6 +218,9 @@ impl fmt::Display for Selector {
             Selector::Any => f.write_str("any"),
             Selector::Os(os) => write!(f, "{os}"),
             Selector::OsDistro(os, distro) => write!(f, "{os}:{distro}"),
+            Selector::OsDistroRelease(os, distro, release) => {
+                write!(f, "{os}:{distro}@{release}")
+            }
         }
     }
 }
@@ -211,11 +228,21 @@ impl fmt::Display for Selector {
 impl FromStr for Selector {
     type Err = PlatformError;
     fn from_str(s: &str) -> Result<Selector, PlatformError> {
+        let invalid = || PlatformError::InvalidSelector(s.to_string());
         match s.split_once(':') {
             None if s == "any" => Ok(Selector::Any),
             None => Ok(Selector::Os(s.parse()?)),
-            Some(("any", _) | (_, "")) => Err(PlatformError::InvalidSelector(s.to_string())),
-            Some((os, distro)) => Ok(Selector::OsDistro(os.parse()?, distro.to_string())),
+            Some(("any", _) | (_, "")) => Err(invalid()),
+            Some((os, rest)) => match rest.split_once('@') {
+                None => Ok(Selector::OsDistro(os.parse()?, rest.to_string())),
+                Some(("", _) | (_, "")) => Err(invalid()),
+                Some((_, release)) if release.contains('@') => Err(invalid()),
+                Some((distro, release)) => Ok(Selector::OsDistroRelease(
+                    os.parse()?,
+                    distro.to_string(),
+                    release.to_string(),
+                )),
+            },
         }
     }
 }
@@ -242,6 +269,20 @@ impl Distro {
     /// selector specificity is resolution's job, not this type's.
     pub fn satisfies_family(&self, family: &str) -> bool {
         self.id == family || self.id_like.iter().any(|f| f == family)
+    }
+
+    /// This distro's release as packages of `purl_type` spell it: the value of
+    /// their purl `distro` qualifier (§5.6). deb: `VERSION_CODENAME`
+    /// (`bookworm`); rpm: `<ID>-<VERSION_ID>` (`fedora-41`). `None` for a type
+    /// with no such rule, or when a field it needs is missing or blank (Arch,
+    /// Debian sid), so a release selector never matches there.
+    pub fn release(&self, purl_type: &str) -> Option<String> {
+        let present = |field: &Option<String>| field.clone().filter(|v| !v.is_empty());
+        match purl_type {
+            "deb" => present(&self.version_codename),
+            "rpm" => present(&self.version_id).map(|v| format!("{}-{v}", self.id)),
+            _ => None,
+        }
     }
 }
 
@@ -378,6 +419,90 @@ mod tests {
         assert!(ubuntu.satisfies_family("ubuntu")); // by ID
         assert!(ubuntu.satisfies_family("debian")); // by ID_LIKE
         assert!(!ubuntu.satisfies_family("fedora"));
+    }
+
+    #[test]
+    fn selector_roundtrips_a_release() {
+        let rel = Selector::OsDistroRelease(Os::Linux, "debian".into(), "bookworm".into());
+        assert_eq!(rel.to_string(), "linux:debian@bookworm");
+        assert_eq!("linux:debian@bookworm".parse::<Selector>().unwrap(), rel);
+        assert_eq!(rel.os(), Some(Os::Linux));
+        assert_eq!(rel.distro(), Some("debian"));
+        assert_eq!(rel.release(), Some("bookworm"));
+        assert_eq!(
+            "linux:fedora@fedora-41".parse::<Selector>().unwrap(),
+            Selector::OsDistroRelease(Os::Linux, "fedora".into(), "fedora-41".into())
+        );
+    }
+
+    #[test]
+    fn only_a_release_selector_has_a_release() {
+        assert_eq!(Selector::Any.release(), None);
+        assert_eq!(Selector::Os(Os::Linux).release(), None);
+        assert_eq!(
+            Selector::OsDistro(Os::Linux, "debian".into()).release(),
+            None
+        );
+    }
+
+    #[test]
+    fn selector_rejects_a_malformed_release() {
+        for s in [
+            "linux:debian@",
+            "linux:@bookworm",
+            "linux@bookworm",
+            "any:debian@bookworm",
+            "linux:debian@book@worm",
+        ] {
+            assert!(s.parse::<Selector>().is_err(), "{s} should not parse");
+        }
+        assert!(matches!(
+            "linux:debian@".parse::<Selector>(),
+            Err(PlatformError::InvalidSelector(_))
+        ));
+        assert!(matches!(
+            "linux:@bookworm".parse::<Selector>(),
+            Err(PlatformError::InvalidSelector(_))
+        ));
+    }
+
+    fn os_release(id: &str, version_id: Option<&str>, codename: Option<&str>) -> Distro {
+        Distro {
+            id: id.into(),
+            id_like: Vec::new(),
+            version_id: version_id.map(str::to_string),
+            version_codename: codename.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn deb_release_is_the_codename() {
+        let bookworm = os_release("debian", Some("12"), Some("bookworm"));
+        assert_eq!(bookworm.release("deb").as_deref(), Some("bookworm"));
+    }
+
+    #[test]
+    fn rpm_release_is_id_dash_version_id() {
+        let fedora = os_release("fedora", Some("41"), None);
+        assert_eq!(fedora.release("rpm").as_deref(), Some("fedora-41"));
+    }
+
+    #[test]
+    fn a_missing_or_blank_field_gives_no_release() {
+        let sid = os_release("debian", None, None);
+        assert_eq!(sid.release("deb"), None);
+        assert_eq!(sid.release("rpm"), None);
+        let blank = os_release("fedora", Some(""), Some(""));
+        assert_eq!(blank.release("deb"), None);
+        assert_eq!(blank.release("rpm"), None);
+    }
+
+    #[test]
+    fn types_without_a_distro_rule_have_no_release() {
+        let bookworm = os_release("debian", Some("12"), Some("bookworm"));
+        for t in ["github", "cargo", "npm", "generic"] {
+            assert_eq!(bookworm.release(t), None, "{t}");
+        }
     }
 
     #[test]

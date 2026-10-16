@@ -8,7 +8,8 @@
 //! registry (bosun-host); tests supply fakes.
 //!
 //! For each package entry it: picks the most specific applicable `install`
-//! block (exact distro ID > ID_LIKE > plain OS > `defaults.install`, §5.4);
+//! block (distro release > exact distro ID > ID_LIKE > plain OS > `any`, then
+//! `defaults.install`, §5.4);
 //! chooses a backend by installer preference (flag > env > config > manifest
 //! order, a single explicit backend never overridden, §5.3); builds the
 //! canonical purl from the backend type and host facts (§5.6); queries the
@@ -250,7 +251,7 @@ fn resolve_entry(
     pinned: Option<&LockPackage>,
 ) -> Result<(Outcome, Option<(Target, LockPackage)>), ResolveError> {
     // §5.4: the most specific install block that applies here, defaults merged.
-    let Some(block) = effective_block(entry, manifest, host) else {
+    let Some(block) = effective_block(entry, manifest, host, backends) else {
         return Ok((Outcome::NotApplicable(NotApplicable::NoSelector), None));
     };
     if block.backends.is_empty() {
@@ -365,14 +366,20 @@ fn resolve_entry(
 /// The effective install block for `entry` on `host`: the most specific block
 /// in `entry.install` merged over the most specific in `defaults.install`
 /// (entry fields win, missing fields inherit). `None` when neither declares a
-/// block that applies to this host.
+/// block that applies to this host. A block naming no backends is matched
+/// through the defaults' backends, the ones it would install with.
 fn effective_block(
     entry: &ManifestEntry,
     manifest: &Manifest,
     host: &Host<'_>,
+    registered: &[ResolvableBackend<'_>],
 ) -> Option<InstallBlock> {
-    let from_defaults = most_specific(&manifest.defaults, host);
-    let from_entry = most_specific(&entry.install, host);
+    let from_defaults = most_specific(&manifest.defaults, host, registered, &Backends::new());
+    let inherited = from_defaults
+        .as_ref()
+        .map(|b| b.backends.clone())
+        .unwrap_or_default();
+    let from_entry = most_specific(&entry.install, host, registered, &inherited);
     match (from_defaults, from_entry) {
         (None, None) => None,
         (Some(block), None) | (None, Some(block)) => Some(block),
@@ -401,34 +408,57 @@ fn merge_backends(mut defaults: Backends, entry: Backends) -> Backends {
 }
 
 /// The most specific selector in `map` that applies to `host`, by the §5.4
-/// ladder (exact distro ID > ID_LIKE > plain OS), or `None` if none apply.
-fn most_specific(map: &BTreeMap<Selector, InstallBlock>, host: &Host<'_>) -> Option<InstallBlock> {
+/// ladder (release > exact distro ID > ID_LIKE > plain OS > any), or `None`
+/// if none apply. A block's release is spelled by the purl types of its
+/// registered backends, or of `inherited` when it names none.
+fn most_specific(
+    map: &BTreeMap<Selector, InstallBlock>,
+    host: &Host<'_>,
+    registered: &[ResolvableBackend<'_>],
+    inherited: &Backends,
+) -> Option<InstallBlock> {
     map.iter()
-        .filter_map(|(sel, block)| specificity(sel, host).map(|rank| (rank, block)))
+        .filter_map(|(sel, block)| {
+            let candidates = if block.backends.is_empty() {
+                inherited
+            } else {
+                &block.backends
+            };
+            let purl_types: Vec<&str> = registered
+                .iter()
+                .filter(|b| candidates.contains_key(b.id.as_str()))
+                .map(|b| b.purl_type.as_str())
+                .collect();
+            specificity(sel, host, &purl_types).map(|rank| (rank, block))
+        })
         .max_by_key(|(rank, _)| *rank)
         .map(|(_, block)| block.clone())
 }
 
 /// How specifically `sel` applies to `host`: higher is more specific. `None`
-/// when it does not apply (wrong OS, or a distro family the host is not in).
-fn specificity(sel: &Selector, host: &Host<'_>) -> Option<u8> {
+/// when it does not apply (wrong OS, a distro family the host is not in, or a
+/// release none of `purl_types` spells as the host's own).
+fn specificity(sel: &Selector, host: &Host<'_>, purl_types: &[&str]) -> Option<u8> {
     match sel.os() {
         None => return Some(0), // any
         Some(os) if os != host.os => return None,
         Some(_) => {}
     }
-    match sel.distro() {
-        None => Some(1), // plain OS
-        Some(family) => {
-            let distro = host.distro?;
-            if distro.id == family {
-                Some(3) // exact ID
-            } else if distro.id_like.iter().any(|f| f == family) {
-                Some(2) // ID_LIKE family
-            } else {
-                None
-            }
-        }
+    let Some(family) = sel.distro() else {
+        return Some(1); // plain OS
+    };
+    let distro = host.distro?;
+    match sel.release() {
+        // A release names the distro's own ID, spelled as one of the block's
+        // backends spells it in its purl `distro` qualifier.
+        Some(release) => (distro.id == family
+            && purl_types
+                .iter()
+                .any(|t| distro.release(t).as_deref() == Some(release)))
+        .then_some(4),
+        None if distro.id == family => Some(3), // exact ID
+        None if distro.id_like.iter().any(|f| f == family) => Some(2), // ID_LIKE family
+        None => None,
     }
 }
 
@@ -496,8 +526,8 @@ fn build_purl(
                 name: name.to_string(),
             })?;
             qualifiers.insert("arch".to_string(), host.arch.to_string());
-            if let Some(codename) = &distro.version_codename {
-                qualifiers.insert("distro".to_string(), codename.clone());
+            if let Some(release) = distro.release("deb") {
+                qualifiers.insert("distro".to_string(), release);
             }
             Purl::from_components("deb", Some(&distro.id), native, None, qualifiers, None)
                 .map_err(bad_purl)
@@ -1406,6 +1436,314 @@ mod tests {
             &on_fedora.outcomes[0].outcome,
             Outcome::Resolved { backend, .. } if *backend == BackendId::new("cargo")
         ));
+    }
+
+    // --- release selectors (§5.4) --------------------------------------------
+
+    fn rpm_backend(index: &dyn Index) -> ResolvableBackend<'_> {
+        ResolvableBackend {
+            id: BackendId::new("dnf"),
+            purl_type: "rpm".to_string(),
+            vers_type: "generic".to_string(),
+            platform_independent: false,
+            index,
+        }
+    }
+
+    fn linux(distro: Option<&Distro>) -> Host<'_> {
+        Host {
+            os: Os::Linux,
+            arch: Arch::Amd64,
+            distro,
+        }
+    }
+
+    fn trixie() -> Distro {
+        Distro {
+            version_id: Some("13".to_string()),
+            version_codename: Some("trixie".to_string()),
+            ..debian()
+        }
+    }
+
+    fn jammy() -> Distro {
+        Distro {
+            id: "ubuntu".to_string(),
+            id_like: vec!["debian".to_string()],
+            version_id: Some("22.04".to_string()),
+            version_codename: Some("jammy".to_string()),
+        }
+    }
+
+    /// The spec of the block resolution picked, read off the resolved version:
+    /// each block below admits exactly one of the published versions.
+    fn picked(m: &Manifest, host: &Host<'_>, backends: &[ResolvableBackend<'_>]) -> String {
+        match &resolve(m, "h", host, backends, &[]).unwrap().outcomes[0].outcome {
+            Outcome::Resolved { version, .. } => version.as_str().to_string(),
+            other => panic!("expected a resolution, got {other:?}"),
+        }
+    }
+
+    /// A jq entry offering one apt block per selector, each pinned to its own
+    /// version, so the resolved version names the block that won.
+    fn jq_by_selector(selectors: &[(&str, &str)]) -> Manifest {
+        let install: Vec<(&str, InstallBlock)> = selectors
+            .iter()
+            .map(|(s, v)| (*s, block(&["apt"], None, Some(v))))
+            .collect();
+        manifest(&[], vec![entry("jq", None, &install)])
+    }
+
+    const EVERY_JQ: &[&str] = &["0.1-1", "0.2-1", "0.3-1", "0.4-1", "0.5-1"];
+
+    #[test]
+    fn precedence_is_release_then_id_then_id_like_then_os_then_any() {
+        let apt = FakeIndex::new(Scheme::Debian, EVERY_JQ);
+        let backends = [deb_backend(&apt)];
+        let distro = jammy();
+        let host = linux(Some(&distro));
+        let mut ladder = vec![
+            ("any", "0.1-1"),
+            ("linux", "0.2-1"),
+            ("linux:debian", "0.3-1"),
+            ("linux:ubuntu", "0.4-1"),
+            ("linux:ubuntu@jammy", "0.5-1"),
+        ];
+        // Each rung beats every rung below it.
+        while let Some((_, want)) = ladder.last().copied() {
+            assert_eq!(picked(&jq_by_selector(&ladder), &host, &backends), want);
+            ladder.pop();
+        }
+    }
+
+    #[test]
+    fn bookworm_and_trixie_pick_their_own_release_block() {
+        let apt = FakeIndex::new(Scheme::Debian, EVERY_JQ);
+        let backends = [deb_backend(&apt)];
+        let m = jq_by_selector(&[
+            ("linux:debian", "0.1-1"),
+            ("linux:debian@bookworm", "0.2-1"),
+            ("linux:debian@trixie", "0.3-1"),
+        ]);
+        let (bookworm, trixie) = (debian(), trixie());
+        assert_eq!(picked(&m, &linux(Some(&bookworm)), &backends), "0.2-1");
+        assert_eq!(picked(&m, &linux(Some(&trixie)), &backends), "0.3-1");
+    }
+
+    #[test]
+    fn a_release_names_the_exact_id_never_an_id_like_family() {
+        let apt = FakeIndex::new(Scheme::Debian, EVERY_JQ);
+        let backends = [deb_backend(&apt)];
+        let m = jq_by_selector(&[("linux", "0.1-1"), ("linux:debian@jammy", "0.2-1")]);
+        let distro = jammy();
+        assert_eq!(picked(&m, &linux(Some(&distro)), &backends), "0.1-1");
+    }
+
+    #[test]
+    fn a_host_without_a_release_falls_back_never_errs() {
+        let apt = FakeIndex::new(Scheme::Debian, EVERY_JQ);
+        let backends = [deb_backend(&apt)];
+        let m = jq_by_selector(&[
+            ("linux:debian", "0.1-1"),
+            ("linux:debian@bookworm", "0.2-1"),
+        ]);
+        let sid = Distro {
+            version_id: None,
+            version_codename: None,
+            ..debian()
+        };
+        assert_eq!(picked(&m, &linux(Some(&sid)), &backends), "0.1-1");
+
+        // No os-release at all (scratch): only the OS-level blocks apply.
+        let cargo = FakeIndex::new(Scheme::Semver, &["1.0.0", "2.0.0"]);
+        let backends = [cargo_backend(&cargo)];
+        let m = manifest(
+            &[],
+            vec![entry(
+                "jq",
+                None,
+                &[
+                    ("linux", block(&["cargo"], None, Some("1.0.0"))),
+                    (
+                        "linux:debian@bookworm",
+                        block(&["cargo"], None, Some("2.0.0")),
+                    ),
+                ],
+            )],
+        );
+        assert_eq!(picked(&m, &linux(None), &backends), "1.0.0");
+    }
+
+    #[test]
+    fn a_release_only_matches_through_a_backend_whose_type_carries_one() {
+        // github has no distro qualifier, so a bookworm block naming only
+        // github-release never applies, even on bookworm.
+        let apt = FakeIndex::new(Scheme::Debian, &["1.6-6"]);
+        let gh = FakeIndex::new(Scheme::Semver, &["1.7.1"]);
+        let backends = [deb_backend(&apt), github_backend(&gh)];
+        let m = manifest(
+            &[],
+            vec![entry(
+                "jq",
+                Some("*"),
+                &[
+                    ("linux:debian", block(&["apt"], None, None)),
+                    (
+                        "linux:debian@bookworm",
+                        block(&["github-release"], Some("jqlang/jq"), None),
+                    ),
+                ],
+            )],
+        );
+        let distro = debian();
+        assert_eq!(picked(&m, &linux(Some(&distro)), &backends), "1.6-6");
+    }
+
+    #[test]
+    fn a_release_block_with_several_backends_applies_and_preference_still_chooses() {
+        // apt carries the release, so the block applies; which of its
+        // backends installs stays the machine's preference (§5.3).
+        let apt = FakeIndex::new(Scheme::Debian, &["1.6-6"]);
+        let gh = FakeIndex::new(Scheme::Semver, &["1.7.1"]);
+        let backends = [deb_backend(&apt), github_backend(&gh)];
+        let mut both = block(&["apt", "github-release"], None, None);
+        both = with_option(both, "github-release", PACKAGE_OPTION, "jqlang/jq");
+        let m = manifest(
+            &[],
+            vec![entry(
+                "jq",
+                Some("*"),
+                &[
+                    ("linux", block(&["apt"], None, Some("0.0-0"))),
+                    ("linux:debian@bookworm", both),
+                ],
+            )],
+        );
+        let distro = debian();
+        let host = linux(Some(&distro));
+        let preferred = resolve(
+            &m,
+            "h",
+            &host,
+            &backends,
+            &[BackendId::new("github-release")],
+        );
+        assert!(matches!(
+            &preferred.unwrap().outcomes[0].outcome,
+            Outcome::Resolved { backend, .. } if *backend == BackendId::new("github-release")
+        ));
+        assert_eq!(picked(&m, &host, &backends), "1.6-6");
+    }
+
+    #[test]
+    fn a_release_backend_must_be_registered_here_to_carry_the_release() {
+        // apt is named but not registered: nothing here spells the release.
+        let cargo = FakeIndex::new(Scheme::Semver, &["1.0.0", "2.0.0"]);
+        let backends = [cargo_backend(&cargo)];
+        let m = manifest(
+            &[],
+            vec![entry(
+                "jq",
+                None,
+                &[
+                    ("linux", block(&["cargo"], None, Some("1.0.0"))),
+                    (
+                        "linux:debian@bookworm",
+                        block(&["apt", "cargo"], None, Some("2.0.0")),
+                    ),
+                ],
+            )],
+        );
+        let distro = debian();
+        assert_eq!(picked(&m, &linux(Some(&distro)), &backends), "1.0.0");
+    }
+
+    #[test]
+    fn a_release_block_naming_no_backend_matches_through_the_defaults_backends() {
+        let apt = FakeIndex::new(Scheme::Debian, EVERY_JQ);
+        let backends = [deb_backend(&apt)];
+        let m = manifest(
+            &[("linux:debian", block(&["apt"], None, None))],
+            vec![entry(
+                "jq",
+                Some("0.1-1"),
+                &[("linux:debian@bookworm", block(&[], None, Some("0.2-1")))],
+            )],
+        );
+        let (bookworm, trixie) = (debian(), trixie());
+        assert_eq!(picked(&m, &linux(Some(&bookworm)), &backends), "0.2-1");
+        assert_eq!(picked(&m, &linux(Some(&trixie)), &backends), "0.1-1");
+    }
+
+    #[test]
+    fn a_defaults_release_block_matches_through_its_own_backends() {
+        let apt = FakeIndex::new(Scheme::Debian, EVERY_JQ);
+        let backends = [deb_backend(&apt)];
+        let m = manifest(
+            &[
+                ("linux:debian", block(&["apt"], None, Some("0.1-1"))),
+                (
+                    "linux:debian@bookworm",
+                    block(&["apt"], None, Some("0.2-1")),
+                ),
+            ],
+            vec![entry("jq", None, &[])],
+        );
+        let distro = debian();
+        assert_eq!(picked(&m, &linux(Some(&distro)), &backends), "0.2-1");
+    }
+
+    #[test]
+    fn an_rpm_release_is_id_dash_version_id() {
+        let dnf = FakeIndex::new(Scheme::Generic, &["1.6", "1.7.1"]);
+        let backends = [rpm_backend(&dnf)];
+        let m = manifest(
+            &[],
+            vec![entry(
+                "jq",
+                None,
+                &[
+                    ("linux:fedora", block(&["dnf"], None, Some("1.7.1"))),
+                    ("linux:fedora@fedora-41", block(&["dnf"], None, Some("1.6"))),
+                    ("linux:fedora@41", block(&["dnf"], None, Some("0"))),
+                ],
+            )],
+        );
+        let fedora = Distro {
+            id: "fedora".to_string(),
+            id_like: Vec::new(),
+            version_id: Some("41".to_string()),
+            version_codename: None,
+        };
+        assert_eq!(picked(&m, &linux(Some(&fedora)), &backends), "1.6");
+    }
+
+    #[test]
+    fn a_release_selector_for_another_os_never_applies() {
+        let apt = FakeIndex::new(Scheme::Debian, EVERY_JQ);
+        let backends = [deb_backend(&apt)];
+        let m = jq_by_selector(&[("any", "0.1-1"), ("windows:debian@bookworm", "0.2-1")]);
+        let distro = debian();
+        assert_eq!(picked(&m, &linux(Some(&distro)), &backends), "0.1-1");
+    }
+
+    #[test]
+    fn deb_identity_omits_a_blank_codename() {
+        let apt = FakeIndex::new(Scheme::Debian, &["1.0-1"]);
+        let blank = Distro {
+            version_codename: Some(String::new()),
+            ..debian()
+        };
+        let host = linux(Some(&blank));
+        let m = jq_by_selector(&[("linux", "1.0-1")]);
+        let r = resolve(&m, "h", &host, &[deb_backend(&apt)], &[]).unwrap();
+        assert_eq!(
+            r.lock.packages[0].targets[&AMD64]
+                .placement
+                .purl
+                .to_string(),
+            "pkg:deb/debian/jq?arch=amd64"
+        );
     }
 
     #[test]

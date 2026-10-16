@@ -611,13 +611,13 @@ packages:
 
 Rules (draft syntax):
 
-- **Selectors:** `install` keys are `any`, `<os>` or `<os>:<distro>`, and (decided, not built
-  yet) `<os>:<distro>@<release>` and the libc selectors `<os>:<libc>[@<range>]` (below); the
-  most specific match for the current machine wins (`<distro>@<release>` > exact distro `ID` >
-  `ID_LIKE` match > plain `<os>` > `any`), then `defaults.install`. A bare block under
-  `install` (its keys are block keys, not selectors) is `any`; mixing the two is an error. No
-  match = the entry doesn't apply on this platform (reported by `status`, not an error).
-  Distro and libc detection are below.
+- **Selectors:** `install` keys are `any`, `<os>`, `<os>:<distro>` or
+  `<os>:<distro>@<release>`, and (decided, not built yet) the libc selectors
+  `<os>:<libc>[@<range>]` (below); the most specific match for the current machine wins
+  (`<distro>@<release>` > exact distro `ID` > `ID_LIKE` match > plain `<os>` > `any`), then
+  `defaults.install`. A bare block under `install` (its keys are block keys, not selectors) is
+  `any`; mixing the two is an error. No match = the entry doesn't apply on this platform
+  (reported by `status`, not an error). Distro and libc detection are below.
 - **`backends`: the acceptable backends and their options.** `backends: {<backend id>:
   {<option>: <scalar>}}`; `backend: <id>` with an optional `package:` is the shorthand for one
   backend whose only option is its package. **`package`** is bosun's option, which every
@@ -672,7 +672,7 @@ token each distro gets (below):
 - **`ID_LIKE` (DECIDED, built):** `linux:<distro>` matches when `ID` equals it **or**
   `ID_LIKE` contains it, so Ubuntu, Mint and Pop!_OS all match `linux:debian` without being
   listed. An exact `ID` match outranks an `ID_LIKE` one.
-- **Release selectors (DECIDED, not built yet):** `linux:<distro>@<release>`, for a package
+- **Release selectors (DECIDED, built):** `linux:<distro>@<release>`, for a package
   that differs between releases of one distro. apt-only manifests need them: `just` is absent
   from Debian 12 and Ubuntu 22.04, 1.21 on Ubuntu 24.04 and 1.40 on Debian 13; `jq` is 1.6 on
   bookworm and jammy, 1.7.1 on trixie and noble. Without them, a manifest written on one
@@ -687,6 +687,12 @@ token each distro gets (below):
     distro, and `ID_LIKE` carries none.
   - A distro whose package type has no `distro` rule (Arch, Alpine) gets no release
     selectors.
+  - The selector matches when some registered backend of its block (or, for a block naming
+    none, of the `defaults` block it inherits) spells this machine's release that way; which
+    of the block's backends installs is still the machine's preference (§5.3). So a block
+    naming only github-release never matches a release: name the release where the repo has
+    the package (`linux:debian@trixie: {backend: apt}`) and let the others fall back to
+    `linux`.
 - **Missing facts are never an error by themselves.** os-release is optional, and so is
   every field after `ID`:
   - No os-release file (e.g. a `scratch` image): no distro, so only `any` and plain `linux`

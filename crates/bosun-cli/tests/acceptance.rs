@@ -31,9 +31,17 @@ use tempfile::TempDir;
 struct Machine {
     os: String,
     arch: String,
-    /// `(id, codename)` for a named distro.
-    distro: Option<(String, String)>,
+    /// The os-release facts of a named distro.
+    distro: Option<MachineDistro>,
     elevated: bool,
+}
+
+/// A machine's os-release facts: `ID`, `ID_LIKE` and `VERSION_CODENAME`.
+#[derive(Debug, Clone)]
+struct MachineDistro {
+    id: String,
+    id_like: Vec<String>,
+    codename: Option<String>,
 }
 
 /// A backend's fixed metadata, as the real backend declares it.
@@ -192,8 +200,8 @@ impl BosunWorld {
             "http": self.http(),
             "home": self.home(),
         });
-        if let Some((id, codename)) = &m.distro {
-            fx["distro"] = json!({"id": id, "codename": codename});
+        if let Some(d) = &m.distro {
+            fx["distro"] = json!({"id": d.id, "id_like": d.id_like, "codename": d.codename});
         }
         if let Some(f) = &self.fail_step {
             fx["fail_step"] = json!(f);
@@ -315,16 +323,42 @@ fn versions(list: &str) -> Vec<String> {
 
 // ---- the machine and its backends -----------------------------------------
 
-#[given(regex = r"^an? (Linux|Debian \S+|Windows) (\S+) machine, (not elevated|elevated)$")]
+#[given(
+    regex = r"^an? (Linux|Debian \S+|Ubuntu \S+|Windows) (\S+) machine, (not elevated|elevated)$"
+)]
 fn a_machine(world: &mut BosunWorld, os: String, arch: String, privilege: String) {
-    let distro = os
-        .strip_prefix("Debian ")
-        .map(|codename| ("debian".to_string(), codename.to_string()));
+    let distro = match os.split_once(' ') {
+        Some(("Debian", codename)) => Some(MachineDistro {
+            id: "debian".into(),
+            id_like: Vec::new(),
+            codename: Some(codename.into()),
+        }),
+        Some(("Ubuntu", codename)) => Some(MachineDistro {
+            id: "ubuntu".into(),
+            id_like: vec!["debian".into()],
+            codename: Some(codename.into()),
+        }),
+        _ => None,
+    };
     world.machine = Some(Machine {
         os: if os == "Windows" { "windows" } else { "linux" }.into(),
         arch,
         distro,
         elevated: privilege == "elevated",
+    });
+}
+
+#[given(regex = r"^a Debian (\S+) machine with no release codename, not elevated$")]
+fn a_debian_machine_without_release(world: &mut BosunWorld, arch: String) {
+    world.machine = Some(Machine {
+        os: "linux".into(),
+        arch,
+        distro: Some(MachineDistro {
+            id: "debian".into(),
+            id_like: Vec::new(),
+            codename: None,
+        }),
+        elevated: false,
     });
 }
 
@@ -575,8 +609,12 @@ fn bosun_recorded(
     let b = world.backend_for(&pkg).clone();
     let purl = match b.meta.purl_type {
         "deb" => {
-            let (distro, codename) = m.distro.clone().expect("a deb package needs a distro");
-            format!("pkg:deb/{distro}/{pkg}?arch={}&distro={codename}", m.arch)
+            let d = m.distro.clone().expect("a deb package needs a distro");
+            let distro = d
+                .codename
+                .map(|c| format!("&distro={c}"))
+                .unwrap_or_default();
+            format!("pkg:deb/{}/{pkg}?arch={}{distro}", d.id, m.arch)
         }
         t => format!("pkg:{t}/{pkg}"),
     };
