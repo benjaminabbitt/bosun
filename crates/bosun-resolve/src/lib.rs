@@ -157,7 +157,7 @@ pub enum ResolveError {
         #[source]
         source: PurlError,
     },
-    /// A deb identity needs distro facts this host lacks.
+    /// A deb or rpm identity needs distro facts this host lacks.
     #[error("{kind}: {name}", kind = errmsg::NO_DISTRO)]
     NoDistro {
         /// The entry's logical name.
@@ -500,6 +500,10 @@ fn choose_backend<'b>(
 /// - `deb`: `pkg:deb/<distro-id>/<name>?arch=<arch>&distro=<codename>` — the
 ///   namespace is the distro ID and the qualifiers carry arch and the distro
 ///   codename (from `VERSION_CODENAME`), omitted when the host has none.
+/// - `rpm`: `pkg:rpm/<distro-id>/<name>?arch=<rpm arch>&distro=<id>-<version-id>`
+///   — the namespace is the distro ID, the arch is rpm's spelling (`x86_64`),
+///   and `distro` is `ID-VERSION_ID` (`fedora-41`), omitted without a
+///   `VERSION_ID`.
 /// - `github`: `pkg:github/<owner>/<repo>?binary=<logical>` — the package id
 ///   is `owner/repo`; the `binary` qualifier defaults to the entry's logical
 ///   name so `- name: ltk` with `package: owner/repo` selects the `ltk` binary.
@@ -532,6 +536,17 @@ fn build_purl(
             Purl::from_components("deb", Some(&distro.id), native, None, qualifiers, None)
                 .map_err(bad_purl)
         }
+        "rpm" => {
+            let distro = host.distro.ok_or_else(|| ResolveError::NoDistro {
+                name: name.to_string(),
+            })?;
+            qualifiers.insert("arch".to_string(), rpm_arch(host.arch).to_string());
+            if let Some(release) = &distro.version_id {
+                qualifiers.insert("distro".to_string(), format!("{}-{release}", distro.id));
+            }
+            Purl::from_components("rpm", Some(&distro.id), native, None, qualifiers, None)
+                .map_err(bad_purl)
+        }
         "github" => {
             let (owner, repo) =
                 native
@@ -547,6 +562,14 @@ fn build_purl(
         other => {
             Purl::from_components(other, None, native, None, qualifiers, None).map_err(bad_purl)
         }
+    }
+}
+
+/// rpm's name for an architecture (`uname -m`).
+fn rpm_arch(arch: Arch) -> &'static str {
+    match arch {
+        Arch::Amd64 => "x86_64",
+        Arch::Arm64 => "aarch64",
     }
 }
 
@@ -2114,6 +2137,90 @@ mod tests {
         let err = resolve(&m, "h", &host, &[deb_backend(&apt)], &[]).unwrap_err();
         assert_eq!(
             err,
+            ResolveError::NoDistro {
+                name: "jq".to_string()
+            }
+        );
+    }
+
+    fn rpm_backend(index: &dyn Index) -> ResolvableBackend<'_> {
+        ResolvableBackend {
+            id: BackendId::new("dnf"),
+            purl_type: "rpm".to_string(),
+            vers_type: "rpm".to_string(),
+            platform_independent: false,
+            index,
+        }
+    }
+
+    fn rpm_distro(id: &str, id_like: &[&str], version_id: Option<&str>) -> Distro {
+        Distro {
+            id: id.to_string(),
+            id_like: id_like.iter().map(|s| s.to_string()).collect(),
+            version_id: version_id.map(str::to_string),
+            version_codename: None,
+        }
+    }
+
+    /// The identity and version `jq` resolves to through dnf on `distro`/`arch`.
+    fn rpm_identity(distro: Option<&Distro>, arch: Arch) -> Result<(String, String), ResolveError> {
+        let dnf = FakeIndex::new(Scheme::Rpm, &["1.7.1-8.fc41", "1.7.1-10.fc41", "1:1.6-1"]);
+        let host = Host {
+            os: Os::Linux,
+            arch,
+            distro,
+        };
+        let m = manifest(
+            &[],
+            vec![entry(
+                "jq",
+                Some("<1:0"),
+                &[("linux", block(&["dnf"], None, None))],
+            )],
+        );
+        let r = resolve(&m, "h", &host, &[rpm_backend(&dnf)], &[])?;
+        let leaf = &r.lock.packages[0].targets[&Target::Platform {
+            os: Os::Linux,
+            arch,
+        }];
+        Ok((
+            leaf.placement.purl.to_string(),
+            leaf.resolved.as_str().to_string(),
+        ))
+    }
+
+    #[test]
+    fn an_rpm_identity_names_the_vendor_rpm_arch_and_release() {
+        let fedora = rpm_distro("fedora", &[], Some("41"));
+        assert_eq!(
+            rpm_identity(Some(&fedora), Arch::Amd64).unwrap(),
+            (
+                "pkg:rpm/fedora/jq?arch=x86_64&distro=fedora-41".to_string(),
+                // rpm order: release 10 is above 8; the epoch-1 build is
+                // excluded by the spec.
+                "1.7.1-10.fc41".to_string()
+            )
+        );
+        let rocky = rpm_distro("rocky", &["rhel", "centos", "fedora"], Some("9.8"));
+        assert_eq!(
+            rpm_identity(Some(&rocky), Arch::Arm64).unwrap().0,
+            "pkg:rpm/rocky/jq?arch=aarch64&distro=rocky-9.8"
+        );
+    }
+
+    #[test]
+    fn an_rpm_identity_omits_the_distro_qualifier_without_a_version_id() {
+        let rolling = rpm_distro("fedora", &[], None);
+        assert_eq!(
+            rpm_identity(Some(&rolling), Arch::Amd64).unwrap().0,
+            "pkg:rpm/fedora/jq?arch=x86_64"
+        );
+    }
+
+    #[test]
+    fn an_rpm_identity_without_distro_facts_is_an_error() {
+        assert_eq!(
+            rpm_identity(None, Arch::Amd64).unwrap_err(),
             ResolveError::NoDistro {
                 name: "jq".to_string()
             }
