@@ -905,8 +905,9 @@ both (the grammars are small).
     (`1.10 > 1.9`), (2) a pre-release chunk *lowers* precedence (`1.0rc1 < 1.0`; Debian `~` sorts
     before empty), (3) arity/missing chunks need a defined rule (pad-zero vs rank-lowest, absent
     epoch = 0).
-  - Reference impls to depend on where possible: `deb-version`, an `rpm`/`rpmvercmp` crate,
-    `semver`, a PEP 440 crate. Reserve the custom regex-chunk path for the long tail.
+  - Reference impls to depend on where possible: `deb-version`, `semver`, a PEP 440 crate.
+    RPM (`rpmvercmp`) and Alpine (apk-tools) ordering are bosun's own, tested against each
+    tool's reference cases. Reserve the custom regex-chunk path for the long tail.
   - Go pseudo-versions (`v0.0.0-TIMESTAMP-hash`) validate the model — they order by the embedded
     timestamp chunk, no special-casing.
 
@@ -1111,36 +1112,34 @@ Future driver: CI.
 
 ## 11. Open questions
 
-- **Name.** `bosun` is the working name. The `bosun` crate on crates.io is taken, which
-  doesn't matter while bosun ships only as release binaries (§3.1). Keep it, or rename before
-  the first public release?
-- **Remote indexes (§4.7).** `render` for another platform, `Containerfile.bosun` with
-  versions decided ahead of the build, and the ctxloom dev container dogfood (§12) wait on a
-  remote `Index` (apt `Packages` first). Build it after Linux breadth, or keep it deferred
-  while in-build execution (§8.2) covers containers?
-- **The rest of the ctxloom family (§12).** ltk, taskloom and harp aren't release assets, and
-  reprise's distribution is unknown. Do they join the dogfood once published (and how do four
-  entries that release together share one version: a shared spec, or a `lock` warning when
-  they diverge), or stay out?
+None open. Settled here last:
+
+- **Name:** `bosun` stays. The crates.io name is taken, which doesn't matter while bosun ships
+  only as release binaries (§3.1).
+- **Remote indexes (§4.7):** built right after Linux breadth (release selectors, libc, dnf,
+  apk). `render` for another platform, `Containerfile.bosun` with versions decided ahead of
+  the build, and the ctxloom dev container dogfood (§12) wait on it; apt `Packages` first.
+- **The rest of the ctxloom family (§12):** ltk, taskloom, harp and reprise stay out of the
+  dogfood manifest, published or not.
 
 ## 12. Dogfood
 
-The first real manifest manages bosun's own toolbelt: **just, jq, and the ctxloom family**
-(ctxloom, ltk, taskloom, harp, reprise), on Debian 13 first, then macOS and Windows.
+The first real manifest manages bosun's own toolbelt: **just, jq and ctxloom**, on Debian 13
+first, then macOS and Windows. The rest of the ctxloom family (ltk, taskloom, harp, reprise)
+stays out (§11).
 
 | tool | Linux (Debian) | macOS | Windows |
 |---|---|---|---|
 | `just` | apt `just` | brew `just` | winget / scoop (ID to verify) |
 | `jq` | apt `jq` | brew `jq` | winget `jqlang.jq` (to verify) |
-| ctxloom, ltk, taskloom, harp | GitHub release archive | brew tap `ctxloom/tap` | GitHub release archive |
-| reprise | not in the ctxloom release config; distribution to find out | | |
+| ctxloom | GitHub release archive | brew tap `ctxloom/tap` | GitHub release archive |
 
 **Verified 2026-10-14 against the public `ctxloom/ctxloom` releases (latest `v0.6.4`):** only
 the `ctxloom` binary is published. Each OS/arch has `ctxloom_<ver>_<os>_<arch>.tar.gz` and a
 `…_full.tar.gz` variant (Windows: `.zip`), plus `checksums.txt`, `install.sh` and
 `install.ps1`. The archive holds `ctxloom` at its root, with LICENSE, README.md and man pages.
-No pre-releases are published (`0.7.0-pre1` exists only as local dev builds). **ltk, taskloom
-and harp are not release assets**, so their install path is an open question (§11).
+No pre-releases are published (`0.7.0-pre1` exists only as local dev builds). ltk, taskloom
+and harp are not release assets; they stay out of the dogfood (§11).
 (Earlier assumption, now known wrong: per-binary archives for all four.) The project's own Linux/Windows install path is a `curl | bash` script
 over those archives. (`go install` from the module is possible but needs a Go toolchain and
 builds rather than installs a release.)
