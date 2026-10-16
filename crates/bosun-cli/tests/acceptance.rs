@@ -36,12 +36,13 @@ struct Machine {
     elevated: bool,
 }
 
-/// A machine's os-release facts: `ID`, `ID_LIKE` and `VERSION_CODENAME`.
+/// A machine's os-release facts: `ID`, `ID_LIKE`, `VERSION_CODENAME` and `VERSION_ID`.
 #[derive(Debug, Clone)]
 struct MachineDistro {
     id: String,
     id_like: Vec<String>,
     codename: Option<String>,
+    version_id: Option<String>,
 }
 
 /// A backend's fixed metadata, as the real backend declares it.
@@ -60,6 +61,13 @@ fn known_backend(id: &str) -> BackendMeta {
         "apt" => BackendMeta {
             purl_type: "deb",
             vers_type: "deb",
+            platform_independent: false,
+            scope: "system",
+            supports_hold: true,
+        },
+        "dnf" => BackendMeta {
+            purl_type: "rpm",
+            vers_type: "rpm",
             platform_independent: false,
             scope: "system",
             supports_hold: true,
@@ -207,7 +215,12 @@ impl BosunWorld {
             "home": self.home(),
         });
         if let Some(d) = &m.distro {
-            fx["distro"] = json!({"id": d.id, "id_like": d.id_like, "codename": d.codename});
+            fx["distro"] = json!({
+                "id": d.id,
+                "id_like": d.id_like,
+                "codename": d.codename,
+                "version_id": d.version_id,
+            });
         }
         if let Some(f) = &self.fail_step {
             fx["fail_step"] = json!(f);
@@ -330,7 +343,7 @@ fn versions(list: &str) -> Vec<String> {
 // ---- the machine and its backends -----------------------------------------
 
 #[given(
-    regex = r"^an? (Linux|Debian \S+|Ubuntu \S+|Windows) (\S+) machine, (not elevated|elevated)$"
+    regex = r"^an? (Linux|Debian \S+|Ubuntu \S+|Fedora \S+|Rocky \S+|Windows) (\S+) machine, (not elevated|elevated)$"
 )]
 fn a_machine(world: &mut BosunWorld, os: String, arch: String, privilege: String) {
     let distro = match os.split_once(' ') {
@@ -338,11 +351,25 @@ fn a_machine(world: &mut BosunWorld, os: String, arch: String, privilege: String
             id: "debian".into(),
             id_like: Vec::new(),
             codename: Some(codename.into()),
+            version_id: None,
         }),
         Some(("Ubuntu", codename)) => Some(MachineDistro {
             id: "ubuntu".into(),
             id_like: vec!["debian".into()],
             codename: Some(codename.into()),
+            version_id: None,
+        }),
+        Some(("Fedora", release)) => Some(MachineDistro {
+            id: "fedora".into(),
+            id_like: Vec::new(),
+            codename: None,
+            version_id: Some(release.into()),
+        }),
+        Some(("Rocky", release)) => Some(MachineDistro {
+            id: "rocky".into(),
+            id_like: vec!["rhel".into(), "centos".into(), "fedora".into()],
+            codename: None,
+            version_id: Some(release.into()),
         }),
         _ => None,
     };
@@ -363,6 +390,7 @@ fn a_debian_machine_without_release(world: &mut BosunWorld, arch: String) {
             id: "debian".into(),
             id_like: Vec::new(),
             codename: None,
+            version_id: None,
         }),
         elevated: false,
     });
@@ -1207,6 +1235,15 @@ fn lock_pins(world: &mut BosunWorld, pkg: String, version: String) {
         lock_leaves(&doc)
             .any(|(name, leaf)| name == pkg.as_str() && leaf["resolved"] == version.as_str()),
         "want {pkg} {version} in the lock:\n{text}"
+    );
+}
+
+#[then(regex = r"^the lock identifies (\S+) as (\S+)$")]
+fn lock_identifies(world: &mut BosunWorld, pkg: String, purl: String) {
+    let (text, doc) = world.lock();
+    assert!(
+        lock_leaves(&doc).any(|(name, leaf)| name == pkg.as_str() && leaf["purl"] == purl.as_str()),
+        "want {pkg} as {purl} in the lock:\n{text}"
     );
 }
 

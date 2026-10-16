@@ -1,13 +1,14 @@
 //! Real-backend acceptance (§11, tier 2): runs the real `bosun` binary against
-//! real apt / github-release, **mutating the container**. Guarded twice — it
+//! real apt / dnf / github-release, **mutating the container**. Guarded twice — it
 //! refuses to run unless `BOSUN_ACCEPTANCE_REAL=1` *and* a container marker is
 //! present — so `cargo test --workspace` (which builds and runs this binary)
 //! stays hermetic and a developer cannot run it on a workstation by mistake.
 //! Run it with `just acceptance-real` inside a disposable container.
 //!
 //! State is redirected via `HOME` (user scope + the github bin dir land in a
-//! temp dir); system-scope apt state lives at its real `/var/lib/bosun` path,
-//! cleaned at the start of the apt scenario.
+//! temp dir); system-scope apt/dnf state lives at its real `/var/lib/bosun`
+//! path, cleaned at the start of each system scenario. A tagged scenario runs
+//! only where what it needs is installed (`@apt`, `@dnf`, `@dnf4`, `@github`).
 
 use std::fs;
 #[cfg(unix)]
@@ -60,6 +61,40 @@ fn clean(_w: &mut RealWorld) {
     let _ = fs::remove_file("/var/lib/bosun/state.json");
     let _ = run("apt-mark", &["unhold", "hello"]);
     let _ = run("apt-get", &["remove", "-y", "hello"]);
+}
+
+#[given("the dnf index is refreshed")]
+fn dnf_refresh(_w: &mut RealWorld) {
+    let (code, out) = run("dnf", &["makecache"]);
+    assert_eq!(code, 0, "dnf makecache failed: {out}");
+}
+
+/// dnf4 ships versionlock as a plugin; dnf5 has it built in.
+const VERSIONLOCK_PLUGIN: &str = "python3-dnf-plugin-versionlock";
+
+#[given("dnf has a versionlock command")]
+fn dnf_versionlock(_w: &mut RealWorld) {
+    if run("dnf", &["versionlock", "list"]).0 != 0 {
+        let (code, out) = run("dnf", &["install", "-y", VERSIONLOCK_PLUGIN]);
+        assert_eq!(code, 0, "installing {VERSIONLOCK_PLUGIN}: {out}");
+    }
+}
+
+#[given("dnf has no versionlock command")]
+fn dnf_no_versionlock(_w: &mut RealWorld) {
+    let _ = run("dnf", &["remove", "-y", VERSIONLOCK_PLUGIN]);
+    assert_ne!(
+        run("dnf", &["versionlock", "list"]).0,
+        0,
+        "versionlock remains"
+    );
+}
+
+#[given(expr = "the system state is clean and dnf has no {word}")]
+fn clean_dnf(_w: &mut RealWorld, pkg: String) {
+    let _ = fs::remove_file("/var/lib/bosun/state.json");
+    let _ = run("dnf", &["versionlock", "delete", &pkg]);
+    let _ = run("dnf", &["remove", "-y", &pkg]);
 }
 
 #[given("the manifest:")]
@@ -206,6 +241,55 @@ fn not_held(_w: &mut RealWorld, pkg: String) {
     assert!(!out.lines().any(|l| l.trim() == pkg), "showhold:\n{out}");
 }
 
+#[then(expr = "rpm reports {word} installed")]
+fn rpm_installed(_w: &mut RealWorld, pkg: String) {
+    let (code, out) = run("rpm", &["-q", &pkg]);
+    assert_eq!(code, 0, "rpm -q {pkg}: {out}");
+}
+
+#[then(expr = "rpm reports {word} not installed")]
+fn rpm_absent(_w: &mut RealWorld, pkg: String) {
+    let (code, out) = run("rpm", &["-q", &pkg]);
+    assert_ne!(code, 0, "rpm still reports {pkg} installed: {out}");
+}
+
+/// Whether `dnf versionlock list` names `pkg`: dnf5 prints `Package name:
+/// <pkg>`, dnf4 `<pkg>-<epoch>:<version>-<release>.*`.
+fn dnf_locked(pkg: &str) -> (bool, String) {
+    let (code, out) = run("dnf", &["versionlock", "list"]);
+    assert_eq!(code, 0, "dnf versionlock list: {out}");
+    let dnf5 = format!("Package name: {pkg}");
+    let dnf4 = format!("{pkg}-");
+    let locked = out.lines().map(str::trim).any(|l| {
+        l == dnf5
+            || l.strip_prefix(&dnf4)
+                .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+    });
+    (locked, out)
+}
+
+#[then(expr = "dnf reports {word} locked")]
+fn dnf_reports_locked(_w: &mut RealWorld, pkg: String) {
+    let (locked, out) = dnf_locked(&pkg);
+    assert!(locked, "versionlock list:\n{out}");
+}
+
+#[then(expr = "dnf reports {word} not locked")]
+fn dnf_reports_unlocked(_w: &mut RealWorld, pkg: String) {
+    let (locked, out) = dnf_locked(&pkg);
+    assert!(!locked, "versionlock list:\n{out}");
+}
+
+#[then(expr = "it warns {string}")]
+fn warns(w: &mut RealWorld, needle: String) {
+    assert!(
+        w.stdout.contains(&needle) || w.stderr.contains(&needle),
+        "stdout:\n{}\nstderr:\n{}",
+        w.stdout,
+        w.stderr
+    );
+}
+
 #[then(expr = "the binary {word} exists and is executable")]
 fn binary_executable(w: &mut RealWorld, name: String) {
     let path = w.bin_dir().join(&name);
@@ -248,6 +332,31 @@ fn enabled() -> bool {
             || std::env::var_os("container").is_some())
 }
 
+/// Whether `program` runs here (`<program> --version` exits 0).
+fn present(program: &str) -> bool {
+    Command::new(program)
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+/// Whether the host's `dnf` is dnf4 (dnf5 names itself on its first line).
+fn dnf4() -> bool {
+    let (code, out) = run("dnf", &["--version"]);
+    code == 0 && !out.starts_with("dnf5")
+}
+
+/// Whether everything a scenario's tags ask for is on this host.
+fn runs_here(tags: &[String]) -> bool {
+    tags.iter().all(|tag| match tag.as_str() {
+        "apt" => present("apt-get"),
+        "dnf" => present("dnf"),
+        "dnf4" => present("dnf") && dnf4(),
+        "github" => present("runuser"),
+        _ => true,
+    })
+}
+
 fn main() {
     if !enabled() {
         eprintln!(
@@ -256,7 +365,13 @@ fn main() {
         );
         return;
     }
+    // One scenario at a time: they share the container's package database
+    // and system state.
     futures::executor::block_on(
-        RealWorld::cucumber().run_and_exit("tests/acceptance_real/features"),
+        RealWorld::cucumber()
+            .max_concurrent_scenarios(1)
+            .filter_run_and_exit("tests/acceptance_real/features", |_, _, scenario| {
+                runs_here(&scenario.tags)
+            }),
     );
 }

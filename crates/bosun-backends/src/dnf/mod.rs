@@ -1,0 +1,900 @@
+//! The dnf backend (Fedora and the RHEL family, §5.2 versioned-OS tier).
+//! Mutations are described as step lists (`dnf install -y pkg-evr`,
+//! `dnf versionlock add`, …) a host executor runs; `verify_installed` (`rpm -q`)
+//! and `query_available` (`dnf repoquery`) run directly via the
+//! [`CommandRunner`]. dnf is Linux-only and system-scope.
+//!
+//! dnf4 (RHEL/Rocky 9) and dnf5 (Fedora 41+) take the same commands here. The
+//! hold is `dnf versionlock`: built into dnf5, a plugin for dnf4
+//! (`python3-dnf-plugin-versionlock`, providing `dnf-command(versionlock)`).
+//! Without the plugin the backend reports holds unsupported, so a plan warns
+//! instead of failing at the hold step. A lock blocks any other version of
+//! the package, so every version change and removal releases it first.
+
+use std::sync::Arc;
+
+use bosun_core::{
+    Arch, BackendId, Capabilities, HoldSupport, Installed, Os, Ref, Scheme, Scope, Source, Target,
+    Version,
+};
+use bosun_ports::{
+    Backend, BackendFactory, BackendMeta, Command, CommandRunner, HostInfo, Index, Installer,
+    PortError, Probe, Step, Steps,
+};
+use tracing::warn;
+
+use crate::logmsg;
+
+const BACKEND: &str = "dnf";
+
+/// One available build per line, for [`parse_repoquery`]. dnf5 needs the
+/// newline; dnf4 adds its own as well, leaving blank lines between records.
+const REPOQUERY_FORMAT: &str = "%{name}|%{epoch}|%{version}|%{release}|%{arch}\\n";
+
+/// The installed `[epoch:]version-release`, the epoch only when it is set.
+const RPM_QUERY_FORMAT: &str = "%|EPOCH?{%{EPOCH}:}:{}|%{VERSION}-%{RELEASE}\\n";
+
+/// The capability the dnf4 versionlock plugin provides.
+const VERSIONLOCK_COMMAND: &str = "dnf-command(versionlock)";
+
+/// Builds the dnf backend when `dnf` is present (§5.3).
+pub struct DnfFactory {
+    runner: Arc<dyn CommandRunner>,
+}
+
+impl DnfFactory {
+    /// Construct with the command runner the built backend will use.
+    pub fn new(runner: Arc<dyn CommandRunner>) -> DnfFactory {
+        DnfFactory { runner }
+    }
+
+    /// Whether `dnf versionlock` exists: always in dnf5, and in dnf4 when a
+    /// package provides the command (the plugin).
+    fn has_versionlock(&self, dnf: &Version) -> bool {
+        if *dnf >= Version::parse("5", Scheme::Rpm).expect("5 is a version") {
+            return true;
+        }
+        let query = Command::new("rpm", argv(&["-q", "--whatprovides", VERSIONLOCK_COMMAND]));
+        let present = self.runner.run(&query).is_ok_and(|out| out.success());
+        if !present {
+            warn!(message = logmsg::DNF_NO_VERSIONLOCK, dnf = %dnf);
+        }
+        present
+    }
+}
+
+impl BackendFactory for DnfFactory {
+    fn meta(&self) -> BackendMeta {
+        BackendMeta {
+            purl_type: "rpm",
+            vers_type: "rpm",
+            platform_independent: false,
+            option_keys: &[],
+        }
+    }
+
+    fn id(&self) -> BackendId {
+        BackendId::new(BACKEND)
+    }
+
+    fn probe(&self, host: &HostInfo) -> Result<Option<Probe>, PortError> {
+        if host.os != Os::Linux {
+            return Ok(None); // dnf is Linux-only
+        }
+        let out = host
+            .runner
+            .run(&Command::new("dnf", ["--version".to_string()]))?;
+        if !out.success() {
+            return Ok(None); // dnf not on PATH / not usable
+        }
+        Ok(Some(Probe {
+            backend: BackendId::new(BACKEND),
+            version: parse_dnf_version(&out.stdout_utf8())?,
+        }))
+    }
+
+    fn build(&self, probe: Probe) -> Backend {
+        let backend = DnfBackend {
+            runner: self.runner.clone(),
+            versionlock: self.has_versionlock(&probe.version),
+        };
+        Backend {
+            index: Box::new(backend.clone()),
+            installer: Box::new(backend),
+        }
+    }
+}
+
+/// `dnf5 version 5.2.17.0` (dnf5) or `4.14.0` (dnf4): the last word of the
+/// first line.
+fn parse_dnf_version(stdout: &str) -> Result<Version, PortError> {
+    let word = stdout
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().last())
+        .ok_or_else(|| PortError::CommandOutput {
+            detail: format!("could not read dnf version from {stdout:?}"),
+        })?;
+    Version::parse(word, Scheme::Rpm).map_err(|e| PortError::CommandOutput {
+        detail: format!("dnf version {word:?}: {e}"),
+    })
+}
+
+#[derive(Clone)]
+struct DnfBackend {
+    runner: Arc<dyn CommandRunner>,
+    /// Whether `dnf versionlock` is available (dnf5, or dnf4 with the plugin).
+    versionlock: bool,
+}
+
+fn argv(parts: &[&str]) -> Vec<String> {
+    parts.iter().map(|s| s.to_string()).collect()
+}
+
+/// A system-scope `dnf …` step. dnf needs no environment to stay quiet; `-y`
+/// on each mutating command answers its one prompt.
+fn dnf(args: &[&str]) -> Step {
+    let mut full = vec!["dnf"];
+    full.extend_from_slice(args);
+    Step::Run {
+        argv: argv(&full),
+        env: Vec::new(),
+        scope: Scope::System,
+        ok_exits: Vec::new(),
+    }
+}
+
+/// `<name>-<[epoch:]version-release>`, how dnf names one exact build.
+fn nevr(pkg: &Ref, version: &Version) -> String {
+    format!("{}-{}", pkg.purl.native_id(), version.as_str())
+}
+
+/// rpm's name for an architecture (`uname -m`).
+fn rpm_arch(arch: Arch) -> &'static str {
+    match arch {
+        Arch::Amd64 => "x86_64",
+        Arch::Arm64 => "aarch64",
+    }
+}
+
+/// The available versions in `dnf repoquery` output (one
+/// `name|epoch|version|release|arch` per line) for exactly `name`, built for
+/// `arch` or `noarch` (any arch when `None`), as `[epoch:]version-release`.
+fn parse_repoquery(stdout: &str, name: &str, arch: Option<&str>) -> Vec<Version> {
+    let mut versions: Vec<Version> = Vec::new();
+    for line in stdout.lines() {
+        let fields: Vec<&str> = line.split('|').collect();
+        let [n, epoch, version, release, a] = fields[..] else {
+            continue;
+        };
+        if n != name || !arch.is_none_or(|want| a == want || a == "noarch") {
+            continue;
+        }
+        let evr = match epoch {
+            "" | "0" => format!("{version}-{release}"),
+            e => format!("{e}:{version}-{release}"),
+        };
+        if let Ok(v) = Version::parse(evr, Scheme::Rpm) {
+            if !versions.contains(&v) {
+                versions.push(v);
+            }
+        }
+    }
+    versions
+}
+
+impl DnfBackend {
+    /// Steps that release `pkg`'s versionlock, so another version can land or
+    /// the package can go; `delete` exits 0 when there is none. Empty without
+    /// versionlock.
+    fn unlock(&self, pkg: &Ref) -> Steps {
+        if self.versionlock {
+            vec![dnf(&["versionlock", "delete", &pkg.purl.native_id()])]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn failed(out: &bosun_ports::Output) -> PortError {
+        PortError::CommandFailed {
+            program: "dnf".to_string(),
+            code: out.code,
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        }
+    }
+}
+
+impl Index for DnfBackend {
+    fn refresh(&self) -> Result<(), PortError> {
+        let out = self
+            .runner
+            .run(&Command::new("dnf", argv(&["makecache", "--refresh"])))?;
+        if out.success() {
+            Ok(())
+        } else {
+            Err(Self::failed(&out))
+        }
+    }
+
+    fn query_available(&self, pkg: &Ref, target: &Target) -> Result<Vec<Version>, PortError> {
+        let name = pkg.purl.native_id();
+        let out = self.runner.run(&Command::new(
+            "dnf",
+            argv(&[
+                "repoquery",
+                "--available",
+                "--queryformat",
+                REPOQUERY_FORMAT,
+                &name,
+            ]),
+        ))?;
+        // An unknown package is an empty answer with exit 0; a failure is a
+        // broken repo or no network, which must not read as "no versions".
+        if !out.success() {
+            return Err(Self::failed(&out));
+        }
+        let arch = match target {
+            Target::Platform { arch, .. } => Some(rpm_arch(*arch)),
+            Target::Any => None,
+        };
+        Ok(parse_repoquery(&out.stdout_utf8(), &name, arch))
+    }
+}
+
+impl Installer for DnfBackend {
+    fn capabilities(&self) -> Capabilities {
+        // dnf installs and downgrades to exact repo builds; it holds through
+        // versionlock when that exists.
+        Capabilities {
+            supports_exact_version: true,
+            hold: if self.versionlock {
+                HoldSupport::Supported
+            } else {
+                HoldSupport::Unsupported
+            },
+            supports_downgrade: true,
+        }
+    }
+
+    fn scope(&self) -> Scope {
+        Scope::System
+    }
+
+    fn ensure_source(&self, source: &Source) -> Result<Steps, PortError> {
+        // A Copr project (`owner/project`), then a refresh of its metadata.
+        Ok(vec![
+            dnf(&["copr", "enable", "-y", source.id.as_str()]),
+            dnf(&["makecache"]),
+        ])
+    }
+
+    fn install_exact(&self, pkg: &Ref, version: &Version) -> Result<Steps, PortError> {
+        let mut steps = self.unlock(pkg);
+        steps.push(dnf(&[
+            "install",
+            "-y",
+            "--setopt=install_weak_deps=False",
+            &nevr(pkg, version),
+        ]));
+        Ok(steps)
+    }
+
+    fn verify_installed(&self, pkg: &Ref) -> Result<Installed, PortError> {
+        // `rpm -q` exits non-zero when the package is not installed: data, not
+        // an error. Installonly packages (kernel) list one line per version.
+        let out = self.runner.run(&Command::new(
+            "rpm",
+            argv(&[
+                "-q",
+                "--queryformat",
+                RPM_QUERY_FORMAT,
+                &pkg.purl.native_id(),
+            ]),
+        ))?;
+        if !out.success() {
+            return Ok(Installed::Absent);
+        }
+        let newest = out
+            .stdout_utf8()
+            .lines()
+            .filter_map(|line| Version::parse(line.trim(), Scheme::Rpm).ok())
+            .max();
+        Ok(match newest {
+            Some(v) => Installed::Present { version: Some(v) },
+            None => Installed::Absent,
+        })
+    }
+
+    fn hold(&self, pkg: &Ref, _version: &Version) -> Result<Steps, PortError> {
+        // Locks the installed build, which `install_exact` just put there.
+        if self.versionlock {
+            Ok(vec![dnf(&["versionlock", "add", &pkg.purl.native_id()])])
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    fn downgrade(&self, pkg: &Ref, version: &Version) -> Result<Steps, PortError> {
+        let mut steps = self.unlock(pkg);
+        steps.push(dnf(&[
+            "downgrade",
+            "-y",
+            "--setopt=install_weak_deps=False",
+            &nevr(pkg, version),
+        ]));
+        Ok(steps)
+    }
+
+    fn uninstall(&self, pkg: &Ref) -> Result<Steps, PortError> {
+        // Release the lock first, so a package bosun installed and held leaves
+        // no lingering lock once removed (§9).
+        let mut steps = self.unlock(pkg);
+        steps.push(dnf(&["remove", "-y", &pkg.purl.native_id()]));
+        Ok(steps)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bosun_core::SourceId;
+    use bosun_ports::testing::FakeCommandRunner;
+    use bosun_ports::Output;
+
+    /// Output captured from `registry.fedoraproject.org/fedora:41` (dnf5) and
+    /// `rockylinux/rockylinux:9` (dnf4).
+    mod captured {
+        pub const DNF5_VERSION: &str = include_str!("testdata/dnf5-version.txt");
+        pub const DNF4_VERSION: &str = include_str!("testdata/dnf4-version.txt");
+        pub const DNF5_REPOQUERY_JQ: &str = include_str!("testdata/dnf5-repoquery-jq.txt");
+        pub const DNF4_REPOQUERY_JQ: &str = include_str!("testdata/dnf4-repoquery-jq.txt");
+        pub const DNF5_REPOQUERY_TZDATA: &str = include_str!("testdata/dnf5-repoquery-tzdata.txt");
+        pub const DNF4_REPOQUERY_TZDATA: &str = include_str!("testdata/dnf4-repoquery-tzdata.txt");
+        pub const DNF5_REPOQUERY_SHADOW: &str =
+            include_str!("testdata/dnf5-repoquery-shadow-utils.txt");
+        pub const DNF4_REPOQUERY_SHADOW: &str =
+            include_str!("testdata/dnf4-repoquery-shadow-utils.txt");
+        pub const DNF5_RPMQ_JQ: &str = include_str!("testdata/dnf5-rpmq-jq.txt");
+        pub const DNF4_RPMQ_JQ: &str = include_str!("testdata/dnf4-rpmq-jq.txt");
+        pub const DNF5_RPMQ_SHADOW: &str = include_str!("testdata/dnf5-rpmq-shadow-utils.txt");
+        pub const DNF4_RPMQ_SHADOW: &str = include_str!("testdata/dnf4-rpmq-shadow-utils.txt");
+        pub const DNF5_RPMQ_ABSENT: &str = include_str!("testdata/dnf5-rpmq-tree-absent.txt");
+        pub const DNF4_RPMQ_ABSENT: &str = include_str!("testdata/dnf4-rpmq-tree-absent.txt");
+        pub const DNF4_NO_VERSIONLOCK: &str = include_str!("testdata/dnf4-whatprovides-before.txt");
+        pub const DNF4_VERSIONLOCK: &str = include_str!("testdata/dnf4-whatprovides-after.txt");
+    }
+    use captured::*;
+
+    fn rpm(v: &str) -> Version {
+        Version::parse(v, Scheme::Rpm).unwrap()
+    }
+
+    fn reff(name: &str) -> Ref {
+        Ref::new(format!("pkg:rpm/fedora/{name}").parse().unwrap())
+    }
+
+    fn backend(runner: Arc<dyn CommandRunner>, versionlock: bool) -> DnfBackend {
+        DnfBackend {
+            runner,
+            versionlock,
+        }
+    }
+
+    fn idle(versionlock: bool) -> DnfBackend {
+        backend(Arc::new(FakeCommandRunner::new()), versionlock)
+    }
+
+    fn exit(code: i32, stdout: &str) -> Output {
+        Output {
+            code: Some(code),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: Vec::new(),
+        }
+    }
+
+    /// A system-scope Run step with no extra environment.
+    fn run_step(argv: &[&str]) -> Step {
+        Step::Run {
+            argv: argv.iter().map(|s| s.to_string()).collect(),
+            env: Vec::new(),
+            scope: Scope::System,
+            ok_exits: Vec::new(),
+        }
+    }
+
+    const AMD64: Target = Target::Platform {
+        os: Os::Linux,
+        arch: Arch::Amd64,
+    };
+    const ARM64: Target = Target::Platform {
+        os: Os::Linux,
+        arch: Arch::Arm64,
+    };
+
+    fn host<'a>(os: Os, runner: &'a FakeCommandRunner) -> HostInfo<'a> {
+        HostInfo {
+            os,
+            arch: Arch::Amd64,
+            distro: None,
+            runner,
+        }
+    }
+
+    // ---- factory ----------------------------------------------------------
+
+    #[test]
+    fn meta_is_rpm_identity_and_ordering_per_distro() {
+        let f = DnfFactory::new(Arc::new(FakeCommandRunner::new()));
+        assert_eq!(f.id().as_str(), "dnf");
+        assert_eq!(
+            f.meta(),
+            BackendMeta {
+                purl_type: "rpm",
+                vers_type: "rpm",
+                platform_independent: false,
+                option_keys: &[],
+            }
+        );
+    }
+
+    #[test]
+    fn probe_reads_the_dnf5_and_dnf4_version() {
+        let factory = DnfFactory::new(Arc::new(FakeCommandRunner::new()));
+        for (stdout, want) in [(DNF5_VERSION, "5.2.17.0"), (DNF4_VERSION, "4.14.0")] {
+            let runner = FakeCommandRunner::new().with_stdout(stdout);
+            let probe = factory.probe(&host(Os::Linux, &runner)).unwrap().unwrap();
+            assert_eq!(probe.backend.as_str(), "dnf");
+            assert_eq!(probe.version.as_str(), want);
+            assert_eq!(probe.version.scheme(), Scheme::Rpm);
+            assert_eq!(runner.calls()[0].program, "dnf");
+            assert_eq!(runner.calls()[0].args, vec!["--version"]);
+        }
+    }
+
+    #[test]
+    fn probe_is_none_off_linux() {
+        let factory = DnfFactory::new(Arc::new(FakeCommandRunner::new()));
+        let runner = FakeCommandRunner::new().with_stdout(DNF5_VERSION);
+        assert!(factory.probe(&host(Os::Macos, &runner)).unwrap().is_none());
+        assert!(runner.calls().is_empty());
+    }
+
+    #[test]
+    fn probe_is_none_when_dnf_fails() {
+        let factory = DnfFactory::new(Arc::new(FakeCommandRunner::new()));
+        let runner = FakeCommandRunner::new().with_output(exit(127, ""));
+        assert!(factory.probe(&host(Os::Linux, &runner)).unwrap().is_none());
+    }
+
+    #[test]
+    fn parse_dnf_version_needs_a_word() {
+        assert_eq!(parse_dnf_version("4.14.0\n").unwrap().as_str(), "4.14.0");
+        assert!(parse_dnf_version("").is_err());
+        assert!(parse_dnf_version("\n4.14.0").is_err());
+    }
+
+    fn probe(version: &str) -> Probe {
+        Probe {
+            backend: BackendId::new("dnf"),
+            version: rpm(version),
+        }
+    }
+
+    #[test]
+    fn dnf5_holds_with_its_built_in_versionlock() {
+        let runner = Arc::new(FakeCommandRunner::new());
+        let built = DnfFactory::new(runner.clone()).build(probe("5.2.17.0"));
+        assert_eq!(built.installer.capabilities().hold, HoldSupport::Supported);
+        assert!(runner.calls().is_empty(), "dnf5 needs no plugin check");
+    }
+
+    #[test]
+    fn dnf4_holds_only_with_the_versionlock_plugin() {
+        let with = Arc::new(FakeCommandRunner::new().with_stdout(DNF4_VERSIONLOCK));
+        let built = DnfFactory::new(with.clone()).build(probe("4.14.0"));
+        assert_eq!(built.installer.capabilities().hold, HoldSupport::Supported);
+        assert_eq!(with.calls()[0].program, "rpm");
+        assert_eq!(
+            with.calls()[0].args,
+            vec!["-q", "--whatprovides", "dnf-command(versionlock)"]
+        );
+
+        let without = Arc::new(FakeCommandRunner::new().with_output(exit(1, DNF4_NO_VERSIONLOCK)));
+        let built = DnfFactory::new(without).build(probe("4.14.0"));
+        assert_eq!(
+            built.installer.capabilities().hold,
+            HoldSupport::Unsupported
+        );
+
+        // rpm itself failing to run reads as no plugin, not a crash.
+        let broken = Arc::new(FakeCommandRunner::new());
+        let built = DnfFactory::new(broken).build(probe("4.14.0"));
+        assert_eq!(
+            built.installer.capabilities().hold,
+            HoldSupport::Unsupported
+        );
+    }
+
+    /// What `f` logs, as the formatted lines a subscriber would print.
+    fn logged(f: impl FnOnce()) -> String {
+        #[derive(Clone, Default)]
+        struct Buf(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Buf {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buf = Buf::default();
+        let sink = buf.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || sink.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        let bytes = buf.0.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    #[test]
+    fn a_missing_versionlock_plugin_is_logged_with_its_remedy() {
+        let without = Arc::new(FakeCommandRunner::new().with_output(exit(1, DNF4_NO_VERSIONLOCK)));
+        let log = logged(|| {
+            DnfFactory::new(without).build(probe("4.14.0"));
+        });
+        assert!(log.contains(logmsg::DNF_NO_VERSIONLOCK), "{log}");
+
+        let with = Arc::new(FakeCommandRunner::new().with_stdout(DNF4_VERSIONLOCK));
+        let log = logged(|| {
+            DnfFactory::new(with).build(probe("4.14.0"));
+        });
+        assert!(!log.contains(logmsg::DNF_NO_VERSIONLOCK), "{log}");
+    }
+
+    #[test]
+    fn capabilities_and_scope() {
+        let caps = idle(true).capabilities();
+        assert!(caps.supports_exact_version && caps.supports_downgrade);
+        assert_eq!(caps.hold, HoldSupport::Supported);
+        assert_eq!(idle(false).capabilities().hold, HoldSupport::Unsupported);
+        assert_eq!(idle(true).scope(), Scope::System);
+    }
+
+    // ---- index ------------------------------------------------------------
+
+    #[test]
+    fn refresh_runs_makecache() {
+        let fake = Arc::new(FakeCommandRunner::new().with_stdout("Metadata cache created.\n"));
+        backend(fake.clone(), true).refresh().unwrap();
+        let calls = fake.calls();
+        assert_eq!(calls[0].program, "dnf");
+        assert_eq!(calls[0].args, vec!["makecache", "--refresh"]);
+    }
+
+    #[test]
+    fn refresh_propagates_failure() {
+        let fake = Arc::new(FakeCommandRunner::new().with_output(Output {
+            code: Some(1),
+            stdout: vec![],
+            stderr: b"Curl error (6): Couldn't resolve host name".to_vec(),
+        }));
+        let err = backend(fake, true).refresh().unwrap_err();
+        assert_eq!(
+            err,
+            PortError::CommandFailed {
+                program: "dnf".to_string(),
+                code: Some(1),
+                stderr: "Curl error (6): Couldn't resolve host name".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn query_available_runs_repoquery_for_the_package() {
+        let fake = Arc::new(FakeCommandRunner::new().with_stdout(DNF5_REPOQUERY_JQ));
+        let got = backend(fake.clone(), true)
+            .query_available(&reff("jq"), &AMD64)
+            .unwrap();
+        assert_eq!(got, vec![rpm("1.7.1-8.fc41")]);
+        let calls = fake.calls();
+        assert_eq!(calls[0].program, "dnf");
+        assert_eq!(
+            calls[0].args,
+            vec![
+                "repoquery",
+                "--available",
+                "--queryformat",
+                "%{name}|%{epoch}|%{version}|%{release}|%{arch}\\n",
+                "jq"
+            ]
+        );
+    }
+
+    #[test]
+    fn query_available_fails_when_repoquery_fails() {
+        let fake = Arc::new(FakeCommandRunner::new().with_output(Output {
+            code: Some(1),
+            stdout: vec![],
+            stderr: b"Error: Unknown repo: 'nosuch'".to_vec(),
+        }));
+        let err = backend(fake, true)
+            .query_available(&reff("jq"), &AMD64)
+            .unwrap_err();
+        assert!(matches!(err, PortError::CommandFailed { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn repoquery_reads_dnf5_and_dnf4_output() {
+        // dnf4 ends each record with a blank line; dnf5 does not.
+        for out in [DNF5_REPOQUERY_JQ, DNF4_REPOQUERY_JQ] {
+            assert_eq!(parse_repoquery(out, "jq", Some("x86_64")).len(), 1);
+        }
+        assert_eq!(
+            parse_repoquery(DNF4_REPOQUERY_JQ, "jq", Some("x86_64")),
+            vec![rpm("1.6-19.el9_8.2")]
+        );
+        assert_eq!(
+            parse_repoquery(DNF5_REPOQUERY_TZDATA, "tzdata", Some("x86_64")),
+            vec![rpm("2024a-9.fc41"), rpm("2025b-1.fc41")]
+        );
+        assert_eq!(
+            parse_repoquery(DNF4_REPOQUERY_TZDATA, "tzdata", Some("aarch64")),
+            vec![
+                rpm("2026a-1.el9"),
+                rpm("2026b-1.el9_8"),
+                rpm("2026c-1.el9_8"),
+                rpm("2026e-1.el9_8")
+            ]
+        );
+    }
+
+    #[test]
+    fn repoquery_keeps_a_nonzero_epoch() {
+        let got = parse_repoquery(DNF5_REPOQUERY_SHADOW, "shadow-utils", Some("x86_64"));
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].as_str(), "2:4.15.1-12.fc41");
+        let got = parse_repoquery(DNF4_REPOQUERY_SHADOW, "shadow-utils", Some("x86_64"));
+        assert_eq!(got[0].as_str(), "2:4.9-16.el9");
+        // A zero epoch is left off, as rpm prints it.
+        assert_eq!(
+            parse_repoquery(DNF5_REPOQUERY_JQ, "jq", None)[0].as_str(),
+            "1.7.1-8.fc41"
+        );
+    }
+
+    #[test]
+    fn repoquery_keeps_this_arch_and_noarch_only() {
+        assert!(parse_repoquery(DNF5_REPOQUERY_JQ, "jq", Some("aarch64")).is_empty());
+        let mixed = "jq|0|1.7.1|8.fc41|i686\njq|0|1.7.1|9.fc41|x86_64\n";
+        assert_eq!(
+            parse_repoquery(mixed, "jq", Some("x86_64")),
+            vec![rpm("1.7.1-9.fc41")]
+        );
+        // With no arch to match, every build counts, each version once.
+        assert_eq!(
+            parse_repoquery(mixed, "jq", None),
+            vec![rpm("1.7.1-8.fc41"), rpm("1.7.1-9.fc41")]
+        );
+        assert_eq!(
+            parse_repoquery(DNF5_REPOQUERY_JQ, "jq", None),
+            vec![rpm("1.7.1-8.fc41")]
+        );
+    }
+
+    #[test]
+    fn repoquery_keeps_exactly_the_named_package() {
+        // repoquery also matches globs and provides; only `name` counts.
+        let out = "jq-devel|0|1.7.1|8.fc41|x86_64\njq|0|1.7.1|8.fc41|x86_64\n";
+        assert_eq!(
+            parse_repoquery(out, "jq", Some("x86_64")),
+            vec![rpm("1.7.1-8.fc41")]
+        );
+        // Malformed lines are skipped.
+        assert!(parse_repoquery("jq|0|1.7.1|8.fc41\njq\n", "jq", None).is_empty());
+        assert!(parse_repoquery("jq|0|1.7.1|8.fc41|x86_64|extra\n", "jq", None).is_empty());
+    }
+
+    #[test]
+    fn query_available_uses_the_targets_rpm_arch() {
+        assert_eq!(rpm_arch(Arch::Amd64), "x86_64");
+        assert_eq!(rpm_arch(Arch::Arm64), "aarch64");
+        let fake = Arc::new(FakeCommandRunner::new().with_stdout(DNF5_REPOQUERY_JQ));
+        assert!(backend(fake, true)
+            .query_available(&reff("jq"), &ARM64)
+            .unwrap()
+            .is_empty());
+        let fake = Arc::new(FakeCommandRunner::new().with_stdout(DNF5_REPOQUERY_JQ));
+        assert_eq!(
+            backend(fake, true)
+                .query_available(&reff("jq"), &Target::Any)
+                .unwrap(),
+            vec![rpm("1.7.1-8.fc41")]
+        );
+    }
+
+    // ---- installer: reads -------------------------------------------------
+
+    #[test]
+    fn verify_installed_reads_rpm_q() {
+        for (out, want) in [
+            (DNF5_RPMQ_JQ, "1.7.1-8.fc41"),
+            (DNF4_RPMQ_JQ, "1.6-19.el9_8.2"),
+        ] {
+            let fake = Arc::new(FakeCommandRunner::new().with_stdout(out));
+            assert_eq!(
+                backend(fake.clone(), true)
+                    .verify_installed(&reff("jq"))
+                    .unwrap(),
+                Installed::Present {
+                    version: Some(rpm(want))
+                }
+            );
+            let calls = fake.calls();
+            assert_eq!(calls[0].program, "rpm");
+            assert_eq!(
+                calls[0].args,
+                vec![
+                    "-q",
+                    "--queryformat",
+                    "%|EPOCH?{%{EPOCH}:}:{}|%{VERSION}-%{RELEASE}\\n",
+                    "jq"
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn verify_installed_keeps_the_epoch() {
+        for (out, want) in [
+            (DNF5_RPMQ_SHADOW, "2:4.15.1-12.fc41"),
+            (DNF4_RPMQ_SHADOW, "2:4.9-16.el9"),
+        ] {
+            let fake = Arc::new(FakeCommandRunner::new().with_stdout(out));
+            let got = backend(fake, true)
+                .verify_installed(&reff("shadow-utils"))
+                .unwrap();
+            let Installed::Present { version: Some(v) } = got else {
+                panic!("{got:?}")
+            };
+            assert_eq!(v.as_str(), want);
+        }
+    }
+
+    #[test]
+    fn verify_installed_not_installed_is_absent_not_error() {
+        // rpm prints "package tree is not installed" to stdout and exits 1.
+        for out in [DNF5_RPMQ_ABSENT, DNF4_RPMQ_ABSENT] {
+            let fake = Arc::new(FakeCommandRunner::new().with_output(exit(1, out)));
+            assert_eq!(
+                backend(fake, true).verify_installed(&reff("tree")).unwrap(),
+                Installed::Absent
+            );
+        }
+        let fake = Arc::new(FakeCommandRunner::new().with_stdout("\n"));
+        assert_eq!(
+            backend(fake, true).verify_installed(&reff("tree")).unwrap(),
+            Installed::Absent
+        );
+    }
+
+    #[test]
+    fn verify_installed_reports_the_newest_of_several() {
+        // Installonly packages (kernel) keep several versions side by side.
+        let out = "6.11.4-301.fc41\n6.12.5-200.fc41\n6.11.10-300.fc41\n";
+        let fake = Arc::new(FakeCommandRunner::new().with_stdout(out));
+        assert_eq!(
+            backend(fake, true)
+                .verify_installed(&reff("kernel-core"))
+                .unwrap(),
+            Installed::Present {
+                version: Some(rpm("6.12.5-200.fc41"))
+            }
+        );
+    }
+
+    // ---- installer: steps -------------------------------------------------
+
+    #[test]
+    fn install_exact_releases_the_lock_then_installs_name_evr() {
+        assert_eq!(
+            idle(true)
+                .install_exact(&reff("jq"), &rpm("1.7.1-8.fc41"))
+                .unwrap(),
+            vec![
+                run_step(&["dnf", "versionlock", "delete", "jq"]),
+                run_step(&[
+                    "dnf",
+                    "install",
+                    "-y",
+                    "--setopt=install_weak_deps=False",
+                    "jq-1.7.1-8.fc41"
+                ]),
+            ]
+        );
+        assert_eq!(
+            idle(false)
+                .install_exact(&reff("shadow-utils"), &rpm("2:4.9-16.el9"))
+                .unwrap(),
+            vec![run_step(&[
+                "dnf",
+                "install",
+                "-y",
+                "--setopt=install_weak_deps=False",
+                "shadow-utils-2:4.9-16.el9"
+            ])]
+        );
+    }
+
+    #[test]
+    fn hold_is_a_versionlock_when_there_is_one() {
+        assert_eq!(
+            idle(true).hold(&reff("jq"), &rpm("1.7.1-8.fc41")).unwrap(),
+            vec![run_step(&["dnf", "versionlock", "add", "jq"])]
+        );
+        assert!(idle(false)
+            .hold(&reff("jq"), &rpm("1.7.1-8.fc41"))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn downgrade_releases_the_lock_then_downgrades() {
+        assert_eq!(
+            idle(true)
+                .downgrade(&reff("tzdata"), &rpm("2024a-9.fc41"))
+                .unwrap(),
+            vec![
+                run_step(&["dnf", "versionlock", "delete", "tzdata"]),
+                run_step(&[
+                    "dnf",
+                    "downgrade",
+                    "-y",
+                    "--setopt=install_weak_deps=False",
+                    "tzdata-2024a-9.fc41"
+                ]),
+            ]
+        );
+        assert_eq!(
+            idle(false)
+                .downgrade(&reff("tzdata"), &rpm("2024a-9.fc41"))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn uninstall_releases_the_lock_then_removes() {
+        assert_eq!(
+            idle(true).uninstall(&reff("jq")).unwrap(),
+            vec![
+                run_step(&["dnf", "versionlock", "delete", "jq"]),
+                run_step(&["dnf", "remove", "-y", "jq"]),
+            ]
+        );
+        assert_eq!(
+            idle(false).uninstall(&reff("jq")).unwrap(),
+            vec![run_step(&["dnf", "remove", "-y", "jq"])]
+        );
+    }
+
+    #[test]
+    fn ensure_source_enables_a_copr_then_refreshes() {
+        let steps = idle(true)
+            .ensure_source(&Source {
+                backend: BackendId::new("dnf"),
+                id: SourceId::new("atim/starship"),
+            })
+            .unwrap();
+        assert_eq!(
+            steps,
+            vec![
+                run_step(&["dnf", "copr", "enable", "-y", "atim/starship"]),
+                run_step(&["dnf", "makecache"]),
+            ]
+        );
+    }
+}

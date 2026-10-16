@@ -1442,6 +1442,38 @@ Command-level reference for the four researched backends. (apt, dnf, uv, npm.)
 - Version lock: `dnf versionlock add|exclude|list|delete|clear` (plugin); list file via `locklist`
   in `/etc/dnf/plugins/versionlock.conf`. Locked pkgs skip security updates until unlocked.
 
+**What the `dnf` backend runs** (built 2026-10-16; verified in `fedora:41`, dnf5 5.2.17, and
+`rockylinux:9`, dnf4 4.14.0 / rpm 4.16). Both take the same commands; system scope, Linux only.
+
+- Probe: `dnf --version`; the version is the last word of the first line (`dnf5 version
+  5.2.17.0`, `4.14.0`).
+- Available: `dnf repoquery --available --queryformat
+  '%{name}|%{epoch}|%{version}|%{release}|%{arch}\n' <name>`, kept only where the name is exact
+  (repoquery also matches globs and provides) and the arch is the target's (`x86_64`,
+  `aarch64`) or `noarch`. Recorded as `[epoch:]version-release`, the epoch only when non-zero.
+  An unknown package is empty output with exit 0, so a non-zero exit (bad repo, no network) is
+  an error. dnf4 prints its own newline after the format's, leaving blank lines.
+- Installed: `rpm -q --queryformat '%|EPOCH?{%{EPOCH}:}:{}|%{VERSION}-%{RELEASE}\n' <name>`;
+  exit 1 with `package <name> is not installed` on stdout means absent; several lines
+  (installonly packages) take the newest.
+- Install exact: `dnf install -y --setopt=install_weak_deps=False <name>-<evr>` (`name-0:v-r`
+  is accepted too); downgrade: `dnf downgrade -y --setopt=install_weak_deps=False <name>-<evr>`;
+  remove: `dnf remove -y <name>`. Refresh: `dnf makecache --refresh`. Source: a Copr project,
+  `dnf copr enable -y <owner/project>` then `dnf makecache`.
+- Hold: `dnf versionlock add <name>` locks the installed build. dnf5 has versionlock built in
+  (`/etc/dnf/versionlock.toml`); dnf4 needs `python3-dnf-plugin-versionlock` (it provides
+  `dnf-command(versionlock)`, checked with `rpm -q --whatprovides`; it is not in the
+  `rockylinux:9` image). Without it the backend reports holds unsupported, so plans warn
+  `backend cannot hold` and install unheld. `add` on a locked package is a no-op, exit 0.
+- A lock excludes every other build: `install`/`downgrade` of another version fails while it
+  is held (`matches only packages excluded by versionlock` / `All matches were filtered out by
+  exclude filtering`). So install, downgrade and remove each start with `dnf versionlock delete
+  <name>`, which exits 0 when nothing is locked.
+- Identity: `pkg:rpm/<ID>/<name>?arch=<rpm arch>&distro=<ID>-<VERSION_ID>` (`fedora-41`,
+  `rocky-9.8`); no `distro` qualifier without `VERSION_ID`. Versions compare as vers `rpm`:
+  epoch, then `rpmvercmp` on version, then release (`~` before the end, `^` after it); an
+  absent release sorts below any release, so the order stays total.
+
 ### uv (Python)
 - Project: `pyproject.toml` `==` specifiers + `uv.lock` (true lockfile). `uv add 'pkg==X'`,
   `uv lock [--check|--upgrade|--upgrade-package pkg==X]`, `uv sync [--frozen|--locked|--inexact]`

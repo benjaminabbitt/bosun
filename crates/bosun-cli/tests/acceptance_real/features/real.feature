@@ -1,5 +1,11 @@
 Feature: real backends against a disposable container
 
+  A tagged scenario runs only where what it needs is installed: its package
+  manager (`@apt`, `@dnf`; `@dnf4` only under dnf4), or `runuser` to act as a
+  non-root user (`@github`). So one feature serves Debian, Fedora and
+  RHEL-family containers.
+
+  @apt
   Scenario: apt installs and holds a package, then prune removes and unholds it
     Given the apt index is refreshed
     And the system state is clean
@@ -23,7 +29,58 @@ Feature: real backends against a disposable container
     And dpkg reports hello not installed
     And apt-mark reports hello not held
 
+  @dnf
+  Scenario: dnf installs and versionlocks a package, then prune removes and unlocks it
+    Given the dnf index is refreshed
+    And dnf has a versionlock command
+    And the system state is clean and dnf has no tree
+    And the manifest:
+      """
+      version: 2
+      packages:
+        - name: tree
+          spec: ">=1.0"
+          install:
+            linux:fedora: {backend: dnf}
+      """
+    When I run `bosun install . --yes --scope system`
+    Then it succeeds
+    And rpm reports tree installed
+    And dnf reports tree locked
+    When the manifest is deleted
+    And I run `bosun prune --yes --scope system`
+    Then it succeeds
+    And rpm reports tree not installed
+    And dnf reports tree not locked
+
+  @dnf4
+  Scenario: dnf4 without the versionlock plugin installs unheld and says so
+    Given the dnf index is refreshed
+    And dnf has no versionlock command
+    And the system state is clean and dnf has no tree
+    And the manifest:
+      """
+      version: 2
+      packages:
+        - name: tree
+          spec: ">=1.0"
+          install:
+            linux:fedora: {backend: dnf}
+      """
+    When I run `bosun --format json install . --plan --scope system`
+    Then it reports changes pending
+    And it says "unsupported-hold"
+    When I run `bosun install . --yes --scope system`
+    Then it succeeds
+    And it warns "install python3-dnf-plugin-versionlock"
+    And rpm reports tree installed
+    When the manifest is deleted
+    And I run `bosun prune --yes --scope system`
+    Then it succeeds
+    And rpm reports tree not installed
+
   # github-release is user scope, so it runs as a non-root user (§5.5).
+  @github
   Scenario: github-release verifies the checksum and installs an executable
     Given the manifest:
       """

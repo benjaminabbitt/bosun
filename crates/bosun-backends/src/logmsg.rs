@@ -24,3 +24,8 @@ pub const NOT_FROM_CRATES_IO: &str = "cargo install not from crates.io left out 
 /// sha256 of the asset as downloaded now; later installs must match it.
 pub const FIRST_USE_CHECKSUM: &str =
     "release publishes no checksum for this asset; locking the sha256 it has now";
+
+/// dnf4 without its versionlock plugin cannot hold a package; dnf packages
+/// install unheld (each plan says so) until the plugin is installed.
+pub const DNF_NO_VERSIONLOCK: &str =
+    "dnf has no versionlock command, so dnf packages cannot be held; install python3-dnf-plugin-versionlock";

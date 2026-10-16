@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use bosun_apply::{ApplyReport, Driver, HostApplier, Plan};
 use bosun_backends::{
-    AptFactory, CargoFactory, ChocoFactory, GithubInstallerFactory, GithubPackageFactory,
-    GithubReleaseFactory, PackageKind, ScoopFactory, WingetFactory,
+    AptFactory, CargoFactory, ChocoFactory, DnfFactory, GithubInstallerFactory,
+    GithubPackageFactory, GithubReleaseFactory, PackageKind, ScoopFactory, WingetFactory,
 };
 use bosun_core::vers::scheme_for_type;
 use bosun_core::version::Scheme;
@@ -277,6 +277,7 @@ fn compiled_in_factories(
     };
     vec![
         Box::new(AptFactory::new(runner.clone())),
+        Box::new(DnfFactory::new(runner.clone())),
         Box::new(CargoFactory::new(runner.clone(), fetcher.clone())),
         Box::new(GithubReleaseFactory::new(
             fetcher.clone(),
@@ -485,7 +486,7 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
     let distro = fx.distro.map(|d| Distro {
         id: d.id,
         id_like: d.id_like,
-        version_id: None,
+        version_id: d.version_id,
         version_codename: d.codename,
     });
     let privilege = match fx.privilege.as_deref() {
@@ -793,6 +794,7 @@ mod tests {
         );
         let schemes = factory_schemes(&factories);
         assert_eq!(schemes.get("apt"), Some(&Scheme::Debian));
+        assert_eq!(schemes.get("dnf"), Some(&Scheme::Rpm));
         assert_eq!(schemes.get("cargo"), Some(&Scheme::Semver));
         assert_eq!(schemes.get("github-release"), Some(&Scheme::Semver));
     }

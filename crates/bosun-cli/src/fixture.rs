@@ -82,6 +82,9 @@ pub struct FixtureDistro {
     /// The `VERSION_CODENAME`.
     #[serde(default)]
     pub codename: Option<String>,
+    /// The `VERSION_ID`.
+    #[serde(default)]
+    pub version_id: Option<String>,
 }
 
 /// One fixture backend, with the metadata the resolver needs and the versions
