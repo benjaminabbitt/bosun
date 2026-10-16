@@ -12,8 +12,11 @@ use std::sync::Arc;
 use bosun_core::{BackendId, Capabilities, Installed, Ref, Scheme, Scope, Source, Target, Version};
 use bosun_ports::{
     Backend, BackendFactory, Command, CommandRunner, HostInfo, HttpFetcher, HttpRequest, Index,
-    Installer, PortError, Probe, Step, Steps,
+    Installer, PortError, Probe, Step, Steps, UserInstall, UserInstalls,
 };
+use tracing::debug;
+
+use crate::logmsg;
 
 const BACKEND: &str = "cargo";
 
@@ -153,6 +156,49 @@ impl Index for CargoBackend {
     }
 }
 
+/// What the user installed with cargo (§9 state export): every crates.io
+/// crate in `cargo install --list` (`name vX.Y.Z:`). One installed from a
+/// path or git (`name vX.Y.Z (source):`) is left out: bosun installs from
+/// crates.io, which may not have it.
+pub fn user_installs(runner: &dyn CommandRunner) -> Result<UserInstalls, PortError> {
+    let out = runner.run(&Command::new("cargo", argv(&["install", "--list"])))?;
+    if !out.success() {
+        return Err(PortError::CommandFailed {
+            program: "cargo".to_string(),
+            code: out.code,
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        });
+    }
+    let mut found = Vec::new();
+    // Package lines have no leading whitespace; binary lines do.
+    for line in out
+        .stdout_utf8()
+        .lines()
+        .filter(|l| !l.starts_with(char::is_whitespace))
+    {
+        let mut words = line.trim_end_matches(':').split(' ');
+        let (Some(name), Some(raw), source) = (words.next(), words.next(), words.next()) else {
+            return Err(PortError::CommandOutput {
+                detail: format!("cargo install --list line {line:?}"),
+            });
+        };
+        if source.is_some() {
+            debug!(message = logmsg::NOT_FROM_CRATES_IO, line);
+            continue;
+        }
+        let version = raw.strip_prefix('v').unwrap_or(raw);
+        let version =
+            Version::parse(version, Scheme::Semver).map_err(|e| PortError::CommandOutput {
+                detail: format!("cargo install --list version {raw:?} of {name}: {e}"),
+            })?;
+        found.push(UserInstall {
+            package: name.to_string(),
+            version,
+        });
+    }
+    Ok(UserInstalls::Listed(found))
+}
+
 #[derive(serde::Deserialize)]
 struct SparseEntry {
     vers: String,
@@ -224,6 +270,10 @@ impl Installer for CargoBackend {
     fn downgrade(&self, pkg: &Ref, version: &Version) -> Result<Steps, PortError> {
         // `cargo install name@lower` overwrites with the lower version.
         self.install_exact(pkg, version)
+    }
+
+    fn user_installs(&self) -> Result<UserInstalls, PortError> {
+        user_installs(self.runner.as_ref())
     }
 
     fn uninstall(&self, pkg: &Ref) -> Result<Steps, PortError> {
@@ -343,6 +393,71 @@ mod tests {
                 .unwrap(),
             Installed::Absent
         );
+    }
+
+    const INSTALL_LIST: &str = include_str!("../../tests/fixtures/cargo/install-list.txt");
+
+    fn listed(found: UserInstalls) -> Vec<(String, String)> {
+        let UserInstalls::Listed(found) = found else {
+            panic!("want a listing, got {found:?}");
+        };
+        found
+            .into_iter()
+            .map(|u| (u.package, u.version.as_str().to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn user_installs_are_the_crates_io_installs() {
+        // Path installs (`name v0.1.0 (/home/…):`) are not on crates.io.
+        let fake = Arc::new(FakeCommandRunner::new().with_stdout(INSTALL_LIST));
+        let b = backend(fake.clone(), Arc::new(FakeHttpFetcher::new()));
+        let want: Vec<(String, String)> = [
+            ("ast-grep", "0.40.4"),
+            ("bacon", "3.22.0"),
+            ("cargo-deny", "0.20.2"),
+            ("cargo-llvm-cov", "0.8.4"),
+            ("cargo-machete", "0.9.1"),
+        ]
+        .iter()
+        .map(|(p, v)| (p.to_string(), v.to_string()))
+        .collect();
+        assert_eq!(listed(b.user_installs().unwrap()), want);
+        assert_eq!(fake.calls()[0].program, "cargo");
+        assert_eq!(fake.calls()[0].args, vec!["install", "--list"]);
+    }
+
+    #[test]
+    fn a_git_install_is_left_out() {
+        let list = "tool v0.1.0 (https://github.com/o/tool#1a2b3c4d):\n    tool\n";
+        let fake = FakeCommandRunner::new().with_stdout(list);
+        assert_eq!(listed(user_installs(&fake).unwrap()), vec![]);
+    }
+
+    #[test]
+    fn cargo_install_list_failing_is_an_error() {
+        let fake = FakeCommandRunner::new().with_output(Output {
+            code: Some(101),
+            stdout: vec![],
+            stderr: b"error".to_vec(),
+        });
+        let err = user_installs(&fake).unwrap_err();
+        assert!(
+            matches!(err, PortError::CommandFailed { ref program, code: Some(101), .. } if program == "cargo"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_package_line_cargo_should_not_print_is_an_error() {
+        for list in ["ripgrep:\n", "ripgrep vnope:\n"] {
+            let fake = FakeCommandRunner::new().with_stdout(list);
+            let err = user_installs(&fake).unwrap_err();
+            assert!(
+                matches!(err, PortError::CommandOutput { .. }),
+                "{list:?}: {err:?}"
+            );
+        }
     }
 
     #[test]

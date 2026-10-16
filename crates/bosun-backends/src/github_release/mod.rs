@@ -28,7 +28,7 @@ use bosun_core::{
 };
 use bosun_ports::{
     ArchiveFormat, Backend, BackendFactory, HostInfo, HttpFetcher, HttpRequest, HttpResponse,
-    Index, Installer, PortError, Probe, Step, Steps,
+    Index, Installer, PortError, Probe, Step, Steps, UserInstalls,
 };
 use sha2::{Digest, Sha256};
 use tracing::warn;
@@ -630,6 +630,11 @@ impl Installer for GithubReleaseBackend {
             path: self.bin_dir.join(self.installed_name(pkg)),
         }])
     }
+
+    fn user_installs(&self) -> Result<UserInstalls, PortError> {
+        // bosun is the installer: no other record of these exists.
+        Ok(UserInstalls::BosunState)
+    }
 }
 
 #[cfg(test)]
@@ -659,6 +664,15 @@ mod tests {
             arch: Arch::Amd64,
             token: None,
         }
+    }
+
+    #[test]
+    fn what_the_user_installed_is_what_bosun_recorded() {
+        let b = backend(Arc::new(FakeHttpFetcher::new()), PathBuf::from("/bin"));
+        assert_eq!(
+            b.user_installs().unwrap(),
+            bosun_ports::UserInstalls::BosunState
+        );
     }
 
     fn asset(name: &str) -> ReleaseAsset {

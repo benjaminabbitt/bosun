@@ -67,6 +67,36 @@ pub trait Installer {
     fn downgrade(&self, pkg: &Ref, version: &Version) -> Result<Steps, PortError>;
     /// Steps to uninstall `pkg`. Only ever called for the managed set (§9).
     fn uninstall(&self, pkg: &Ref) -> Result<Steps, PortError>;
+
+    /// What the user installed through this backend themselves, by the
+    /// package manager's own record (§9 state export): `apt-mark showmanual`,
+    /// `cargo install --list`. Never the full installed set, and never a
+    /// guess at which packages are dependencies. A backend with no such
+    /// record keeps the default, [`UserInstalls::Unsupported`].
+    fn user_installs(&self) -> Result<UserInstalls, PortError> {
+        Ok(UserInstalls::Unsupported)
+    }
+}
+
+/// One package a user installed themselves, as the backend records it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UserInstall {
+    /// The backend's own id for the package (`fd-find`, `ripgrep`).
+    pub package: String,
+    /// The version installed now.
+    pub version: Version,
+}
+
+/// Where a backend's record of what the user installed lives (§9).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UserInstalls {
+    /// The backend keeps no record of what the user asked for: no export.
+    Unsupported,
+    /// The packages the package manager records as installed by the user.
+    Listed(Vec<UserInstall>),
+    /// bosun is this backend's installer (github-release), so its record is
+    /// bosun's own machine state.
+    BosunState,
 }
 
 /// What a backend learned about itself when it probed (§5.3): its own version,

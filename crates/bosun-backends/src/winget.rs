@@ -475,6 +475,17 @@ Visual Studio Code  Microsoft.VisualStudioCode 1.105.0 winget
     }
 
     #[test]
+    fn keeps_no_record_of_what_the_user_installed() {
+        // `winget list` mixes what the user asked for with what Windows and
+        // other installers put there; nothing tells them apart.
+        let b = backend(FakeCommandRunner::new());
+        assert_eq!(
+            b.user_installs().unwrap(),
+            bosun_ports::UserInstalls::Unsupported
+        );
+    }
+
+    #[test]
     fn capabilities_and_scope() {
         let b = backend(FakeCommandRunner::new());
         assert_eq!(b.scope(), Scope::User);

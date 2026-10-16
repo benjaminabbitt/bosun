@@ -13,8 +13,11 @@ use bosun_core::{
 };
 use bosun_ports::{
     Backend, BackendFactory, Command, CommandRunner, HostInfo, Index, Installer, PortError, Probe,
-    Step, Steps,
+    Step, Steps, UserInstall, UserInstalls,
 };
+use tracing::debug;
+
+use crate::logmsg;
 
 const BACKEND: &str = "apt";
 
@@ -106,6 +109,79 @@ fn argv(parts: &[&str]) -> Vec<String> {
 /// `<package>=<version>`, how apt names an exact install.
 fn pinned(pkg: &Ref, version: &Version) -> String {
     format!("{}={}", pkg.purl.native_id(), version.as_str())
+}
+
+/// The priorities of a Debian base system: what the installer puts on every
+/// machine and marks manual, so a manual mark on them says nothing about
+/// what the user asked for.
+const BASE_PRIORITIES: [&str; 3] = ["required", "important", "standard"];
+
+/// What `dpkg-query` prints per package: name, version, priority.
+const PRIORITY_FORMAT: &str = "-f=${Package}\t${Version}\t${Priority}\n";
+
+/// What the user installed through apt (§9 state export): `apt-mark
+/// showmanual`, less the distro's base system ([`BASE_PRIORITIES`]). A
+/// package of another architecture (`libc6:i386`) is left out; an entry
+/// names the package for this machine's own.
+pub fn user_installs(runner: &dyn CommandRunner) -> Result<UserInstalls, PortError> {
+    let manual = run_ok(runner, "apt-mark", &["showmanual"], &[0])?;
+    let mut names = Vec::new();
+    for name in manual.lines().map(str::trim).filter(|n| !n.is_empty()) {
+        if name.contains(':') {
+            debug!(message = logmsg::FOREIGN_ARCH_LEFT_OUT, package = name);
+        } else {
+            names.push(name);
+        }
+    }
+    // With no names, dpkg-query would list every installed package.
+    if names.is_empty() {
+        return Ok(UserInstalls::Listed(Vec::new()));
+    }
+    let mut args = vec!["-W", PRIORITY_FORMAT];
+    args.extend(&names);
+    // dpkg-query exits 1 when a name matches nothing, and prints the rest.
+    let listed = run_ok(runner, "dpkg-query", &args, &[0, 1])?;
+    let mut found = Vec::new();
+    for line in listed.lines() {
+        let mut fields = line.split('\t');
+        let (Some(package), Some(version), Some(priority)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            return Err(PortError::CommandOutput {
+                detail: format!("dpkg-query line {line:?}"),
+            });
+        };
+        if BASE_PRIORITIES.contains(&priority) {
+            continue;
+        }
+        let version =
+            Version::parse(version, Scheme::Debian).map_err(|e| PortError::CommandOutput {
+                detail: format!("dpkg-query version {version:?} of {package}: {e}"),
+            })?;
+        found.push(UserInstall {
+            package: package.to_string(),
+            version,
+        });
+    }
+    Ok(UserInstalls::Listed(found))
+}
+
+/// Run `program args`, its stdout when it exits with one of `ok`.
+fn run_ok(
+    runner: &dyn CommandRunner,
+    program: &str,
+    args: &[&str],
+    ok: &[i32],
+) -> Result<String, PortError> {
+    let out = runner.run(&Command::new(program, argv(args)))?;
+    match out.code {
+        Some(code) if ok.contains(&code) => Ok(out.stdout_utf8().into_owned()),
+        code => Err(PortError::CommandFailed {
+            program: program.to_string(),
+            code,
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        }),
+    }
 }
 
 impl Index for AptBackend {
@@ -238,6 +314,10 @@ impl Installer for AptBackend {
             scope: Scope::System,
             ok_exits: Vec::new(),
         }])
+    }
+
+    fn user_installs(&self) -> Result<UserInstalls, PortError> {
+        user_installs(self.runner.as_ref())
     }
 
     fn uninstall(&self, pkg: &Ref) -> Result<Steps, PortError> {
@@ -456,6 +536,140 @@ mod tests {
             deb("2.4.11")
         );
         assert!(parse_apt_version("").is_err());
+    }
+
+    // A Debian 13 machine: the base system marked manual, as the installer
+    // leaves it, then jq and curl installed by hand.
+    const SHOWMANUAL: &str = include_str!("../../tests/fixtures/apt/debian13-showmanual.txt");
+    const DPKG_QUERY: &str = include_str!("../../tests/fixtures/apt/debian13-dpkg-query.txt");
+    const PRIORITY_FORMAT: &str = "-f=${Package}\t${Version}\t${Priority}\n";
+
+    fn exit(code: i32, stdout: &str) -> Output {
+        Output {
+            code: Some(code),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: b"dpkg-query: no packages found matching x".to_vec(),
+        }
+    }
+
+    fn listed(found: UserInstalls) -> Vec<(String, String)> {
+        let UserInstalls::Listed(found) = found else {
+            panic!("want a listing, got {found:?}");
+        };
+        found
+            .into_iter()
+            .map(|u| (u.package, u.version.as_str().to_string()))
+            .collect()
+    }
+
+    fn pairs(v: &[(&str, &str)]) -> Vec<(String, String)> {
+        v.iter()
+            .map(|(p, v)| (p.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn user_installs_are_the_manual_packages_outside_the_base_system() {
+        let fake = Arc::new(
+            FakeCommandRunner::new()
+                .with_stdout(SHOWMANUAL)
+                .with_stdout(DPKG_QUERY),
+        );
+        let found = backend(fake.clone()).user_installs().unwrap();
+        assert_eq!(
+            listed(found),
+            pairs(&[("curl", "8.14.1-2+deb13u7"), ("jq", "1.7.1-6+deb13u4")])
+        );
+        let calls = fake.calls();
+        assert_eq!(calls[0].program, "apt-mark");
+        assert_eq!(calls[0].args, vec!["showmanual"]);
+        assert_eq!(calls[1].program, "dpkg-query");
+        let manual: Vec<&str> = SHOWMANUAL.lines().collect();
+        assert_eq!(calls[1].args[..2], ["-W", PRIORITY_FORMAT]);
+        assert_eq!(calls[1].args[2..], manual[..]);
+    }
+
+    #[test]
+    fn standard_priority_is_base_too_and_extra_is_not() {
+        let fake = FakeCommandRunner::new()
+            .with_stdout("less\nfd-find\nhtop\n")
+            .with_stdout(
+                "less\t668-1\tstandard\nfd-find\t10.2.0-1\toptional\nhtop\t3.4.1-5\textra\n",
+            );
+        assert_eq!(
+            listed(user_installs(&fake).unwrap()),
+            pairs(&[("fd-find", "10.2.0-1"), ("htop", "3.4.1-5")])
+        );
+    }
+
+    #[test]
+    fn nothing_marked_manual_asks_dpkg_nothing() {
+        // A stock debian:13 image marks nothing manual; dpkg-query with no
+        // names would list every installed package.
+        let fake = FakeCommandRunner::new().with_stdout("");
+        assert_eq!(listed(user_installs(&fake).unwrap()), vec![]);
+        assert_eq!(fake.calls().len(), 1);
+    }
+
+    #[test]
+    fn a_foreign_architecture_package_is_left_out() {
+        let fake = FakeCommandRunner::new()
+            .with_stdout("jq\nlibc6:i386\n")
+            .with_stdout("jq\t1.7.1-6+deb13u4\toptional\n");
+        assert_eq!(
+            listed(user_installs(&fake).unwrap()),
+            pairs(&[("jq", "1.7.1-6+deb13u4")])
+        );
+        assert_eq!(fake.calls()[1].args[2..], ["jq"]);
+    }
+
+    #[test]
+    fn a_name_dpkg_does_not_know_is_skipped() {
+        // dpkg-query exits 1 when one name matches nothing, and still prints
+        // the others.
+        let fake = FakeCommandRunner::new()
+            .with_stdout("jq\ngone\n")
+            .with_output(exit(1, "jq\t1.7.1-6+deb13u4\toptional\n"));
+        assert_eq!(
+            listed(user_installs(&fake).unwrap()),
+            pairs(&[("jq", "1.7.1-6+deb13u4")])
+        );
+    }
+
+    #[test]
+    fn apt_mark_failing_is_an_error() {
+        let fake = FakeCommandRunner::new().with_output(exit(100, ""));
+        let err = user_installs(&fake).unwrap_err();
+        assert!(
+            matches!(err, PortError::CommandFailed { ref program, code: Some(100), .. } if program == "apt-mark"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn dpkg_query_failing_is_an_error() {
+        let fake = FakeCommandRunner::new()
+            .with_stdout("jq\n")
+            .with_output(exit(2, ""));
+        let err = user_installs(&fake).unwrap_err();
+        assert!(
+            matches!(err, PortError::CommandFailed { ref program, code: Some(2), .. } if program == "dpkg-query"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_line_dpkg_query_should_not_print_is_an_error() {
+        for line in ["jq\t1.7.1-6\n", "jq\t\toptional\n"] {
+            let fake = FakeCommandRunner::new()
+                .with_stdout("jq\n")
+                .with_stdout(line);
+            let err = user_installs(&fake).unwrap_err();
+            assert!(
+                matches!(err, PortError::CommandOutput { .. }),
+                "{line:?}: {err:?}"
+            );
+        }
     }
 
     #[test]

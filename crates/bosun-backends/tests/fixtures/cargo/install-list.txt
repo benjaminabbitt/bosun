@@ -1,0 +1,22 @@
+angzarr v0.1.0 (/home/user/src/angzarr):
+    angzarr-standalone
+angzarr v0.1.0 (/home/user/src/evented-rs):
+    angzarr-aggregate
+    angzarr-gateway
+    angzarr-log
+    angzarr-projector
+    angzarr-saga
+    angzarr-stream
+ast-grep v0.40.4:
+    ast-grep
+    sg
+bacon v3.22.0:
+    bacon
+bosun-cli v0.0.0 (/home/user/src/bosun/crates/bosun-cli):
+    bosun
+cargo-deny v0.20.2:
+    cargo-deny
+cargo-llvm-cov v0.8.4:
+    cargo-llvm-cov
+cargo-machete v0.9.1:
+    cargo-machete
