@@ -47,6 +47,7 @@ fn scheme_name(scheme: Scheme) -> &'static str {
         Scheme::Semver => "SemVer",
         Scheme::Generic => "generic",
         Scheme::Rpm => "RPM",
+        Scheme::Alpine => "apk",
     }
 }
 
@@ -167,6 +168,7 @@ pub fn default_spec(latest: &Version) -> String {
             Err(_) => exact,
         },
         Scheme::Debian | Scheme::Rpm => epoch_release_default(latest.as_str()).unwrap_or(exact),
+        Scheme::Alpine => alpine_default(latest.as_str()).unwrap_or(exact),
         Scheme::Generic => exact,
     }
 }
@@ -179,6 +181,21 @@ fn epoch_release_default(raw: &str) -> Option<String> {
         None => (String::new(), raw),
     };
     let upstream = rest.rsplit_once('-').map_or(rest, |(u, _)| u);
+    let next = bump_leading_number(upstream)?;
+    Some(format!(">={epoch}{upstream}|<{epoch}{next}~"))
+}
+
+/// `>=U|<U'_alpha` for an Alpine version (see [`default_spec`]), or `None`
+/// when it does not start with a number.
+fn alpine_default(raw: &str) -> Option<String> {
+    let upstream = raw.rsplit_once("-r").map_or(raw, |(u, _)| u);
+    let next = bump_leading_number(upstream)?;
+    Some(format!(">={upstream}|<{next}_alpha"))
+}
+
+/// The leading dotted number of `upstream` with its last component bumped
+/// (`1.7.1+x` → `1.7.2`), or `None` when it does not start with a number.
+fn bump_leading_number(upstream: &str) -> Option<String> {
     let numeric_len = upstream
         .find(|c: char| !(c.is_ascii_digit() || c == '.'))
         .unwrap_or(upstream.len());
@@ -188,7 +205,7 @@ fn epoch_release_default(raw: &str) -> Option<String> {
         None => (String::new(), numeric),
     };
     let bumped = last.parse::<u64>().ok()? + 1;
-    Some(format!(">={epoch}{upstream}|<{epoch}{head}{bumped}~"))
+    Some(format!("{head}{bumped}"))
 }
 
 /// A manifest entry's resolvable intent: a logical name (§5.4) and its spec.
@@ -376,6 +393,39 @@ mod tests {
         assert_eq!(scheme_name(Scheme::Semver), "SemVer");
         assert_eq!(scheme_name(Scheme::Generic), "generic");
         assert_eq!(scheme_name(Scheme::Rpm), "RPM");
+        assert_eq!(scheme_name(Scheme::Alpine), "apk");
+    }
+
+    #[test]
+    fn default_spec_for_alpine_is_any_revision_of_the_upstream_version() {
+        assert_eq!(
+            default_of("1.7.1-r3", Scheme::Alpine),
+            ">=1.7.1|<1.7.2_alpha"
+        );
+        assert_eq!(
+            default_of("1.40.0", Scheme::Alpine),
+            ">=1.40.0|<1.40.1_alpha"
+        );
+        assert_eq!(
+            default_of("2.4_p1-r1", Scheme::Alpine),
+            ">=2.4_p1|<2.5_alpha"
+        );
+        assert_eq!(
+            default_of("20260909-r0", Scheme::Alpine),
+            ">=20260909|<20260910_alpha"
+        );
+        assert_eq!(
+            default_of("1.8.0_rc1-r0", Scheme::Alpine),
+            ">=1.8.0_rc1|<1.8.1_alpha"
+        );
+    }
+
+    #[test]
+    fn a_bad_apk_constraint_is_named_as_apk() {
+        match Spec::new(">=1.0-1", "apk").unwrap_err() {
+            SpecError::BadVersion { scheme, .. } => assert_eq!(scheme, "apk"),
+            other => panic!("expected bad version, got {other:?}"),
+        }
     }
 
     #[test]
@@ -395,6 +445,8 @@ mod tests {
             ("beta-1", Scheme::Debian, "deb"),
             ("1.7.1-8.fc41", Scheme::Rpm, "rpm"),
             ("2:4.15.1-12.fc41", Scheme::Rpm, "rpm"),
+            ("1.7.1-r3", Scheme::Alpine, "apk"),
+            ("1.8.0_rc1-r0", Scheme::Alpine, "apk"),
         ] {
             let v = Version::parse(raw, scheme).unwrap();
             let spec = Spec::new(default_spec(&v), ty).unwrap();

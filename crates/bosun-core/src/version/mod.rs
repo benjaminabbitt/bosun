@@ -10,6 +10,7 @@
 //! - [`Scheme::Semver`] → `semver` (pre-release precedence: `0.7.0-pre1 <
 //!   0.7.0`);
 //! - [`Scheme::Rpm`] → `rpmvercmp` over `[epoch:]version-release` (`rpm`);
+//! - [`Scheme::Alpine`] → apk-tools' own ordering (`alpine`);
 //! - [`Scheme::Generic`] → bosun's own typed-[`Segment`] engine (`segment`).
 //!
 //! Comparing two versions of different schemes is not meaningful — it never
@@ -17,6 +18,7 @@
 //! [`Ord`] stays total by ordering on the scheme first; [`Version::try_cmp`]
 //! returns `None` on a scheme mismatch for callers that want to assert.
 
+mod alpine;
 mod rpm;
 mod segment;
 
@@ -38,6 +40,8 @@ pub enum Scheme {
     Generic,
     /// RPM `[epoch:]version-release`, ordered as rpm's `rpmvercmp` does.
     Rpm,
+    /// Alpine `1.2.3_rc1-r0`, ordered as apk-tools orders it.
+    Alpine,
 }
 
 impl Scheme {
@@ -47,6 +51,7 @@ impl Scheme {
             Scheme::Semver => 1,
             Scheme::Generic => 2,
             Scheme::Rpm => 3,
+            Scheme::Alpine => 4,
         }
     }
 }
@@ -60,6 +65,9 @@ pub enum VersionError {
     /// A SemVer string `semver` rejected, with its message.
     #[error("{kind}: {0}", kind = errmsg::VERSION_INVALID_SEMVER)]
     Semver(String),
+    /// A string outside apk's version grammar.
+    #[error("{kind}: {0:?}", kind = errmsg::VERSION_INVALID_APK)]
+    Alpine(String),
 }
 
 /// A version string tagged with the grammar it is read under. Keeps the
@@ -78,11 +86,13 @@ enum Parsed {
     Semver(semver::Version),
     Generic(Vec<Segment>),
     Rpm(rpm::Evr),
+    Alpine,
 }
 
 impl Version {
     /// Parse `raw` under `scheme`. Debian and Generic accept any non-empty
-    /// string (their grammars are permissive); SemVer is validated.
+    /// string (their grammars are permissive); SemVer and Alpine are
+    /// validated.
     pub fn parse(raw: impl Into<String>, scheme: Scheme) -> Result<Version, VersionError> {
         let raw = raw.into();
         if raw.is_empty() {
@@ -95,6 +105,8 @@ impl Version {
                 .map_err(|e| VersionError::Semver(e.to_string()))?,
             Scheme::Generic => Parsed::Generic(segment::tokenize(&raw)),
             Scheme::Rpm => Parsed::Rpm(rpm::Evr::parse(&raw)),
+            Scheme::Alpine if alpine::is_valid(&raw) => Parsed::Alpine,
+            Scheme::Alpine => return Err(VersionError::Alpine(raw)),
         };
         Ok(Version {
             raw,
@@ -114,13 +126,15 @@ impl Version {
     }
 
     /// Whether this version is a pre-release of its final form: a SemVer
-    /// pre-release segment, or a Debian/RPM/generic `~` (which sorts below
-    /// the release). Selection never picks one unless a spec names it (§5.6).
+    /// pre-release segment, a Debian/RPM/generic `~` chunk (which sorts below
+    /// the release), or an Alpine `_alpha`/`_beta`/`_pre`/`_rc` suffix.
+    /// Selection never picks one unless a spec names it (§5.6).
     pub fn is_prerelease(&self) -> bool {
         match &self.parsed {
             Parsed::Semver(v) => !v.pre.is_empty(),
             Parsed::Debian | Parsed::Rpm(_) => self.raw.contains('~'),
             Parsed::Generic(segs) => segs.iter().any(|s| matches!(s, Segment::Tilde)),
+            Parsed::Alpine => alpine::is_prerelease(&self.raw),
         }
     }
 
@@ -137,6 +151,7 @@ impl Version {
             (Parsed::Semver(a), Parsed::Semver(b)) => a.cmp(b),
             (Parsed::Generic(a), Parsed::Generic(b)) => segment::compare(a, b),
             (Parsed::Rpm(a), Parsed::Rpm(b)) => a.cmp(b),
+            (Parsed::Alpine, Parsed::Alpine) => alpine::compare(&self.raw, &other.raw),
             // Unreachable: equal scheme implies equal Parsed variant.
             _ => Ordering::Equal,
         })
@@ -213,6 +228,39 @@ mod tests {
     fn rpm_ranks_after_the_other_schemes() {
         assert!(gen("9") < rpm("0"));
         assert_eq!(rpm("1.0").try_cmp(&gen("1.0")), None);
+    }
+
+    fn apk(s: &str) -> Version {
+        Version::parse(s, Scheme::Alpine).unwrap()
+    }
+
+    #[test]
+    fn alpine_orders_as_apk_does() {
+        assert!(apk("1.7.1-r1") > apk("1.7.1-r0"));
+        assert!(apk("1.8.0_rc1-r0") < apk("1.8.0-r0"));
+        assert!(apk("1.10-r0") > apk("1.9-r0"));
+        assert_eq!(apk("01.2"), apk("1.2"));
+        assert_eq!(apk("1.0").try_cmp(&apk("1.0-r0")), Some(Ordering::Less));
+    }
+
+    #[test]
+    fn alpine_rejects_what_apk_rejects() {
+        assert_eq!(
+            Version::parse("1.0-1", Scheme::Alpine),
+            Err(VersionError::Alpine("1.0-1".into()))
+        );
+        assert_eq!(
+            VersionError::Alpine("1.0-1".into()).to_string(),
+            "invalid apk version: \"1.0-1\""
+        );
+        assert_eq!(Version::parse("", Scheme::Alpine), Err(VersionError::Empty));
+    }
+
+    #[test]
+    fn alpine_pre_release_suffixes_are_pre_releases() {
+        assert!(apk("1.8.0_rc1-r0").is_prerelease());
+        assert!(!apk("1.8.0_p1-r0").is_prerelease());
+        assert!(!apk("1.8.0-r0").is_prerelease());
     }
 
     #[test]
@@ -299,6 +347,8 @@ mod tests {
         // Not semantically meaningful, but total and deterministic.
         assert!(deb("9.9") < sem("0.0.1"));
         assert!(sem("9.9.9") < gen("0"));
+        assert!(gen("9.9") < apk("0"));
+        assert_eq!(apk("1.0").try_cmp(&gen("1.0")), None);
     }
 
     #[test]

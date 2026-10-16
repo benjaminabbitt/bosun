@@ -9,6 +9,8 @@
 pub const VERSION_EMPTY: &str = "empty version string";
 /// A string the SemVer grammar rejected (the parser's own message follows).
 pub const VERSION_INVALID_SEMVER: &str = "invalid semver version";
+/// A string outside apk's version grammar (`1.2.3_rc1-r0`).
+pub const VERSION_INVALID_APK: &str = "invalid apk version";
 
 /// A vers range string that is not in canonical form, or is otherwise invalid.
 pub const VERS_NONCANONICAL: &str = "non-canonical vers range";

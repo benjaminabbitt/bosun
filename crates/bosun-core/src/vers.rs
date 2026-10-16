@@ -4,8 +4,8 @@
 //! (`>=2.40|<3`, the type supplied by the backend).
 //!
 //! Version comparison per type maps onto bosun's §6 schemes: `deb`→Debian;
-//! `cargo`/`npm`/`golang`/`semver`→SemVer; everything else→generic chunk
-//! ordering. Containment follows the vers algorithm: a version is in the range
+//! `cargo`/`npm`/`golang`/`semver`→SemVer; `apk`→Alpine; everything
+//! else→generic chunk ordering. Containment follows the vers algorithm: a version is in the range
 //! if it falls in any interval the sorted, alternating-bound constraints form,
 //! is an `=` constraint, and is not an `!=` exclusion.
 //!
@@ -97,6 +97,7 @@ pub fn scheme_for_type(ty: &str) -> Scheme {
         "deb" => Scheme::Debian,
         "rpm" => Scheme::Rpm,
         "cargo" | "npm" | "golang" | "semver" => Scheme::Semver,
+        "apk" => Scheme::Alpine,
         _ => Scheme::Generic,
     }
 }
@@ -319,6 +320,18 @@ mod tests {
 
     fn ver(s: &str, scheme: Scheme) -> Version {
         Version::parse(s, scheme).unwrap()
+    }
+
+    #[test]
+    fn an_apk_range_compares_as_apk_does() {
+        let r = VersRange::parse("vers:apk/>=1.7.1|<1.7.2_alpha").unwrap();
+        assert_eq!(r.scheme(), Scheme::Alpine);
+        let a = |s| ver(s, Scheme::Alpine);
+        assert!(r.contains(&a("1.7.1-r0")));
+        assert!(r.contains(&a("1.7.1_p2-r3")));
+        assert!(!r.contains(&a("1.7.1_rc1-r0")));
+        assert!(!r.contains(&a("1.7.2_rc1-r0")));
+        assert!(r.mentions_prerelease());
     }
 
     #[test]
