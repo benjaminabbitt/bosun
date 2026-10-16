@@ -2358,6 +2358,7 @@ mod tests {
             os: Os::Linux,
             arch,
             distro,
+            libc: None,
         };
         let m = manifest(
             &[],
