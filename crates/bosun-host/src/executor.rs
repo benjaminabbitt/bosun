@@ -450,6 +450,29 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_step_reports_the_last_line_of_its_stderr() {
+        let runner = FakeCommandRunner::new().with_output(Output {
+            code: Some(100),
+            stdout: vec![],
+            stderr: b"Reading package lists...\nE: Held packages were changed and -y was used \
+                      without --allow-change-held-packages.\n\n"
+                .to_vec(),
+        });
+        let steps = vec![Step::Run {
+            argv: vec!["apt-get".into()],
+            env: vec![],
+            scope: Scope::System,
+            ok_exits: Vec::new(),
+        }];
+        let err = exec_with(&runner, &FakeHttpFetcher::new(), &steps).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "command failed: apt-get (exit 100): E: Held packages were changed and -y was \
+             used without --allow-change-held-packages."
+        );
+    }
+
+    #[test]
     fn run_an_exit_the_step_says_is_success_succeeds() {
         // msiexec's 3010: installed, a reboot finishes it.
         let runner = FakeCommandRunner::new().with_output(Output {

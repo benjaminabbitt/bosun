@@ -5,6 +5,8 @@
 pub const COMMAND_NOT_FOUND: &str = "command not found";
 /// A command ran but exited non-zero.
 pub const COMMAND_FAILED: &str = "command failed";
+/// How a command ended when a signal stopped it.
+pub const KILLED_BY_SIGNAL: &str = "killed by a signal";
 /// A command's output could not be understood.
 pub const COMMAND_OUTPUT: &str = "could not parse command output";
 /// An HTTP request failed to complete.
