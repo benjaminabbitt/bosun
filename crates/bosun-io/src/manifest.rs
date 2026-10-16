@@ -15,7 +15,7 @@ use std::fmt;
 use std::path::Path;
 
 use annals_diagnostic::{Arg, Diagnostic};
-use annals_yaml::versioned::{version_of, Loader, MigrationError, Migrations};
+use annals_yaml::versioned::{version_of, Loader, MigrationError, Migrations, Upgraded};
 use annals_yaml::Value;
 use bosun_core::manifest::{
     Backends, InstallBlock, Manifest, ManifestEntry, Options, PACKAGE_OPTION,
@@ -540,19 +540,21 @@ pub fn manifest_version(text: &str, source: &Path) -> Result<u32, IoError> {
 /// install block, whose scalars go on one line (`linux: {backend: apt}`).
 const UPGRADE_FLOW_DEPTH: usize = 4;
 
-/// `text` migrated to [`MANIFEST_VERSION`] and written out, or `None` when it
-/// is already current. The rewrite has no comments: annals writes the tree.
-pub fn upgrade_manifest(text: &str, source: &Path) -> Result<Option<String>, IoError> {
+/// `text` migrated to [`MANIFEST_VERSION`], or `None` when it is already
+/// current. annals edits only the entries the migration changes, so comments
+/// elsewhere stay; when it can't edit in place it writes the whole tree and
+/// [`Upgraded::comments_kept`] says so.
+pub fn upgrade_manifest(text: &str, source: &Path) -> Result<Option<Upgraded>, IoError> {
     let upgraded = loader()
-        .upgrade(
+        .upgrade_keeping(
             Some(&source.display().to_string()),
             text,
             UPGRADE_FLOW_DEPTH,
         )
         .map_err(|e| parse_error(source, e))?;
-    if let Some(text) = &upgraded {
+    if let Some(up) = &upgraded {
         // The rewrite must load as written, or it is not written at all.
-        load_manifest(text, source)?;
+        load_manifest(&up.text, source)?;
     }
     Ok(upgraded)
 }
@@ -985,10 +987,50 @@ packages:
             "version: 1\npackages:\n  - name: x\n    install:\n      linux: {backends: [cargo]}\n";
         let upgraded = upgrade_manifest(old, Path::new("m")).unwrap().unwrap();
         assert_eq!(
-            upgraded,
+            upgraded.text,
             "version: 2\npackages:\n  - name: x\n    install:\n      linux: {backend: cargo}\n"
         );
+        assert!(upgraded.comments_kept);
         assert_eq!(upgrade_manifest(SAMPLE, Path::new("m")).unwrap(), None);
+    }
+
+    #[test]
+    fn upgrade_keeps_the_comments_outside_what_it_rewrites() {
+        let old = "\
+# my tools
+version: 1
+targets: [linux/amd64]   # just the one
+packages:
+  # pinned for the CI image
+  - name: just
+    spec: \"1.40.0\"   # exact
+    install:
+      linux: {backend: cargo}
+  - name: fd
+    install:
+      linux: {backends: [apt, cargo], package: fd-find}
+";
+        let upgraded = upgrade_manifest(old, Path::new("m")).unwrap().unwrap();
+        assert!(upgraded.comments_kept);
+        assert_eq!(
+            upgraded.text,
+            "\
+# my tools
+version: 2
+packages:
+  # pinned for the CI image
+  - name: just
+    spec: \"1.40.0\"   # exact
+    install:
+      linux: {backend: cargo}
+  - name: fd
+    install:
+      linux:
+        backends:
+          apt: {package: fd-find}
+          cargo: {package: fd-find}
+"
+        );
     }
 
     // --- option checking -----------------------------------------------------

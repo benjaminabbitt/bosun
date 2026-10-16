@@ -20,12 +20,12 @@ dependencies = [
 [[package]]
 name = "annals-diagnostic"
 version = "0.1.0"
-source = "git+https://github.com/benjaminabbitt/annals.git?rev=4f92f43a375c879c7cb79e2dcc32285c47705f55#4f92f43a375c879c7cb79e2dcc32285c47705f55"
+source = "git+https://github.com/benjaminabbitt/annals.git?rev=24af6c81130d375051317a486b478cf6dbbfc5d0#24af6c81130d375051317a486b478cf6dbbfc5d0"
 
 [[package]]
 name = "annals-yaml"
 version = "0.1.0"
-source = "git+https://github.com/benjaminabbitt/annals.git?rev=4f92f43a375c879c7cb79e2dcc32285c47705f55#4f92f43a375c879c7cb79e2dcc32285c47705f55"
+source = "git+https://github.com/benjaminabbitt/annals.git?rev=24af6c81130d375051317a486b478cf6dbbfc5d0#24af6c81130d375051317a486b478cf6dbbfc5d0"
 dependencies = [
  "annals-diagnostic",
 ]
@@ -147,6 +147,7 @@ dependencies = [
  "minijinja",
  "serde",
  "serde_json",
+ "sha2",
  "tar",
  "tempfile",
  "tracing",

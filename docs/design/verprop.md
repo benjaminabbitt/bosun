@@ -114,7 +114,7 @@ real to check later):
 | `status` | what bosun manages on this machine and which manifests claim it (drift is `install --plan`'s job) |
 | `adopt <name>` | explicitly take ownership of an existing install: `accepted` → `installed` (§4.6) |
 | `lock` | resolve the manifest for this machine (its platform, plus platform-independent `any` entries) and write this machine's lock for it, keeping each version it already pins while that still fits (§4.5, §7). Warns when an older bosun's `bosun.lock` sits beside the manifest: it is no longer read |
-| `migrate [path] [--plan] [--yes]` | rewrite an older-version manifest as the current version (loading migrates in memory anyway; this writes it, so `add` / `remove` can edit it). annals writes the migrated tree without comments, so it shows the result and confirms first, and keeps the original as `<file>.v<N>` |
+| `migrate [path] [--plan] [--yes]` | rewrite an older-version manifest as the current version (loading migrates in memory anyway; this writes it, so `add` / `remove` can edit it). annals edits only the entries the migration changes (`Loader::upgrade_keeping`), so comments elsewhere stay; when it can't edit in place it writes the whole file and says comments are not kept. It shows the result and confirms first, and keeps the original as `<file>.v<N>` |
 | `install --frozen` | install exactly what this machine's lock records; never re-resolves, never writes the lock; errors when there is no lock for this manifest, or the manifest changed since it was locked (§7) |
 | `render args\|env\|json` | versions for a target platform as build args, env lines, or a JSON versions file (§8.3) |
 | `backends` | registered backends, their versions, and why others were skipped (§5.3) |

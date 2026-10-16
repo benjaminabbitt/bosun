@@ -1,8 +1,9 @@
 //! `bosun migrate`: rewrite an older-version manifest as the current version.
 //! Loading migrates in memory on every run; this writes the result, so `add`
-//! and `remove` (which edit the text) can work on the file. annals writes the
-//! migrated tree without comments, so the original is kept beside it as
-//! `<file>.v<N>` and the rewrite is confirmed first.
+//! and `remove` (which edit the text) can work on the file. annals edits only
+//! the entries the migration changes, so comments elsewhere stay; the rewrite
+//! is still shown and confirmed first, and the original kept beside it as
+//! `<file>.v<N>`.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -23,6 +24,9 @@ pub struct MigrateOutput {
     to: u32,
     /// The migrated text; `None` when the manifest was already current.
     migrated: Option<String>,
+    /// Whether every comment outside the rewritten entries was kept (annals
+    /// rewrites the whole file, without comments, when it can't edit in place).
+    comments_kept: bool,
     /// Where the original was kept; `None` with `--plan` or nothing to do.
     backup: Option<String>,
 }
@@ -32,13 +36,29 @@ impl Render for MigrateOutput {
         match (&self.migrated, &self.backup) {
             (None, _) => format!("{} is already version {}", self.manifest, self.to),
             (Some(text), None) => format!(
-                "{} would be rewritten from version {} to {} (comments are not kept):\n{text}",
-                self.manifest, self.from, self.to
+                "{} would be rewritten from version {} to {} ({}):\n{text}",
+                self.manifest,
+                self.from,
+                self.to,
+                self.comments_note()
             ),
             (Some(_), Some(backup)) => format!(
-                "Migrated {} from version {} to {}; the original is {backup}",
-                self.manifest, self.from, self.to
+                "Migrated {} from version {} to {} ({}); the original is {backup}",
+                self.manifest,
+                self.from,
+                self.to,
+                self.comments_note()
             ),
+        }
+    }
+}
+
+impl MigrateOutput {
+    fn comments_note(&self) -> &'static str {
+        if self.comments_kept {
+            "comments kept"
+        } else {
+            "comments are not kept"
         }
     }
 }
@@ -61,12 +81,15 @@ pub fn run(
     let file = commands::manifest_file(path)?;
     let text = read(&file)?;
     let from = manifest_version(&text, &file).map_err(io_error)?;
-    let migrated = upgrade_manifest(&text, &file).map_err(io_error)?;
+    let upgraded = upgrade_manifest(&text, &file).map_err(io_error)?;
+    let comments_kept = upgraded.as_ref().is_some_and(|u| u.comments_kept);
+    let migrated = upgraded.map(|u| u.text);
     let mut output = MigrateOutput {
         manifest: file.display().to_string(),
         from,
         to: MANIFEST_VERSION,
         migrated,
+        comments_kept,
         backup: None,
     };
     let Some(new_text) = output.migrated.clone() else {

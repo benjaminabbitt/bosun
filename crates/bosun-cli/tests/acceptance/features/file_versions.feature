@@ -2,8 +2,8 @@ Feature: every file bosun reads carries a format version, and older ones migrate
 
   A manifest or config written for an older format still works: bosun migrates
   it in memory each time it reads it. `bosun migrate` writes a manifest's
-  migration back, so `add` and `remove` can edit it. A file from a newer bosun
-  is refused, never misread.
+  migration back, editing only what changed so comments stay, so `add` and
+  `remove` can edit it. A file from a newer bosun is refused, never misread.
 
   Background:
     Given a Linux amd64 machine, not elevated
@@ -40,7 +40,7 @@ Feature: every file bosun reads carries a format version, and older ones migrate
   Scenario: migrate --plan shows the rewrite and changes nothing
     Given the manifest:
       """
-      # comments do not survive a migration
+      # kept through the migration
       version: 1
       targets: [linux/amd64]
       packages:
@@ -51,13 +51,13 @@ Feature: every file bosun reads carries a format version, and older ones migrate
       """
     When I run `bosun --format text migrate . --plan`
     Then it succeeds
-    And it says "would be rewritten from version 1 to 2 (comments are not kept)"
+    And it says "would be rewritten from version 1 to 2 (comments kept)"
     And the manifest is unchanged
 
   Scenario: migrate rewrites the manifest, keeps the original, and add then works
     Given the manifest:
       """
-      # comments do not survive a migration
+      # kept through the migration
       version: 1
       targets: [linux/amd64]
       packages:
@@ -70,8 +70,10 @@ Feature: every file bosun reads carries a format version, and older ones migrate
     When I run `bosun --format text migrate . --yes`
     Then it succeeds
     And it says "Migrated"
+    And it says "(comments kept)"
     And the manifest reads:
       """
+      # kept through the migration
       version: 2
       packages:
         - name: fd
@@ -84,7 +86,7 @@ Feature: every file bosun reads carries a format version, and older ones migrate
       """
     And the file bosun.yaml.v1 reads:
       """
-      # comments do not survive a migration
+      # kept through the migration
       version: 1
       targets: [linux/amd64]
       packages:

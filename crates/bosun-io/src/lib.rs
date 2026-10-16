@@ -15,6 +15,8 @@ pub mod manifest_edit;
 pub mod paths;
 pub mod state;
 
+/// A manifest migrated to the current version ([`upgrade_manifest`]).
+pub use annals_yaml::versioned::Upgraded;
 pub use config::UserConfig;
 pub use error::IoError;
 pub use manifest::{
