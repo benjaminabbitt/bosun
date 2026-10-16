@@ -1463,16 +1463,6 @@ mod tests {
 
     // --- release selectors (§5.4) --------------------------------------------
 
-    fn rpm_backend(index: &dyn Index) -> ResolvableBackend<'_> {
-        ResolvableBackend {
-            id: BackendId::new("dnf"),
-            purl_type: "rpm".to_string(),
-            vers_type: "generic".to_string(),
-            platform_independent: false,
-            index,
-        }
-    }
-
     fn linux(distro: Option<&Distro>) -> Host<'_> {
         Host {
             os: Os::Linux,
@@ -1718,7 +1708,7 @@ mod tests {
 
     #[test]
     fn an_rpm_release_is_id_dash_version_id() {
-        let dnf = FakeIndex::new(Scheme::Generic, &["1.6", "1.7.1"]);
+        let dnf = FakeIndex::new(Scheme::Rpm, &["1.6-1", "1.7.1-1"]);
         let backends = [rpm_backend(&dnf)];
         let m = manifest(
             &[],
@@ -1726,8 +1716,11 @@ mod tests {
                 "jq",
                 None,
                 &[
-                    ("linux:fedora", block(&["dnf"], None, Some("1.7.1"))),
-                    ("linux:fedora@fedora-41", block(&["dnf"], None, Some("1.6"))),
+                    ("linux:fedora", block(&["dnf"], None, Some("1.7.1-1"))),
+                    (
+                        "linux:fedora@fedora-41",
+                        block(&["dnf"], None, Some("1.6-1")),
+                    ),
                     ("linux:fedora@41", block(&["dnf"], None, Some("0"))),
                 ],
             )],
@@ -1738,7 +1731,7 @@ mod tests {
             version_id: Some("41".to_string()),
             version_codename: None,
         };
-        assert_eq!(picked(&m, &linux(Some(&fedora)), &backends), "1.6");
+        assert_eq!(picked(&m, &linux(Some(&fedora)), &backends), "1.6-1");
     }
 
     #[test]
