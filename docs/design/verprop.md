@@ -614,7 +614,7 @@ Rules (draft syntax):
 - **Selectors:** `install` keys are `any`, `<os>`, `<os>:<distro>` or
   `<os>:<distro>@<release>`, and (decided, not built yet) the libc selectors
   `<os>:<libc>[@<range>]` (below); the most specific match for the current machine wins
-  (`<distro>@<release>` > exact distro `ID` > `ID_LIKE` match > plain `<os>` > `any`), then
+  (`<distro>@<release>` > exact distro `ID` > `ID_LIKE` match > libc > plain `<os>` > `any`), then
   `defaults.install`. A bare block under `install` (its keys are block keys, not selectors) is
   `any`; mixing the two is an error. No match = the entry doesn't apply on this platform
   (reported by `status`, not an error). Distro and libc detection are below.
@@ -686,7 +686,8 @@ token each distro gets (below):
   - The `<distro>` of a release selector matches `ID` only: a release is a release of that
     distro, and `ID_LIKE` carries none.
   - A distro whose package type has no `distro` rule (Arch, Alpine) gets no release
-    selectors.
+    selectors. This holds for Alpine after apk lands too: bosun doesn't invent a branch rule
+    (`alpine@3.20`) ahead of purl; Alpine entries use `linux:alpine` and libc keys.
   - The selector matches when some registered backend of its block (or, for a block naming
     none, of the `defaults` block it inherits) spells this machine's release that way; which
     of the block's backends installs is still the machine's preference (§5.3). So a block
@@ -731,8 +732,14 @@ carries libc, so bosun reuses existing vocabularies rather than inventing one:
 - No `/bin/sh`, or a statically linked one: libc unknown. libc selectors don't match, and a
   template that uses `{{ libc }}` is an error, as now.
 
-Open: how a libc selector ranks against distro selectors, and the version scheme for its
-range (§11).
+- **Rank (DECIDED):** libc is its own rank, between `ID_LIKE` and plain `<os>`: a distro
+  selector names a package source, libc only a binary's ABI, so any matching distro key wins
+  and a distro with no key of its own (Alpine with no `linux:alpine`) falls through to
+  `linux:musl`. A ranged `linux:gnu@>=2.31` outranks a bare `linux:gnu`. libc and distro are
+  not combined in one key.
+- **Version scheme (DECIDED):** the range is a vers `generic` range (`vers:generic/>=2.31`),
+  compared with bosun's generic chunk ordering (§5.6); glibc and musl versions are plain
+  dotted numbers.
 
 ### 5.5 Machine interface and privilege
 
@@ -1089,18 +1096,6 @@ Future driver: CI.
 - **Name.** `bosun` is the working name. The `bosun` crate on crates.io is taken, which
   doesn't matter while bosun ships only as release binaries (§3.1). Keep it, or rename before
   the first public release?
-- **libc selector rank (§5.4).** Where does `linux:gnu` / `linux:musl` sit against the distro
-  selectors when both match? Options: below `ID_LIKE` and above plain `<os>` (a distro names
-  a package source, libc only a binary's ABI), above every distro selector, or forbid mixing
-  libc and distro selectors in one entry. A ranged `linux:gnu@>=2.31` outranks a bare
-  `linux:gnu` either way.
-- **libc version scheme (§5.4).** Which vers scheme compares glibc and musl versions in a
-  `linux:gnu@<range>` selector? Options: bosun's generic chunk ordering (§5.6, as for types
-  with no vers definition), SemVer (doesn't fit two-part `2.31`), or a dedicated `glibc` type.
-- **Release selectors where purl has no `distro` rule.** The rule gives Alpine and Arch no
-  `@<release>`. Alpine's repositories are per branch (`v3.20`) and its `VERSION_ID` is a point
-  release (`3.20.10`), so when apk lands: leave Alpine without release selectors, or match its
-  branch (`alpine@3.20`)?
 - **Remote indexes (§4.7).** `render` for another platform, `Containerfile.bosun` with
   versions decided ahead of the build, and the ctxloom dev container dogfood (§12) wait on a
   remote `Index` (apt `Packages` first). Build it after Linux breadth, or keep it deferred
