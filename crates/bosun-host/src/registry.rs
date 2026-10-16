@@ -1,14 +1,16 @@
 //! The backend probe registry (§5.3). Every compiled-in backend factory is
 //! probed **in parallel** (`std::thread::scope`, no async runtime); only those
 //! present are registered, and each absent one records why it was skipped (for
-//! `bosun backends`). A probe that errors or panics skips just that backend —
-//! it never takes down the others (Appendix B).
+//! `bosun backends`). A probe whose program is not on the machine reports the
+//! backend not present, as a probe that looked and found nothing does. A
+//! probe that otherwise errors or panics skips just that backend — it never
+//! takes down the others (Appendix B).
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::thread;
 
 use bosun_core::{BackendId, Version};
-use bosun_ports::{Backend, BackendFactory, BackendMeta, HostInfo, Probe};
+use bosun_ports::{Backend, BackendFactory, BackendMeta, HostInfo, PortError, Probe};
 use tracing::debug;
 
 use crate::logmsg;
@@ -93,7 +95,7 @@ pub fn build_registry(factories: Vec<Box<dyn BackendFactory>>, host: &HostInfo) 
                 scope.spawn(
                     || match catch_unwind(AssertUnwindSafe(|| factory.probe(host))) {
                         Ok(Ok(Some(probe))) => Outcome::Present(probe),
-                        Ok(Ok(None)) => Outcome::Absent,
+                        Ok(Ok(None) | Err(PortError::CommandNotFound { .. })) => Outcome::Absent,
                         Ok(Err(e)) => Outcome::Failed(e.to_string()),
                         Err(_) => Outcome::Panicked,
                     },
@@ -154,7 +156,7 @@ mod tests {
     use super::*;
     use bosun_core::{Arch, Capabilities, Installed, Os, Ref, Scheme, Scope, Source, Target};
     use bosun_ports::testing::FakeCommandRunner;
-    use bosun_ports::{Index, Installer, PortError, Steps};
+    use bosun_ports::{Index, Installer, Steps};
 
     /// A no-op backend; the registry test registers it but never drives it.
     struct Noop;
@@ -200,6 +202,7 @@ mod tests {
     enum Behaviour {
         Present,
         Absent,
+        NoProgram,
         Error,
         Panic,
     }
@@ -228,6 +231,9 @@ mod tests {
                     version: Version::parse("1.0.0", Scheme::Semver).unwrap(),
                 })),
                 Behaviour::Absent => Ok(None),
+                Behaviour::NoProgram => Err(PortError::CommandNotFound {
+                    program: "zypper".into(),
+                }),
                 Behaviour::Error => Err(PortError::Backend {
                     detail: "boom".into(),
                 }),
@@ -259,6 +265,7 @@ mod tests {
             vec![
                 factory("apt", Behaviour::Present),
                 factory("dnf", Behaviour::Absent),
+                factory("zypper", Behaviour::NoProgram),
                 factory("brew", Behaviour::Error),
                 factory("snap", Behaviour::Panic), // must not take down the rest
                 factory("cargo", Behaviour::Present),
@@ -282,6 +289,7 @@ mod tests {
                 .map(|s| &s.reason)
         };
         assert_eq!(skip("dnf"), Some(&SkipReason::NotPresent));
+        assert_eq!(skip("zypper"), Some(&SkipReason::NotPresent));
         assert!(matches!(skip("brew"), Some(SkipReason::ProbeFailed(_))));
         assert_eq!(skip("snap"), Some(&SkipReason::Panicked));
 
@@ -289,6 +297,6 @@ mod tests {
         let mut ids: Vec<&str> = backends.iter().map(|b| b.id.as_str()).collect();
         ids.sort();
         assert_eq!(ids, vec!["apt", "cargo"]);
-        assert_eq!(skipped.len(), 3);
+        assert_eq!(skipped.len(), 4);
     }
 }
