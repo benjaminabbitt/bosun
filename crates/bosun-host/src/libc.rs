@@ -48,11 +48,13 @@ pub fn interpreter(elf: &[u8]) -> Option<String> {
     // An unsigned field of `width` bytes at `at`, in the file's byte order.
     let field = |at: usize, width: usize| -> Option<usize> {
         let bytes = elf.get(at..at.checked_add(width)?)?;
-        let fold = |n: u64, b: &u8| (n << 8) | u64::from(*b);
+        let mut word = [0u8; 8];
         let n = if big_endian {
-            bytes.iter().fold(0, fold)
+            word[8 - width..].copy_from_slice(bytes);
+            u64::from_be_bytes(word)
         } else {
-            bytes.iter().rev().fold(0, fold)
+            word[..width].copy_from_slice(bytes);
+            u64::from_le_bytes(word)
         };
         usize::try_from(n).ok()
     };
@@ -411,6 +413,19 @@ mod tests {
                 version: None,
             })
         );
+    }
+
+    /// `detect` reads this host's own /bin/sh: its family is whatever that
+    /// shell's loader names (none where /bin/sh is missing or static).
+    #[test]
+    fn detect_reads_the_hosts_own_shell() {
+        let want = fs::read(SHELL)
+            .ok()
+            .and_then(|elf| interpreter(&elf))
+            .and_then(|loader| family_of(&loader));
+        let runner = FakeCommandRunner::new();
+        assert_eq!(detect(&runner).map(|l| l.family), want);
+        assert_eq!(runner.calls().len(), usize::from(want.is_some()));
     }
 
     #[test]

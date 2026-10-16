@@ -316,13 +316,17 @@ mod tests {
                 version_id: Some("12".into()),
                 version_codename: Some("bookworm".into()),
             }),
+            libc: Some(Libc {
+                family: bosun_core::LibcFamily::Musl,
+                version: Some("1.2.5".into()),
+            }),
             ..Default::default()
         };
         assert_eq!(m.os(), Os::Linux);
         assert_eq!(m.arch(), Arch::Amd64);
         assert_eq!(m.privilege(), Privilege::Elevated);
         assert_eq!(m.distro().unwrap().id, "debian");
-        assert!(m.libc().is_none());
+        assert_eq!(m.libc().unwrap().to_string(), "musl 1.2.5");
         assert_eq!(m.elevation(), Elevation::Sudo);
     }
 
