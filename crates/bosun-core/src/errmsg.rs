@@ -39,6 +39,14 @@ pub const PLATFORM_UNKNOWN_OS: &str = "unknown operating system";
 pub const PLATFORM_UNKNOWN_ARCH: &str = "unknown architecture";
 /// A target string not of the form `os/arch` (or the literal `any`).
 pub const PLATFORM_INVALID_TARGET: &str = "invalid target (expected os/arch or any)";
-/// A selector string not of the form `any`, `os`, `os:distro` or `os:distro@release`.
+/// A selector string not of the form `any`, `os`, `os:distro`,
+/// `os:distro@release` or `linux:<libc>[@range]`.
 pub const PLATFORM_INVALID_SELECTOR: &str =
-    "invalid selector (expected any, os, os:distro or os:distro@release)";
+    "invalid selector (expected any, os, os:distro, os:distro@release or linux:gnu|musl[@range])";
+/// A libc selector (`gnu`, `musl`) under an OS other than Linux.
+pub const PLATFORM_LIBC_NOT_LINUX: &str = "libc selectors apply to linux only";
+/// A libc selector's range that is not a vers generic range.
+pub const PLATFORM_INVALID_LIBC_RANGE: &str =
+    "invalid libc range (expected a vers generic range such as >=2.31)";
+/// A string that is not one of bosun's known C library families.
+pub const PLATFORM_UNKNOWN_LIBC: &str = "unknown libc (expected gnu or musl)";

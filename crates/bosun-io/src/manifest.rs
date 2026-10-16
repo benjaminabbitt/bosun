@@ -44,8 +44,8 @@ pub enum ManifestError {
     NotAScalar { context: String },
     /// A key bosun does not recognise (§5.4: unknown key is an error).
     UnknownKey { context: String, key: String },
-    /// An `install` key that is not a valid selector.
-    BadSelector { value: String },
+    /// An `install` key that is not a valid selector, and why.
+    BadSelector { value: String, reason: String },
     /// A package entry with no `name`.
     MissingName,
     /// An `install` mapping with both block keys and selector keys.
@@ -79,7 +79,9 @@ impl fmt::Display for ManifestError {
             ManifestError::UnknownKey { context, key } => {
                 write!(f, "unknown key {key:?} in {context}")
             }
-            ManifestError::BadSelector { value } => write!(f, "invalid selector {value:?}"),
+            ManifestError::BadSelector { value, reason } => {
+                write!(f, "invalid selector {value:?}: {reason}")
+            }
             ManifestError::MissingName => f.write_str("a package entry has no `name`"),
             ManifestError::InstallMixed { context } => write!(
                 f,
@@ -150,7 +152,10 @@ impl Diagnostic for ManifestError {
                     ("key", key.clone().into()),
                 ]
             }
-            ManifestError::BadSelector { value } => vec![("value", value.clone().into())],
+            ManifestError::BadSelector { value, reason } => vec![
+                ("value", value.clone().into()),
+                ("reason", reason.clone().into()),
+            ],
             ManifestError::MissingName => vec![],
             ManifestError::UnknownBackend { package, backend } => vec![
                 ("package", package.clone().into()),
@@ -307,7 +312,10 @@ fn selector_map(v: &Value, context: &str) -> Result2<BTreeMap<Selector, InstallB
         .map(|(sel, block)| {
             let selector = sel
                 .parse::<Selector>()
-                .map_err(|_| ManifestError::BadSelector { value: sel.clone() })?;
+                .map_err(|e| ManifestError::BadSelector {
+                    value: sel.clone(),
+                    reason: e.to_string(),
+                })?;
             Ok((selector, install_block(block, &format!("{context}.{sel}"))?))
         })
         .collect()
@@ -895,6 +903,34 @@ packages:
     }
 
     #[test]
+    fn a_bad_selector_says_why() {
+        let err = load_err(&with_install(
+            "\n      \"linux:gnu@>=two|<\": {backend: cargo}",
+        ));
+        assert!(
+            err.contains("invalid selector \"linux:gnu@>=two|<\""),
+            "{err}"
+        );
+        assert!(
+            err.contains(bosun_core::errmsg::PLATFORM_INVALID_LIBC_RANGE),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn libc_selectors_load() {
+        let m = load(&with_install(
+            "\n      \"linux:gnu@>=2.31\": {backend: cargo}\n      linux:musl: {backend: cargo}",
+        ));
+        let keys: Vec<String> = m.packages[0]
+            .install
+            .keys()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(keys, vec!["linux:gnu@>=2.31", "linux:musl"]);
+    }
+
+    #[test]
     fn a_newer_manifest_is_refused() {
         let err = load_err("version: 3\n");
         assert!(err.contains("newer"), "message: {err}");
@@ -1173,7 +1209,11 @@ packages:
             "bosun.manifest.unknown_key"
         );
         assert_eq!(
-            ManifestError::BadSelector { value: "s".into() }.code(),
+            ManifestError::BadSelector {
+                value: "s".into(),
+                reason: "r".into()
+            }
+            .code(),
             "bosun.manifest.bad_selector"
         );
         assert_eq!(

@@ -17,8 +17,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use bosun_core::{
-    Arch, BackendId, Capabilities, Checksum, HoldSupport, Installed, Os, Ref, Scheme, Scope,
-    Source, Target, Version,
+    Arch, BackendId, Capabilities, Checksum, HoldSupport, Installed, LibcFamily, Os, Ref, Scheme,
+    Scope, Source, Target, Version,
 };
 use bosun_ports::{
     Backend, BackendFactory, BackendMeta, Command, CommandRunner, HostInfo, HttpFetcher, Index,
@@ -77,6 +77,7 @@ pub struct GithubPackageFactory {
     cache_dir: PathBuf,
     os: Os,
     arch: Arch,
+    libc: Option<LibcFamily>,
 }
 
 impl GithubPackageFactory {
@@ -98,7 +99,15 @@ impl GithubPackageFactory {
             cache_dir,
             os,
             arch,
+            libc: None,
         }
+    }
+
+    /// The host's C library family, for the `libc` and `rust_target` asset
+    /// template variables (§5.4).
+    pub fn with_libc(mut self, libc: Option<LibcFamily>) -> GithubPackageFactory {
+        self.libc = libc;
+        self
     }
 }
 
@@ -138,7 +147,8 @@ impl BackendFactory for GithubPackageFactory {
         let backend = GithubPackageBackend {
             kind: self.kind,
             runner: self.runner.clone(),
-            releases: ReleaseLookup::new(self.fetcher.clone(), self.os, self.arch),
+            releases: ReleaseLookup::new(self.fetcher.clone(), self.os, self.arch)
+                .with_libc(self.libc),
             cache_dir: self.cache_dir.clone(),
             _version: probe.version,
         };
@@ -657,6 +667,13 @@ mod tests {
             distro: None,
             runner,
         }
+    }
+
+    #[test]
+    fn the_factory_carries_the_hosts_libc_to_its_release_lookup() {
+        assert_eq!(factory(PackageKind::Deb).libc, None);
+        let musl = factory(PackageKind::Rpm).with_libc(Some(LibcFamily::Musl));
+        assert_eq!(musl.libc, Some(LibcFamily::Musl));
     }
 
     #[test]

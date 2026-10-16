@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 
-use bosun_core::{Arch, Distro, Os, Scope};
+use bosun_core::{Arch, Distro, Libc, Os, Scope};
 
 /// Whether the current process is running with elevated privilege (§5.5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,6 +49,8 @@ pub trait Machine {
     fn arch(&self) -> Arch;
     /// Linux distro facts from os-release, when available (§5.4).
     fn distro(&self) -> Option<&Distro>;
+    /// The Linux C library, when detected (§5.4); `None` off Linux.
+    fn libc(&self) -> Option<&Libc>;
     /// Whether the process is elevated.
     fn privilege(&self) -> Privilege;
     /// The invoking human (§5.5).

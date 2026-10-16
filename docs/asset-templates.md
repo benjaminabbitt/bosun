@@ -56,6 +56,11 @@ key by key, and a key the entry sets wins.
 | `arch`            | Go's `GOARCH` (also Debian's spelling for these two)               | `amd64`     | `arm64`     |
 | `arch_uname`      | The `uname -m` spelling; also Rust triples, rpm and apk            | `x86_64`    | `aarch64`   |
 | `arch_goreleaser` | The `goreleaser init` spelling: `x86_64` for amd64, otherwise `arch` | `x86_64`  | `arm64`     |
+| `libc`            | The host's C library, as Rust triples spell it: `gnu` or `musl`     | `gnu`       | `musl`      |
+| `rust_target`     | The Rust target triple: `{{ arch_uname }}-unknown-{{ os }}-{{ libc }}` | `x86_64-unknown-linux-gnu` | `aarch64-unknown-linux-musl` |
+
+(`libc` depends on the machine, not the architecture: the table shows a glibc amd64 host and a
+musl arm64 one.)
 
 All OS values:
 
@@ -76,16 +81,22 @@ minijinja's built-in filters change case or spelling: `{{ os | title }}` gives `
 `{{ arch | upper }}` gives `ARM64`, `{{ arch_uname | replace("x86_64", "x64") }}` gives `x64`.
 `{% if %}` works for one-off spellings.
 
-Not available yet:
+bosun reads the C library from the loader `/bin/sh` uses (design §5.4). Where it can't (no
+`/bin/sh`, or a static one), a template that uses `libc` or `rust_target` is an error that
+says the C library is unknown. A static musl build runs on either C library, so when a project
+publishes one, writing `musl` into the template is the portable choice; `{{ libc }}` picks the
+build that matches the machine. To install a glibc build only where the glibc is new enough,
+use a libc selector with a floor and let other machines fall back:
 
-| Variable      | Would be                                              | linux/amd64                |
-|---------------|-------------------------------------------------------|----------------------------|
-| `libc`        | The host's C library family (`gnu` or `musl`)          | `gnu`                      |
-| `rust_target` | `{{ arch_uname }}-unknown-{{ os }}-{{ libc }}`         | `x86_64-unknown-linux-gnu` |
-
-Both need host libc detection, which bosun doesn't have yet. A template that uses either is
-an error that says so. Many Rust projects publish only a musl build for some architectures,
-so writing `musl` into the template is usually right anyway.
+```yaml
+install:
+  linux:
+    backends:
+      github-release: {package: astral-sh/uv, asset: "{{ binary }}-{{ arch_uname }}-unknown-linux-musl.tar.gz"}
+  linux:gnu@>=2.28:
+    backends:
+      github-release: {package: astral-sh/uv, asset: "{{ binary }}-{{ arch_uname }}-unknown-linux-gnu.tar.gz"}
+```
 
 ## Examples from real releases
 

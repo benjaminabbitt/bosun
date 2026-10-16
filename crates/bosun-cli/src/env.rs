@@ -17,7 +17,7 @@ use bosun_backends::{
 };
 use bosun_core::vers::scheme_for_type;
 use bosun_core::version::Scheme;
-use bosun_core::{Arch, BackendId, Distro, Os, Scope, Target, Version};
+use bosun_core::{Arch, BackendId, Distro, Libc, LibcFamily, Os, Scope, Target, Version};
 #[cfg(unix)]
 use bosun_host::LinuxMachine;
 use bosun_host::{
@@ -101,6 +101,7 @@ impl Env {
             os: self.machine.os(),
             arch: self.machine.arch(),
             distro: self.machine.distro(),
+            libc: self.machine.libc(),
         }
     }
 
@@ -264,27 +265,26 @@ fn compiled_in_factories(
     bin_dir: PathBuf,
     os: Os,
     arch: Arch,
+    libc: Option<LibcFamily>,
 ) -> Vec<Box<dyn BackendFactory>> {
     let package = |kind| {
-        Box::new(GithubPackageFactory::new(
-            kind,
-            runner.clone(),
-            fetcher.clone(),
-            system_cache(),
-            os,
-            arch,
-        )) as Box<dyn BackendFactory>
+        Box::new(
+            GithubPackageFactory::new(
+                kind,
+                runner.clone(),
+                fetcher.clone(),
+                system_cache(),
+                os,
+                arch,
+            )
+            .with_libc(libc),
+        ) as Box<dyn BackendFactory>
     };
     vec![
         Box::new(AptFactory::new(runner.clone())),
         Box::new(DnfFactory::new(runner.clone())),
         Box::new(CargoFactory::new(runner.clone(), fetcher.clone())),
-        Box::new(GithubReleaseFactory::new(
-            fetcher.clone(),
-            bin_dir,
-            os,
-            arch,
-        )),
+        Box::new(GithubReleaseFactory::new(fetcher.clone(), bin_dir, os, arch).with_libc(libc)),
         package(PackageKind::Deb),
         package(PackageKind::Rpm),
         Box::new(WingetFactory::new(runner.clone())),
@@ -353,11 +353,12 @@ fn host_os() -> Os {
 fn host_machine(
     arch: Arch,
     distro: Option<Distro>,
+    libc: Option<Libc>,
     system: PathBuf,
     user: PathBuf,
     _runner: &dyn CommandRunner,
 ) -> Box<dyn Machine> {
-    Box::new(LinuxMachine::new(arch, distro, system, user))
+    Box::new(LinuxMachine::new(arch, distro, libc, system, user))
 }
 
 /// The real machine for `os`: privilege, user and distro read once here.
@@ -365,6 +366,7 @@ fn host_machine(
 fn host_machine(
     arch: Arch,
     _distro: Option<Distro>,
+    _libc: Option<Libc>,
     system: PathBuf,
     user: PathBuf,
     runner: &dyn CommandRunner,
@@ -385,17 +387,27 @@ fn host_machine(
 fn from_host() -> Result<Env, CliError> {
     let os = host_os();
     let arch = detect_arch().map_err(env_err)?;
-    let distro = match os {
-        Os::Linux => bosun_host::os_release::detect(),
-        _ => None,
-    };
     let system = bosun_io::paths::state_path(Scope::System).map_err(env_err)?;
     let user = bosun_io::paths::state_path(Scope::User).map_err(env_err)?;
 
     let runner: Arc<dyn CommandRunner> = Arc::new(ProcessCommandRunner);
+    let (distro, libc) = match os {
+        Os::Linux => (
+            bosun_host::os_release::detect(),
+            bosun_host::libc::detect(runner.as_ref()),
+        ),
+        _ => (None, None),
+    };
     let fetcher: Arc<dyn HttpFetcher> = Arc::new(UreqHttpFetcher::new());
     let bin_dir = user_bin_dir(&home_dir());
-    let factories = compiled_in_factories(runner.clone(), fetcher.clone(), bin_dir, os, arch);
+    let factories = compiled_in_factories(
+        runner.clone(),
+        fetcher.clone(),
+        bin_dir,
+        os,
+        arch,
+        libc.as_ref().map(|l| l.family),
+    );
     // §6: the version scheme for a backend comes from its factory metadata and
     // must be known for every compiled-in backend — not only those present this
     // run — so state recorded for an absent backend still reads correctly.
@@ -434,7 +446,14 @@ fn from_host() -> Result<Env, CliError> {
         })
         .collect();
 
-    let machine = host_machine(arch, distro, system.clone(), user.clone(), runner.as_ref());
+    let machine = host_machine(
+        arch,
+        distro,
+        libc,
+        system.clone(),
+        user.clone(),
+        runner.as_ref(),
+    );
     let lock_dir = bosun_io::paths::locks_beside(&user);
     Ok(Env {
         state: FileStateStore::new(system, user, schemes.clone()),
@@ -489,6 +508,19 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
         version_id: d.version_id,
         version_codename: d.codename,
     });
+    let libc = fx
+        .libc
+        .map(|l| -> Result<Libc, CliError> {
+            Ok(Libc {
+                family: l
+                    .family
+                    .parse()
+                    .map_err(|e| env_err(format!("fixture libc: {e}")))?,
+                version: l.version,
+            })
+        })
+        .transpose()?;
+    let family = libc.as_ref().map(|l| l.family);
     let privilege = match fx.privilege.as_deref() {
         Some("elevated") => Privilege::Elevated,
         _ => Privilege::Unelevated,
@@ -533,7 +565,7 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
                     cache_dir: &cache_dir,
                     packages: &packages,
                 };
-                return real_backend(&b.id, version, &places, os, arch);
+                return real_backend(&b.id, version, &places, os, arch, family);
             }
             for (native, ver) in &b.installed {
                 machine_state
@@ -580,6 +612,7 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
         bin_dir.clone(),
         os,
         arch,
+        family,
     ));
     for b in &backends {
         option_keys.entry(b.id.as_str().to_string()).or_default();
@@ -591,6 +624,7 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
         os,
         arch,
         distro,
+        libc,
         privilege,
         invoking_user: User {
             name: user_name,
@@ -637,6 +671,7 @@ fn absent_backends(
         bin_dir.to_path_buf(),
         os,
         arch,
+        None,
     )
     .into_iter()
     .filter(|f| absent.iter().any(|id| id == f.id().as_str()))
@@ -688,25 +723,32 @@ fn real_backend(
     places: &RealPlaces,
     os: Os,
     arch: Arch,
+    libc: Option<LibcFamily>,
 ) -> Result<BackendEntry, CliError> {
     let runner: Arc<dyn CommandRunner> = Arc::new(PackageDbRunner::new(places.packages.clone()));
     let package = |kind| -> Box<dyn BackendFactory> {
-        Box::new(GithubPackageFactory::new(
-            kind,
-            runner.clone(),
-            places.fetcher.clone(),
-            places.cache_dir.to_path_buf(),
-            os,
-            arch,
-        ))
+        Box::new(
+            GithubPackageFactory::new(
+                kind,
+                runner.clone(),
+                places.fetcher.clone(),
+                places.cache_dir.to_path_buf(),
+                os,
+                arch,
+            )
+            .with_libc(libc),
+        )
     };
     let factory: Box<dyn BackendFactory> = match id {
-        "github-release" => Box::new(GithubReleaseFactory::new(
-            places.fetcher.clone(),
-            places.bin_dir.to_path_buf(),
-            os,
-            arch,
-        )),
+        "github-release" => Box::new(
+            GithubReleaseFactory::new(
+                places.fetcher.clone(),
+                places.bin_dir.to_path_buf(),
+                os,
+                arch,
+            )
+            .with_libc(libc),
+        ),
         "github-deb" => package(PackageKind::Deb),
         "github-rpm" => package(PackageKind::Rpm),
         other => {
@@ -791,6 +833,7 @@ mod tests {
             PathBuf::from("/tmp/bin"),
             Os::Linux,
             Arch::Amd64,
+            None,
         );
         let schemes = factory_schemes(&factories);
         assert_eq!(schemes.get("apt"), Some(&Scheme::Debian));
@@ -809,6 +852,7 @@ mod tests {
             PathBuf::from("/tmp/bin"),
             Os::Linux,
             Arch::Amd64,
+            None,
         );
         let keys = factory_option_keys(&factories);
         assert_eq!(

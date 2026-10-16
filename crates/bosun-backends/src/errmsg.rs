@@ -6,12 +6,12 @@ pub const ASSET_TEMPLATE: &str = "invalid asset template";
 /// An asset template names a variable bosun does not provide.
 pub const ASSET_UNKNOWN_VARIABLE: &str = "unknown variable";
 
-/// An asset template names a variable that is documented but not available yet.
-pub const ASSET_NOT_YET: &str = "variable not supported yet";
+/// An asset template uses a libc variable on a host whose libc is unknown.
+pub const ASSET_LIBC_UNKNOWN: &str = "the host's C library is unknown, so there is no";
 
-/// Why the not-yet variables are unavailable, and what to write instead.
-pub const ASSET_NOT_YET_WHY: &str =
-    "it needs host libc detection, which bosun does not have; write the libc into the template (e.g. musl)";
+/// Why the libc is unknown, and what to write instead.
+pub const ASSET_LIBC_UNKNOWN_WHY: &str =
+    "bosun reads it from the loader /bin/sh uses, and found none; write the libc into the template (e.g. musl)";
 
 /// A rendered asset name still holds a brace: a single-brace placeholder.
 pub const ASSET_BRACE: &str =

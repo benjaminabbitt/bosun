@@ -33,6 +33,8 @@ struct Machine {
     arch: String,
     /// The os-release facts of a named distro.
     distro: Option<MachineDistro>,
+    /// The C library family (`gnu`, `musl`) and version, when known.
+    libc: Option<(String, String)>,
     elevated: bool,
 }
 
@@ -222,6 +224,9 @@ impl BosunWorld {
                 "version_id": d.version_id,
             });
         }
+        if let Some((family, version)) = &m.libc {
+            fx["libc"] = json!({"family": family, "version": version});
+        }
         if let Some(f) = &self.fail_step {
             fx["fail_step"] = json!(f);
         }
@@ -343,7 +348,7 @@ fn versions(list: &str) -> Vec<String> {
 // ---- the machine and its backends -----------------------------------------
 
 #[given(
-    regex = r"^an? (Linux|Debian \S+|Ubuntu \S+|Fedora \S+|Rocky \S+|Windows) (\S+) machine, (not elevated|elevated)$"
+    regex = r"^an? (Linux|Debian \S+|Ubuntu \S+|Fedora \S+|Rocky \S+|Alpine|Windows) (\S+) machine, (not elevated|elevated)$"
 )]
 fn a_machine(world: &mut BosunWorld, os: String, arch: String, privilege: String) {
     let distro = match os.split_once(' ') {
@@ -371,14 +376,32 @@ fn a_machine(world: &mut BosunWorld, os: String, arch: String, privilege: String
             codename: None,
             version_id: Some(release.into()),
         }),
+        _ if os == "Alpine" => Some(MachineDistro {
+            id: "alpine".into(),
+            id_like: Vec::new(),
+            codename: None,
+            version_id: None,
+        }),
         _ => None,
     };
     world.machine = Some(Machine {
         os: if os == "Windows" { "windows" } else { "linux" }.into(),
         arch,
         distro,
+        libc: None,
         elevated: privilege == "elevated",
     });
+}
+
+/// The C library the loader of the machine's /bin/sh reports.
+#[given(regex = r"^the machine's C library is (glibc|musl) (\S+)$")]
+fn machine_libc(world: &mut BosunWorld, name: String, version: String) {
+    let family = if name == "glibc" { "gnu" } else { "musl" };
+    world
+        .machine
+        .as_mut()
+        .expect("describe the machine first")
+        .libc = Some((family.to_string(), version));
 }
 
 #[given(regex = r"^a Debian (\S+) machine with no release codename, not elevated$")]
@@ -392,6 +415,7 @@ fn a_debian_machine_without_release(world: &mut BosunWorld, arch: String) {
             codename: None,
             version_id: None,
         }),
+        libc: None,
         elevated: false,
     });
 }
@@ -1057,6 +1081,30 @@ fn backends_line(world: &BosunWorld, id: &str) -> String {
             (words.next() == Some(id)).then(|| words.collect::<Vec<_>>().join(" "))
         })
         .unwrap_or_else(|| panic!("{id} is not listed:\n{}", world.stdout))
+}
+
+/// The `libc` member of a `--format json` document.
+fn json_libc(world: &BosunWorld) -> Value {
+    let doc: Value = serde_json::from_str(&world.stdout)
+        .unwrap_or_else(|e| panic!("{e}; stdout:\n{}", world.stdout));
+    doc.get("libc")
+        .cloned()
+        .unwrap_or_else(|| panic!("no libc in:\n{}", world.stdout))
+}
+
+#[then(regex = r"^the JSON reports libc (\S+) (\S+)$")]
+fn json_reports_libc(world: &mut BosunWorld, family: String, version: String) {
+    assert_eq!(
+        json_libc(world),
+        json!({"family": family, "version": version}),
+        "{}",
+        world.stdout
+    );
+}
+
+#[then("the JSON reports no libc")]
+fn json_reports_no_libc(world: &mut BosunWorld) {
+    assert_eq!(json_libc(world), Value::Null, "{}", world.stdout);
 }
 
 #[then(regex = r"^it lists (\S+) (\S+) as registered$")]

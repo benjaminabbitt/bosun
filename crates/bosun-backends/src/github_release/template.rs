@@ -11,7 +11,7 @@
 
 use std::collections::BTreeMap;
 
-use bosun_core::{Arch, Os};
+use bosun_core::{Arch, LibcFamily, Os};
 use bosun_ports::PortError;
 use minijinja::{Environment, UndefinedBehavior};
 
@@ -20,8 +20,9 @@ use crate::errmsg;
 /// goreleaser's default archive name, used when no `asset` is given.
 pub(super) const DEFAULT_TEMPLATE: &str = "{{ binary }}_{{ version }}_{{ os }}_{{ arch }}.tar.gz";
 
-/// Variables documented but not yet available: each needs host libc detection.
-const NOT_YET: &[&str] = &["libc", "rust_target"];
+/// Variables that need the host's C library (§5.4): an error where it is
+/// unknown.
+const LIBC_VARS: &[&str] = &["libc", "rust_target"];
 
 /// What a template is rendered against: the package and the host it installs to.
 pub(super) struct AssetVars<'a> {
@@ -35,13 +36,15 @@ pub(super) struct AssetVars<'a> {
     pub os: Os,
     /// The target architecture.
     pub arch: Arch,
+    /// The host's C library family, when known (§5.4).
+    pub libc: Option<LibcFamily>,
 }
 
 impl AssetVars<'_> {
     /// The precomputed variables, by name.
     fn context(&self) -> BTreeMap<&'static str, String> {
         let arch = self.arch.to_string();
-        BTreeMap::from([
+        let mut context = BTreeMap::from([
             ("binary", self.binary.to_string()),
             ("version", self.version.to_string()),
             ("tag", self.tag.to_string()),
@@ -50,7 +53,13 @@ impl AssetVars<'_> {
             ("arch", arch.clone()),
             ("arch_uname", arch_uname(self.arch).to_string()),
             ("arch_goreleaser", arch_goreleaser(self.arch, &arch)),
-        ])
+        ]);
+        if let Some(libc) = self.libc {
+            context.insert("libc", libc.to_string());
+            let triple = format!("{}-unknown-{}-{libc}", arch_uname(self.arch), self.os);
+            context.insert("rust_target", triple);
+        }
+        context
     }
 }
 
@@ -78,7 +87,8 @@ fn template_error(template: &str, detail: impl std::fmt::Display) -> PortError {
 }
 
 /// Render `template` against `vars`. A syntax error, an unknown variable, or a
-/// variable that is not supported yet is an error naming the template.
+/// libc variable on a host whose libc is unknown is an error naming the
+/// template.
 pub(super) fn render(template: &str, vars: &AssetVars<'_>) -> Result<String, PortError> {
     let mut env = Environment::new();
     env.set_undefined_behavior(UndefinedBehavior::Strict);
@@ -88,16 +98,19 @@ pub(super) fn render(template: &str, vars: &AssetVars<'_>) -> Result<String, Por
     let context = vars.context();
 
     // Name the offending variable up front: strict undefined alone reports
-    // only "undefined value", and a not-yet variable deserves its own reason.
+    // only "undefined value", and a libc variable deserves its own reason.
     let mut used: Vec<String> = tmpl.undeclared_variables(false).into_iter().collect();
     used.sort();
-    if let Some(var) = used.iter().find(|v| NOT_YET.contains(&v.as_str())) {
+    if let Some(var) = used
+        .iter()
+        .find(|v| LIBC_VARS.contains(&v.as_str()) && !context.contains_key(v.as_str()))
+    {
         return Err(template_error(
             template,
             format!(
                 "{} `{var}`: {}",
-                errmsg::ASSET_NOT_YET,
-                errmsg::ASSET_NOT_YET_WHY
+                errmsg::ASSET_LIBC_UNKNOWN,
+                errmsg::ASSET_LIBC_UNKNOWN_WHY
             ),
         ));
     }
@@ -136,6 +149,7 @@ mod tests {
             tag,
             os: Os::Linux,
             arch,
+            libc: None,
         }
     }
 
@@ -442,6 +456,7 @@ mod tests {
                     tag: "v1.0.0",
                     os,
                     arch: AMD64,
+                    libc: None,
                 },
             )
             .unwrap()
@@ -485,14 +500,53 @@ mod tests {
         assert!(e.contains("Os"), "{e}");
     }
 
+    fn on(libc: LibcFamily, arch: Arch, template: &str) -> String {
+        let v = AssetVars {
+            libc: Some(libc),
+            ..vars("uv", "0.9.2", "0.9.2", arch)
+        };
+        render(template, &v).unwrap()
+    }
+
     #[test]
-    fn libc_is_not_supported_yet() {
+    fn libc_is_the_hosts_family_in_rust_triple_spelling() {
+        let t = "{{ binary }}-{{ arch_uname }}-unknown-linux-{{ libc }}.tar.gz";
+        assert_eq!(
+            on(LibcFamily::Gnu, AMD64, t),
+            "uv-x86_64-unknown-linux-gnu.tar.gz"
+        );
+        assert_eq!(
+            on(LibcFamily::Musl, ARM64, t),
+            "uv-aarch64-unknown-linux-musl.tar.gz"
+        );
+    }
+
+    #[test]
+    fn rust_target_is_the_whole_linux_triple() {
+        let t = "{{ binary }}-{{ rust_target }}.tar.gz";
+        assert_eq!(
+            on(LibcFamily::Musl, AMD64, t),
+            "uv-x86_64-unknown-linux-musl.tar.gz"
+        );
+        assert_eq!(
+            on(LibcFamily::Gnu, ARM64, t),
+            "uv-aarch64-unknown-linux-gnu.tar.gz"
+        );
+    }
+
+    #[test]
+    fn libc_variables_need_a_known_libc() {
         for var in ["libc", "rust_target"] {
             let e = err_text(&format!("{{{{ binary }}}}-{{{{ {var} }}}}.tar.gz"));
-            assert!(e.contains(errmsg::ASSET_NOT_YET), "{e}");
+            assert!(e.contains(errmsg::ASSET_LIBC_UNKNOWN), "{e}");
             assert!(e.contains(var), "{e}");
             assert!(!e.contains("undefined"), "{e}");
         }
+        // A template that doesn't use them renders without a libc.
+        assert_eq!(
+            render("{{ binary }}.tar.gz", &vars("x", "1.0.0", "v1.0.0", AMD64)).unwrap(),
+            "x.tar.gz"
+        );
     }
 
     #[test]

@@ -8,8 +8,8 @@
 //! registry (bosun-host); tests supply fakes.
 //!
 //! For each package entry it: picks the most specific applicable `install`
-//! block (distro release > exact distro ID > ID_LIKE > plain OS > `any`, then
-//! `defaults.install`, §5.4);
+//! block (distro release > exact distro ID > ID_LIKE > libc > plain OS >
+//! `any`, then `defaults.install`, §5.4);
 //! chooses a backend by installer preference (flag > env > config > manifest
 //! order, a single explicit backend never overridden, §5.3); builds the
 //! canonical purl from the backend type and host facts (§5.6); queries the
@@ -30,7 +30,7 @@ mod errmsg;
 use std::collections::BTreeMap;
 
 use bosun_core::manifest::{Backends, InstallBlock, Manifest, ManifestEntry, PACKAGE_OPTION};
-use bosun_core::platform::{Arch, Distro, Os, Selector, Target};
+use bosun_core::platform::{Arch, Distro, Libc, Os, Selector, Target};
 use bosun_core::record::{LockDocument, LockLeaf, LockPackage, Package, Placement};
 use bosun_core::spec::{SelectError, Spec, SpecError};
 use bosun_core::{BackendId, Claim, Purl, PurlError, Ref, Version};
@@ -51,6 +51,8 @@ pub struct Host<'a> {
     pub arch: Arch,
     /// Linux distro facts, when available (§5.4).
     pub distro: Option<&'a Distro>,
+    /// The C library, when detected (§5.4).
+    pub libc: Option<&'a Libc>,
 }
 
 /// A registered backend the resolver can query, with the metadata it needs to
@@ -408,9 +410,10 @@ fn merge_backends(mut defaults: Backends, entry: Backends) -> Backends {
 }
 
 /// The most specific selector in `map` that applies to `host`, by the §5.4
-/// ladder (release > exact distro ID > ID_LIKE > plain OS > any), or `None`
-/// if none apply. A block's release is spelled by the purl types of its
-/// registered backends, or of `inherited` when it names none.
+/// ladder (release > exact distro ID > ID_LIKE > libc with a range > libc >
+/// plain OS > any), or `None` if none apply. A block's release is spelled by
+/// the purl types of its registered backends, or of `inherited` when it names
+/// none.
 fn most_specific(
     map: &BTreeMap<Selector, InstallBlock>,
     host: &Host<'_>,
@@ -436,13 +439,22 @@ fn most_specific(
 }
 
 /// How specifically `sel` applies to `host`: higher is more specific. `None`
-/// when it does not apply (wrong OS, a distro family the host is not in, or a
-/// release none of `purl_types` spells as the host's own).
+/// when it does not apply (wrong OS, a distro family the host is not in, a
+/// release none of `purl_types` spells as the host's own, or a libc the host
+/// lacks or whose range its version is outside).
 fn specificity(sel: &Selector, host: &Host<'_>, purl_types: &[&str]) -> Option<u8> {
     match sel.os() {
         None => return Some(0), // any
         Some(os) if os != host.os => return None,
         Some(_) => {}
+    }
+    if let Some((family, range)) = sel.libc() {
+        // A libc names a binary's ABI, not a package source: below any distro
+        // match, and a range (a glibc floor) above the bare family.
+        return host
+            .libc
+            .filter(|libc| libc.satisfies(family, range))
+            .map(|_| if range.is_some() { 3 } else { 2 });
     }
     let Some(family) = sel.distro() else {
         return Some(1); // plain OS
@@ -455,9 +467,9 @@ fn specificity(sel: &Selector, host: &Host<'_>, purl_types: &[&str]) -> Option<u
             && purl_types
                 .iter()
                 .any(|t| distro.release(t).as_deref() == Some(release)))
-        .then_some(4),
-        None if distro.id == family => Some(3), // exact ID
-        None if distro.id_like.iter().any(|f| f == family) => Some(2), // ID_LIKE family
+        .then_some(6),
+        None if distro.id == family => Some(5), // exact ID
+        None if distro.id_like.iter().any(|f| f == family) => Some(4), // ID_LIKE family
         None => None,
     }
 }
@@ -713,7 +725,7 @@ mod tests {
 
     use bosun_core::manifest::Options;
     use bosun_core::version::Scheme;
-    use bosun_core::Checksum;
+    use bosun_core::{Checksum, LibcFamily};
 
     /// An index that returns a fixed version list and records the last query.
     struct FakeIndex {
@@ -851,6 +863,7 @@ mod tests {
             os: Os::Linux,
             arch: Arch::Amd64,
             distro: Some(&distro),
+            libc: None,
         };
         let index = FakeIndex::new(Scheme::Debian, &["1.7.0-1", "1.7.1-3", "1.8.0-1"]);
         let m = manifest(
@@ -896,6 +909,7 @@ mod tests {
             os: Os::Linux,
             arch: Arch::Amd64,
             distro: None,
+            libc: None,
         };
         let index = FakeIndex::new(Scheme::Semver, &["13.0.0", "14.1.0", "14.1.1"]);
         let m = manifest(
@@ -977,6 +991,7 @@ mod tests {
             os: Os::Linux,
             arch: Arch::Amd64,
             distro: None,
+            libc: None,
         }
     }
 
@@ -1127,6 +1142,7 @@ mod tests {
             os: Os::Linux,
             arch: Arch::Amd64,
             distro: None,
+            libc: None,
         };
         let index = FakeIndex::new(Scheme::Semver, &["0.6.3", "0.6.4"]);
         let m = manifest(
@@ -1165,6 +1181,7 @@ mod tests {
             os: Os::Linux,
             arch: Arch::Amd64,
             distro: None,
+            libc: None,
         };
         let index = FakeIndex::new(Scheme::Semver, &["2.0.2"]);
         let template = "{{ binary }}_{{ version }}_{{ os | title }}_{{ arch_goreleaser }}.tar.gz";
@@ -1210,6 +1227,7 @@ mod tests {
             os: Os::Linux,
             arch: Arch::Amd64,
             distro: None,
+            libc: None,
         };
         let index = FakeIndex::new(Scheme::Semver, &["0.8.1"]);
         let template = "{{ binary }}_{{ version }}_{{ os }}_{{ arch_goreleaser }}.tar.gz";
@@ -1241,6 +1259,7 @@ mod tests {
             os: Os::Linux,
             arch: Arch::Amd64,
             distro: None,
+            libc: None,
         };
         let defaults = with_option(
             with_asset(block(&["github-release"], None, None), "default.tar.gz"),
@@ -1275,6 +1294,7 @@ mod tests {
             os: Os::Linux,
             arch: Arch::Amd64,
             distro: None,
+            libc: None,
         };
         let m = manifest(
             &[],
@@ -1313,6 +1333,7 @@ mod tests {
             os: Os::Linux,
             arch: Arch::Amd64,
             distro: None,
+            libc: None,
         };
 
         resolve(
@@ -1336,6 +1357,7 @@ mod tests {
             os: Os::Linux,
             arch: Arch::Amd64,
             distro: None,
+            libc: None,
         };
 
         resolve(
@@ -1358,6 +1380,7 @@ mod tests {
             os: Os::Linux,
             arch: Arch::Amd64,
             distro: None,
+            libc: None,
         };
         let b = with_option(block(&["cargo"], None, None), "cargo", "package", "duf-cli");
         let m = manifest(&[], vec![entry("duf", Some(">=0.8.0"), &[("linux", b)])]);
@@ -1377,6 +1400,7 @@ mod tests {
             os: Os::Linux,
             arch: Arch::Amd64,
             distro: None,
+            libc: None,
         };
         let m = manifest(
             &[],
@@ -1417,6 +1441,7 @@ mod tests {
             os: Os::Linux,
             arch: Arch::Amd64,
             distro: Some(&distro),
+            libc: None,
         };
         let on_debian = resolve(&m, "h", &debian_host, &backends, &[]).unwrap();
         assert!(matches!(
@@ -1435,6 +1460,7 @@ mod tests {
             os: Os::Linux,
             arch: Arch::Amd64,
             distro: Some(&ubuntu),
+            libc: None,
         };
         let on_ubuntu = resolve(&m, "h", &ubuntu_host, &backends, &[]).unwrap();
         assert!(matches!(
@@ -1453,6 +1479,7 @@ mod tests {
             os: Os::Linux,
             arch: Arch::Amd64,
             distro: Some(&fedora),
+            libc: None,
         };
         let on_fedora = resolve(&m, "h", &fedora_host, &backends, &[]).unwrap();
         assert!(matches!(
@@ -1468,6 +1495,7 @@ mod tests {
             os: Os::Linux,
             arch: Arch::Amd64,
             distro,
+            libc: None,
         }
     }
 
@@ -1743,6 +1771,161 @@ mod tests {
         assert_eq!(picked(&m, &linux(Some(&distro)), &backends), "0.1-1");
     }
 
+    // --- libc selectors (§5.4) ------------------------------------------------
+
+    fn with_libc<'a>(distro: Option<&'a Distro>, libc: Option<&'a Libc>) -> Host<'a> {
+        Host {
+            libc,
+            ..linux(distro)
+        }
+    }
+
+    fn libc(family: LibcFamily, version: Option<&str>) -> Libc {
+        Libc {
+            family,
+            version: version.map(str::to_string),
+        }
+    }
+
+    fn alpine() -> Distro {
+        Distro {
+            id: "alpine".to_string(),
+            id_like: Vec::new(),
+            version_id: Some("3.20.3".to_string()),
+            version_codename: None,
+        }
+    }
+
+    const SEVEN_JQ: &[&str] = &[
+        "0.1-1", "0.2-1", "0.3-1", "0.4-1", "0.5-1", "0.6-1", "0.7-1",
+    ];
+
+    #[test]
+    fn libc_ranks_between_id_like_and_plain_os_and_a_range_beats_the_bare_family() {
+        let apt = FakeIndex::new(Scheme::Debian, SEVEN_JQ);
+        let backends = [deb_backend(&apt)];
+        let distro = jammy();
+        let glibc = libc(LibcFamily::Gnu, Some("2.35"));
+        let host = with_libc(Some(&distro), Some(&glibc));
+        let mut ladder = vec![
+            ("any", "0.1-1"),
+            ("linux", "0.2-1"),
+            ("linux:gnu", "0.3-1"),
+            ("linux:gnu@>=2.31", "0.4-1"),
+            ("linux:debian", "0.5-1"),
+            ("linux:ubuntu", "0.6-1"),
+            ("linux:ubuntu@jammy", "0.7-1"),
+        ];
+        while let Some((_, want)) = ladder.last().copied() {
+            assert_eq!(picked(&jq_by_selector(&ladder), &host, &backends), want);
+            ladder.pop();
+        }
+    }
+
+    #[test]
+    fn a_distro_with_no_key_of_its_own_falls_through_to_its_libc() {
+        let apt = FakeIndex::new(Scheme::Debian, EVERY_JQ);
+        let backends = [deb_backend(&apt)];
+        let m = jq_by_selector(&[
+            ("linux", "0.1-1"),
+            ("linux:gnu", "0.2-1"),
+            ("linux:musl", "0.3-1"),
+            ("linux:debian", "0.4-1"),
+        ]);
+        let (alpine, musl) = (alpine(), libc(LibcFamily::Musl, Some("1.2.5")));
+        assert_eq!(
+            picked(&m, &with_libc(Some(&alpine), Some(&musl)), &backends),
+            "0.3-1"
+        );
+    }
+
+    #[test]
+    fn libc_applies_on_a_machine_with_no_distro() {
+        // A scratch image with a libc: cargo needs no distro for its identity.
+        let cargo = FakeIndex::new(Scheme::Semver, &["0.1.0", "0.2.0"]);
+        let backends = [cargo_backend(&cargo)];
+        let m = manifest(
+            &[],
+            vec![entry(
+                "jq",
+                None,
+                &[
+                    ("linux", block(&["cargo"], None, Some("0.1.0"))),
+                    ("linux:musl", block(&["cargo"], None, Some("0.2.0"))),
+                ],
+            )],
+        );
+        let musl = libc(LibcFamily::Musl, Some("1.2.5"));
+        assert_eq!(
+            picked(&m, &with_libc(None, Some(&musl)), &backends),
+            "0.2.0"
+        );
+    }
+
+    #[test]
+    fn a_glibc_older_than_the_floor_falls_back_to_plain_linux() {
+        let apt = FakeIndex::new(Scheme::Debian, EVERY_JQ);
+        let backends = [deb_backend(&apt)];
+        let alpine = alpine();
+        let m = jq_by_selector(&[("linux", "0.1-1"), ("linux:gnu@>=2.28", "0.2-1")]);
+        let old = libc(LibcFamily::Gnu, Some("2.17"));
+        let new = libc(LibcFamily::Gnu, Some("2.28"));
+        assert_eq!(
+            picked(&m, &with_libc(Some(&alpine), Some(&old)), &backends),
+            "0.1-1"
+        );
+        assert_eq!(
+            picked(&m, &with_libc(Some(&alpine), Some(&new)), &backends),
+            "0.2-1"
+        );
+    }
+
+    #[test]
+    fn an_unknown_libc_matches_no_libc_selector() {
+        let apt = FakeIndex::new(Scheme::Debian, EVERY_JQ);
+        let backends = [deb_backend(&apt)];
+        let alpine = alpine();
+        let m = jq_by_selector(&[
+            ("linux", "0.1-1"),
+            ("linux:gnu", "0.2-1"),
+            ("linux:musl", "0.3-1"),
+        ]);
+        assert_eq!(
+            picked(&m, &with_libc(Some(&alpine), None), &backends),
+            "0.1-1"
+        );
+    }
+
+    #[test]
+    fn an_unknown_libc_version_matches_the_family_but_no_range() {
+        let apt = FakeIndex::new(Scheme::Debian, EVERY_JQ);
+        let backends = [deb_backend(&apt)];
+        let alpine = alpine();
+        let m = jq_by_selector(&[
+            ("linux", "0.1-1"),
+            ("linux:gnu", "0.2-1"),
+            ("linux:gnu@>=2.0", "0.3-1"),
+        ]);
+        let versionless = libc(LibcFamily::Gnu, None);
+        assert_eq!(
+            picked(&m, &with_libc(Some(&alpine), Some(&versionless)), &backends),
+            "0.2-1"
+        );
+    }
+
+    #[test]
+    fn the_other_family_never_applies() {
+        let apt = FakeIndex::new(Scheme::Debian, EVERY_JQ);
+        let backends = [deb_backend(&apt)];
+        let alpine = alpine();
+        let m = jq_by_selector(&[("any", "0.1-1"), ("linux:musl", "0.2-1")]);
+        let glibc = libc(LibcFamily::Gnu, Some("2.36"));
+        assert_eq!(
+            picked(&m, &with_libc(Some(&alpine), Some(&glibc)), &backends),
+            "0.1-1"
+        );
+    }
+
     #[test]
     fn deb_identity_omits_a_blank_codename() {
         let apt = FakeIndex::new(Scheme::Debian, &["1.0-1"]);
@@ -1774,6 +1957,7 @@ mod tests {
             os: Os::Linux,
             arch: Arch::Amd64,
             distro: Some(&distro),
+            libc: None,
         };
         let m = manifest(
             &[],
@@ -1815,6 +1999,7 @@ mod tests {
             os: Os::Linux,
             arch: Arch::Amd64,
             distro: Some(&distro),
+            libc: None,
         };
         let m = manifest(
             &[],
@@ -1848,6 +2033,7 @@ mod tests {
                 os,
                 arch: Arch::Amd64,
                 distro: None,
+                libc: None,
             };
             let r = resolve(&m, "h", &host, &[cargo_backend(&index)], &[]).unwrap();
             assert!(
@@ -1868,6 +2054,7 @@ mod tests {
             os: Os::Linux,
             arch: Arch::Amd64,
             distro: Some(&distro),
+            libc: None,
         };
         let m = manifest(
             &[],
@@ -1900,6 +2087,7 @@ mod tests {
             os: Os::Linux,
             arch: Arch::Amd64,
             distro: Some(&distro),
+            libc: None,
         };
         let m = manifest(
             &[("linux", block(&["apt"], None, None))],
@@ -1924,6 +2112,7 @@ mod tests {
             os: Os::Linux,
             arch: Arch::Amd64,
             distro: None,
+            libc: None,
         };
         // defaults: github-release's tag template; the entry names github-release
         // with its own asset and package.
@@ -1961,6 +2150,7 @@ mod tests {
             os: Os::Linux,
             arch: Arch::Amd64,
             distro: None,
+            libc: None,
         };
         let m = manifest(
             &[],
@@ -1987,6 +2177,7 @@ mod tests {
             os: Os::Linux,
             arch: Arch::Amd64,
             distro: Some(&distro),
+            libc: None,
         };
         let m = manifest(
             &[],
@@ -2014,6 +2205,7 @@ mod tests {
             os: Os::Linux,
             arch: Arch::Amd64,
             distro: Some(&distro),
+            libc: None,
         };
         let m = manifest(
             &[],
@@ -2038,6 +2230,7 @@ mod tests {
             os: Os::Linux,
             arch: Arch::Amd64,
             distro: None,
+            libc: None,
         };
         let m = manifest(
             &[],
@@ -2066,6 +2259,7 @@ mod tests {
             os: Os::Linux,
             arch: Arch::Amd64,
             distro: None,
+            libc: None,
         };
         // Entry spec says <2, but the linux block overrides to >=3.
         let m = manifest(
@@ -2091,6 +2285,7 @@ mod tests {
             os: Os::Linux,
             arch: Arch::Amd64,
             distro: None,
+            libc: None,
         };
         let m = manifest(
             &[],
@@ -2117,6 +2312,7 @@ mod tests {
             os: Os::Linux,
             arch: Arch::Amd64,
             distro: None, // no os-release
+            libc: None,
         };
         let m = manifest(
             &[],
@@ -2227,6 +2423,7 @@ mod tests {
             os: Os::Linux,
             arch: Arch::Amd64,
             distro: None,
+            libc: None,
         };
         let m = manifest(
             &[],
@@ -2260,6 +2457,7 @@ mod tests {
             os: Os::Linux,
             arch: Arch::Amd64,
             distro: Some(&rolling),
+            libc: None,
         };
         let m = manifest(
             &[],
@@ -2286,6 +2484,7 @@ mod tests {
             os: Os::Linux,
             arch: Arch::Amd64,
             distro: None,
+            libc: None,
         };
         let m = manifest(
             &[],

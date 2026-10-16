@@ -591,6 +591,9 @@ impl Machine for FakeMachine {
     fn distro(&self) -> Option<&Distro> {
         None
     }
+    fn libc(&self) -> Option<&bosun_core::Libc> {
+        None
+    }
     fn privilege(&self) -> Privilege {
         self.privilege
     }

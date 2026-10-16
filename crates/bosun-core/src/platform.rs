@@ -7,10 +7,11 @@
 //! literal `any` for platform-independent backends (cargo, go, npm, …). It is
 //! serialised as that string, so it can key a JSON object directly.
 //!
-//! [`Selector`] is the manifest `install` key: `any`, `<os>`, `<os>:<distro>`
-//! or `<os>:<distro>@<release>` (§5.4). Matching a selector against a concrete
-//! machine (release vs ID vs ID_LIKE precedence, distro facts) belongs to
-//! resolution, not here; this type is only the parsed key.
+//! [`Selector`] is the manifest `install` key: `any`, `<os>`, `<os>:<distro>`,
+//! `<os>:<distro>@<release>`, or the libc selector `linux:<libc>[@<range>]`
+//! (§5.4). Ranking selectors against a concrete machine (release vs ID vs
+//! ID_LIKE vs libc precedence) belongs to resolution, not here; this type is
+//! only the parsed key, and [`Libc`] and [`Distro`] the machine facts.
 
 use std::fmt;
 use std::str::FromStr;
@@ -18,6 +19,8 @@ use std::str::FromStr;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::errmsg;
+use crate::spec::Spec;
+use crate::version::{Scheme, Version};
 
 /// An operating system bosun can target. Rendered with Docker's spelling, so
 /// macOS is `darwin`.
@@ -70,6 +73,36 @@ pub enum Selector {
     /// `ID`, and the release spelled as its packages' purl `distro` qualifier
     /// ([`Distro::release`]).
     OsDistroRelease(Os, String, String),
+    /// A C library family, optionally with a version range (`linux:musl`,
+    /// `linux:gnu@>=2.31`). Linux only. The family names `gnu` and `musl` are
+    /// reserved: `linux:gnu` is always this, never a distro.
+    OsLibc(Os, LibcFamily, Option<LibcRange>),
+}
+
+/// A C library family (§5.4), spelled as the environment field of a Rust
+/// target triple: `gnu` (glibc) or `musl`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum LibcFamily {
+    /// glibc.
+    Gnu,
+    /// musl.
+    Musl,
+}
+
+/// A libc version range from a selector (`>=2.31` in `linux:gnu@>=2.31`): a
+/// vers `generic` range, kept as written. Built only by [`LibcRange::parse`],
+/// so it always parses.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct LibcRange(String);
+
+/// The machine's C library (§5.4): its family, and its version when the
+/// loader reported one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Libc {
+    /// The family.
+    pub family: LibcFamily,
+    /// The version (`2.36`, `1.2.5`), when known.
+    pub version: Option<String>,
 }
 
 /// Why a platform string could not be parsed.
@@ -84,9 +117,24 @@ pub enum PlatformError {
     /// Not of the form `os/arch` (or `any`).
     #[error("{kind}: {0}", kind = errmsg::PLATFORM_INVALID_TARGET)]
     InvalidTarget(String),
-    /// Not of the form `any`, `os`, `os:distro` or `os:distro@release`.
+    /// Not of the form `any`, `os`, `os:distro`, `os:distro@release` or
+    /// `linux:<libc>[@range]`.
     #[error("{kind}: {0}", kind = errmsg::PLATFORM_INVALID_SELECTOR)]
     InvalidSelector(String),
+    /// A libc selector for an OS other than Linux.
+    #[error("{kind}: {0}", kind = errmsg::PLATFORM_LIBC_NOT_LINUX)]
+    LibcNotLinux(String),
+    /// A libc selector's range is not a vers `generic` range.
+    #[error("{kind}: {range:?}: {detail}", kind = errmsg::PLATFORM_INVALID_LIBC_RANGE)]
+    InvalidLibcRange {
+        /// The range as written.
+        range: String,
+        /// Why it was refused.
+        detail: String,
+    },
+    /// Not one of the known C library families.
+    #[error("{kind}: {0}", kind = errmsg::PLATFORM_UNKNOWN_LIBC)]
+    UnknownLibc(String),
 }
 
 impl fmt::Display for Os {
@@ -189,17 +237,26 @@ impl Selector {
     pub fn os(&self) -> Option<Os> {
         match self {
             Selector::Any => None,
-            Selector::Os(os) | Selector::OsDistro(os, _) | Selector::OsDistroRelease(os, ..) => {
-                Some(*os)
-            }
+            Selector::Os(os)
+            | Selector::OsDistro(os, _)
+            | Selector::OsDistroRelease(os, ..)
+            | Selector::OsLibc(os, ..) => Some(*os),
         }
     }
 
     /// The distro, when the selector names one.
     pub fn distro(&self) -> Option<&str> {
         match self {
-            Selector::Any | Selector::Os(_) => None,
+            Selector::Any | Selector::Os(_) | Selector::OsLibc(..) => None,
             Selector::OsDistro(_, d) | Selector::OsDistroRelease(_, d, _) => Some(d),
+        }
+    }
+
+    /// The libc family and range, when the selector names a libc.
+    pub fn libc(&self) -> Option<(LibcFamily, Option<&LibcRange>)> {
+        match self {
+            Selector::OsLibc(_, family, range) => Some((*family, range.as_ref())),
+            _ => None,
         }
     }
 
@@ -221,6 +278,8 @@ impl fmt::Display for Selector {
             Selector::OsDistroRelease(os, distro, release) => {
                 write!(f, "{os}:{distro}@{release}")
             }
+            Selector::OsLibc(os, family, None) => write!(f, "{os}:{family}"),
+            Selector::OsLibc(os, family, Some(range)) => write!(f, "{os}:{family}@{range}"),
         }
     }
 }
@@ -234,6 +293,10 @@ impl FromStr for Selector {
             None => Ok(Selector::Os(s.parse()?)),
             Some(("any", _) | (_, "")) => Err(invalid()),
             Some((os, rest)) => match rest.split_once('@') {
+                Some((name, range)) if name.parse::<LibcFamily>().is_ok() => {
+                    libc_selector(s, os, name, Some(range))
+                }
+                None if rest.parse::<LibcFamily>().is_ok() => libc_selector(s, os, rest, None),
                 None => Ok(Selector::OsDistro(os.parse()?, rest.to_string())),
                 Some(("", _) | (_, "")) => Err(invalid()),
                 Some((_, release)) if release.contains('@') => Err(invalid()),
@@ -245,6 +308,99 @@ impl FromStr for Selector {
             },
         }
     }
+}
+
+impl fmt::Display for LibcFamily {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            LibcFamily::Gnu => "gnu",
+            LibcFamily::Musl => "musl",
+        })
+    }
+}
+
+impl FromStr for LibcFamily {
+    type Err = PlatformError;
+    fn from_str(s: &str) -> Result<LibcFamily, PlatformError> {
+        match s {
+            "gnu" => Ok(LibcFamily::Gnu),
+            "musl" => Ok(LibcFamily::Musl),
+            _ => Err(PlatformError::UnknownLibc(s.to_string())),
+        }
+    }
+}
+
+impl LibcRange {
+    /// Parse a selector's range: vers `generic` constraints, with or without
+    /// the `vers:generic/` prefix (`>=2.31`, `>=2.31|<3`).
+    pub fn parse(s: &str) -> Result<LibcRange, PlatformError> {
+        let invalid = |detail: String| PlatformError::InvalidLibcRange {
+            range: s.to_string(),
+            detail,
+        };
+        let spec = Spec::new(s, "generic").map_err(|e| invalid(e.to_string()))?;
+        match spec.range().ty() {
+            "generic" => Ok(LibcRange(s.to_string())),
+            other => Err(invalid(format!("vers:{other}"))),
+        }
+    }
+
+    /// The range as written.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Whether `version` lies in this range, by bosun's generic ordering. A
+    /// version that does not parse is in no range.
+    pub fn contains(&self, version: &str) -> bool {
+        let Ok(spec) = Spec::new(self.0.as_str(), "generic") else {
+            return false;
+        };
+        Version::parse(version, Scheme::Generic).is_ok_and(|v| spec.range().contains(&v))
+    }
+}
+
+impl fmt::Display for LibcRange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl Libc {
+    /// Whether this libc is `family`, with a version in `range` when one is
+    /// given. An unknown version satisfies no range.
+    pub fn satisfies(&self, family: LibcFamily, range: Option<&LibcRange>) -> bool {
+        self.family == family
+            && range.is_none_or(|r| self.version.as_deref().is_some_and(|v| r.contains(v)))
+    }
+}
+
+impl fmt::Display for Libc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.version {
+            Some(v) => write!(f, "{} {v}", self.family),
+            None => write!(f, "{}", self.family),
+        }
+    }
+}
+
+/// A libc selector `os:name[@range]`, `name` a known family: Linux only, and
+/// the range a vers `generic` range.
+fn libc_selector(
+    s: &str,
+    os: &str,
+    name: &str,
+    range: Option<&str>,
+) -> Result<Selector, PlatformError> {
+    let os: Os = os.parse()?;
+    if os != Os::Linux {
+        return Err(PlatformError::LibcNotLinux(s.to_string()));
+    }
+    Ok(Selector::OsLibc(
+        os,
+        name.parse()?,
+        range.map(LibcRange::parse).transpose()?,
+    ))
 }
 
 /// Distro facts read from `/etc/os-release` (§5.4). The `Machine` interface
@@ -503,6 +659,147 @@ mod tests {
         for t in ["github", "cargo", "npm", "generic"] {
             assert_eq!(bookworm.release(t), None, "{t}");
         }
+    }
+
+    // --- libc ----------------------------------------------------------------
+
+    fn range(s: &str) -> LibcRange {
+        LibcRange::parse(s).unwrap()
+    }
+
+    #[test]
+    fn libc_family_roundtrips_the_rust_triple_spelling() {
+        for (family, s) in [(LibcFamily::Gnu, "gnu"), (LibcFamily::Musl, "musl")] {
+            assert_eq!(family.to_string(), s);
+            assert_eq!(s.parse::<LibcFamily>().unwrap(), family);
+        }
+        for s in ["glibc", "GNU", "", "uclibc"] {
+            assert!(
+                matches!(s.parse::<LibcFamily>(), Err(PlatformError::UnknownLibc(x)) if x == s),
+                "{s}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_libc_name_is_a_libc_selector_not_a_distro() {
+        let gnu = "linux:gnu".parse::<Selector>().unwrap();
+        assert_eq!(gnu, Selector::OsLibc(Os::Linux, LibcFamily::Gnu, None));
+        assert_eq!(gnu.libc(), Some((LibcFamily::Gnu, None)));
+        assert_eq!(gnu.distro(), None);
+        assert_eq!(gnu.release(), None);
+        assert_eq!(gnu.os(), Some(Os::Linux));
+        assert_eq!(gnu.to_string(), "linux:gnu");
+        assert_eq!(
+            "linux:musl".parse::<Selector>().unwrap(),
+            Selector::OsLibc(Os::Linux, LibcFamily::Musl, None)
+        );
+    }
+
+    #[test]
+    fn a_libc_selector_takes_a_range_after_the_at() {
+        let floor = "linux:gnu@>=2.31".parse::<Selector>().unwrap();
+        assert_eq!(
+            floor,
+            Selector::OsLibc(Os::Linux, LibcFamily::Gnu, Some(range(">=2.31")))
+        );
+        assert_eq!(floor.to_string(), "linux:gnu@>=2.31");
+        let (family, r) = floor.libc().unwrap();
+        assert_eq!(family, LibcFamily::Gnu);
+        assert_eq!(r.unwrap().as_str(), ">=2.31");
+        assert_eq!(floor.release(), None);
+        // A full vers string, and a bare version (one version), are ranges too.
+        assert!("linux:gnu@vers:generic/>=2.31|<3"
+            .parse::<Selector>()
+            .is_ok());
+        assert!("linux:musl@1.2.5".parse::<Selector>().is_ok());
+        // Other selectors have no libc.
+        for s in ["any", "linux", "linux:debian", "linux:debian@bookworm"] {
+            assert_eq!(s.parse::<Selector>().unwrap().libc(), None, "{s}");
+        }
+    }
+
+    #[test]
+    fn a_distro_at_a_release_is_still_a_release() {
+        assert_eq!(
+            "linux:debian@bookworm".parse::<Selector>().unwrap(),
+            Selector::OsDistroRelease(Os::Linux, "debian".into(), "bookworm".into())
+        );
+    }
+
+    #[test]
+    fn a_libc_range_must_be_a_generic_vers_range() {
+        for s in [
+            "linux:gnu@",
+            "linux:gnu@>=two|<",
+            "linux:gnu@vers:semver/>=2.31.0",
+            "linux:gnu@>=2.31 ",
+            "linux:musl@<2|>=1",
+        ] {
+            assert!(
+                matches!(
+                    s.parse::<Selector>(),
+                    Err(PlatformError::InvalidLibcRange { .. })
+                ),
+                "{s} should be an invalid range: {:?}",
+                s.parse::<Selector>()
+            );
+        }
+    }
+
+    #[test]
+    fn libc_selectors_are_linux_only() {
+        for s in ["windows:gnu", "darwin:musl", "windows:gnu@>=2.31"] {
+            assert!(
+                matches!(s.parse::<Selector>(), Err(PlatformError::LibcNotLinux(x)) if x == s),
+                "{s}"
+            );
+        }
+        assert!(matches!(
+            "plan9:gnu".parse::<Selector>(),
+            Err(PlatformError::UnknownOs(_))
+        ));
+    }
+
+    #[test]
+    fn a_libc_range_compares_by_generic_ordering() {
+        let floor = range(">=2.31");
+        assert!(floor.contains("2.31"));
+        assert!(floor.contains("2.36"));
+        assert!(floor.contains("2.100"));
+        assert!(!floor.contains("2.30"));
+        assert!(!floor.contains("2.4"));
+        let band = range("vers:generic/>=1.2|<1.3");
+        assert!(band.contains("1.2.5"));
+        assert!(!band.contains("1.3"));
+        assert!(!floor.contains(""));
+    }
+
+    fn glibc(v: Option<&str>) -> Libc {
+        Libc {
+            family: LibcFamily::Gnu,
+            version: v.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn libc_satisfies_its_family_and_a_range_its_version_is_in() {
+        let g236 = glibc(Some("2.36"));
+        assert!(g236.satisfies(LibcFamily::Gnu, None));
+        assert!(!g236.satisfies(LibcFamily::Musl, None));
+        assert!(g236.satisfies(LibcFamily::Gnu, Some(&range(">=2.31"))));
+        assert!(!g236.satisfies(LibcFamily::Gnu, Some(&range(">=2.39"))));
+        assert!(!g236.satisfies(LibcFamily::Musl, Some(&range(">=1"))));
+        // An unknown version satisfies the bare family, never a range.
+        let unknown = glibc(None);
+        assert!(unknown.satisfies(LibcFamily::Gnu, None));
+        assert!(!unknown.satisfies(LibcFamily::Gnu, Some(&range(">=0"))));
+    }
+
+    #[test]
+    fn libc_displays_family_then_version() {
+        assert_eq!(glibc(Some("2.36")).to_string(), "gnu 2.36");
+        assert_eq!(glibc(None).to_string(), "gnu");
     }
 
     #[test]

@@ -611,9 +611,9 @@ packages:
 
 Rules (draft syntax):
 
-- **Selectors:** `install` keys are `any`, `<os>`, `<os>:<distro>` or
-  `<os>:<distro>@<release>`, and (decided, not built yet) the libc selectors
-  `<os>:<libc>[@<range>]` (below); the most specific match for the current machine wins
+- **Selectors:** `install` keys are `any`, `<os>`, `<os>:<distro>`,
+  `<os>:<distro>@<release>`, or the libc selectors `linux:<libc>[@<range>]` (below);
+  the most specific match for the current machine wins
   (`<distro>@<release>` > exact distro `ID` > `ID_LIKE` match > libc > plain `<os>` > `any`), then
   `defaults.install`. A bare block under `install` (its keys are block keys, not selectors) is
   `any`; mixing the two is an error. No match = the entry doesn't apply on this platform
@@ -709,7 +709,7 @@ token each distro gets (below):
   which distro the base image is, so `render` takes it in selector form (`--distro
   ubuntu@noble`), or reads the image's own os-release (§8.2).
 
-#### libc (DECIDED, not built yet)
+#### libc (DECIDED, built)
 
 On Linux the C library is a machine fact beside OS, arch and distro. A dynamically linked
 release binary depends on libc, not on the distro: a glibc build doesn't run on Alpine (musl),
@@ -717,29 +717,47 @@ and one linked against a newer glibc fails on an older one. Neither purl nor the
 carries libc, so bosun reuses existing vocabularies rather than inventing one:
 
 - **Family:** `gnu` | `musl`, the environment field of a Rust target triple. Selectors
-  `linux:gnu` and `linux:musl`; github-release's `{{ libc }}` and `{{ rust_target }}` asset
-  template variables ([asset-templates.md](../asset-templates.md)), which are refused until
-  detection exists.
+  `linux:gnu` and `linux:musl`; github-release's (and github-deb's and github-rpm's)
+  `{{ libc }}` and `{{ rust_target }}` (`{{ arch_uname }}-unknown-linux-{{ libc }}`) asset
+  template variables ([asset-templates.md](../asset-templates.md)).
 - **Version:** a glibc floor in the manylinux sense (PEP 600: `manylinux_2_31` runs on glibc
-  2.31 and later) is a vers range on the selector: `linux:gnu@>=2.31`.
-- **Detection:** the family from the `PT_INTERP` of `/bin/sh` (`ld-musl-*` is musl,
-  `ld-linux-*` glibc); the version by running that loader through the `CommandRunner` port
-  (glibc's prints it for `--version`; musl's prints its banner, version included, to stderr
-  and exits 1). Never from bosun's own libc (`gnu_get_libc_version`): bosun ships as a static
-  musl binary, so its own libc says nothing about the machine. Checked in containers: glibc
-  2.36 (Debian 12), 2.41 (Debian 13), 2.35 (Ubuntu 22.04), 2.39 (Ubuntu 24.04); musl 1.2.5
-  (Alpine 3.20).
-- No `/bin/sh`, or a statically linked one: libc unknown. libc selectors don't match, and a
-  template that uses `{{ libc }}` is an error, as now.
-
-- **Rank (DECIDED):** libc is its own rank, between `ID_LIKE` and plain `<os>`: a distro
-  selector names a package source, libc only a binary's ABI, so any matching distro key wins
-  and a distro with no key of its own (Alpine with no `linux:alpine`) falls through to
-  `linux:musl`. A ranged `linux:gnu@>=2.31` outranks a bare `linux:gnu`. libc and distro are
-  not combined in one key.
-- **Version scheme (DECIDED):** the range is a vers `generic` range (`vers:generic/>=2.31`),
-  compared with bosun's generic chunk ordering (§5.6); glibc and musl versions are plain
-  dotted numbers.
+  2.31 and later) is a vers range on the selector: `linux:gnu@>=2.31`. Any vers `generic`
+  range is accepted, with or without the prefix (`linux:gnu@vers:generic/>=2.31|<3`); a range
+  of another vers type, or one vers refuses (unsorted, whitespace), is a manifest error that
+  says why.
+- **The names are reserved.** After `linux:`, `gnu` and `musl` are always a libc, so `@`
+  after them is a range, never a release: `linux:gnu@>=2.31` is a libc range,
+  `linux:debian@bookworm` a release. No distro in use has `ID=gnu` or `ID=musl`; one that did
+  could only be selected by its `ID_LIKE` family or plain `linux`.
+- **Linux only:** `windows:gnu` or `darwin:musl` is a manifest error, not a selector that
+  never matches.
+- **Detection** (`bosun_host::libc`): the family from the `PT_INTERP` of `/bin/sh`
+  (`ld-musl-*` is musl, `ld-linux-*` glibc), read by a small ELF reader (32- and 64-bit,
+  either byte order; no ELF crate); the version by running that loader through the
+  `CommandRunner` port with `--version` (glibc's prints `… stable release version 2.36.` on
+  stdout; musl's prints its banner, `Version 1.2.5` included, to stderr and exits 1, which is
+  read anyway). Never from bosun's own libc (`gnu_get_libc_version`): bosun ships as a static
+  musl binary, so its own libc says nothing about the machine; a static musl bosun reports
+  `gnu 2.36` on Debian 12. The unit tests use the real `/bin/sh` headers and loader output of
+  Debian 12 and 13, Ubuntu 22.04 and 24.04 (glibc 2.36, 2.41, 2.35, 2.39) and Alpine 3.20
+  (musl 1.2.5), captured in containers.
+- **Missing facts are not errors.** No `/bin/sh`, a statically linked one, or a loader that
+  is neither (bionic's `linker64`): libc unknown, so libc selectors don't match and a
+  template that uses `{{ libc }}` or `{{ rust_target }}` is an error saying the libc is
+  unknown. A loader that won't run or prints no version: the family is known, the version
+  isn't, so a bare `linux:gnu` matches and a ranged one doesn't.
+- **Shown** by `bosun backends` and `bosun status <manifest>`: a `libc: gnu 2.36` line (or
+  `libc: unknown`) on Linux, and a `libc` member (`{family, version}` or `null`) in JSON.
+- **Rank (DECIDED, built):** libc is its own rank, between `ID_LIKE` and plain `<os>`: a
+  distro selector names a package source, libc only a binary's ABI, so any matching distro
+  key wins and a distro with no key of its own (Alpine with no `linux:alpine`) falls through
+  to `linux:musl`. A ranged `linux:gnu@>=2.31` outranks a bare `linux:gnu`. libc and distro
+  are not combined in one key.
+- **Version scheme (DECIDED, built):** the range is a vers `generic` range
+  (`vers:generic/>=2.31`), compared with bosun's generic chunk ordering (§5.6); glibc and musl
+  versions are plain dotted numbers.
+- **Test seam:** the acceptance fixture takes `"libc": {"family": "musl", "version": "1.2.5"}`
+  ("the machine's C library is musl 1.2.5"); without it the libc is unknown.
 
 ### 5.5 Machine interface and privilege
 

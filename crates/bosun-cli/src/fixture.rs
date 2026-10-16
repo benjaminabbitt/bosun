@@ -46,6 +46,9 @@ pub struct Fixture {
     /// Distro facts, when any.
     #[serde(default)]
     pub distro: Option<FixtureDistro>,
+    /// The C library, when known.
+    #[serde(default)]
+    pub libc: Option<FixtureLibc>,
     /// `elevated` or `unelevated` (default); drives the privilege check.
     #[serde(default)]
     pub privilege: Option<String>,
@@ -85,6 +88,16 @@ pub struct FixtureDistro {
     /// The `VERSION_ID`.
     #[serde(default)]
     pub version_id: Option<String>,
+}
+
+/// Fixture C library facts (§5.4).
+#[derive(Deserialize)]
+pub struct FixtureLibc {
+    /// The family: `gnu` or `musl`.
+    pub family: String,
+    /// The version the loader reports.
+    #[serde(default)]
+    pub version: Option<String>,
 }
 
 /// One fixture backend, with the metadata the resolver needs and the versions

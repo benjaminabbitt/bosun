@@ -4,12 +4,12 @@
 
 use std::path::PathBuf;
 
-use bosun_core::{Arch, Distro, Os, Scope};
+use bosun_core::{Arch, Distro, Libc, Os, Scope};
 use bosun_ports::{Command, CommandRunner, Elevation, Machine, Privilege, User};
 
 use crate::error::HostError;
 #[cfg(unix)]
-use crate::os_release;
+use crate::{libc, os_release};
 
 /// Map the running target's architecture name to an [`Arch`] (§5.5).
 pub fn detect_arch() -> Result<Arch, HostError> {
@@ -30,6 +30,7 @@ fn arch_from_str(s: &str) -> Result<Arch, HostError> {
 pub struct LinuxMachine {
     arch: Arch,
     distro: Option<Distro>,
+    libc: Option<Libc>,
     system_state: PathBuf,
     user_state: PathBuf,
 }
@@ -41,22 +42,30 @@ impl LinuxMachine {
     pub fn new(
         arch: Arch,
         distro: Option<Distro>,
+        libc: Option<Libc>,
         system_state: PathBuf,
         user_state: PathBuf,
     ) -> LinuxMachine {
         LinuxMachine {
             arch,
             distro,
+            libc,
             system_state,
             user_state,
         }
     }
 
-    /// Detect architecture and distro; take the per-scope state paths.
-    pub fn detect(system_state: PathBuf, user_state: PathBuf) -> Result<LinuxMachine, HostError> {
+    /// Detect architecture, distro and libc (running the loader through
+    /// `runner`); take the per-scope state paths.
+    pub fn detect(
+        runner: &dyn CommandRunner,
+        system_state: PathBuf,
+        user_state: PathBuf,
+    ) -> Result<LinuxMachine, HostError> {
         Ok(LinuxMachine::new(
             detect_arch()?,
             os_release::detect(),
+            libc::detect(runner),
             system_state,
             user_state,
         ))
@@ -75,6 +84,10 @@ impl Machine for LinuxMachine {
 
     fn distro(&self) -> Option<&Distro> {
         self.distro.as_ref()
+    }
+
+    fn libc(&self) -> Option<&Libc> {
+        self.libc.as_ref()
     }
 
     fn privilege(&self) -> Privilege {
@@ -183,6 +196,10 @@ impl Machine for WindowsMachine {
         None
     }
 
+    fn libc(&self) -> Option<&Libc> {
+        None
+    }
+
     fn privilege(&self) -> Privilege {
         self.privilege
     }
@@ -212,6 +229,8 @@ pub struct FakeMachine {
     pub arch: Arch,
     /// Reported distro facts.
     pub distro: Option<Distro>,
+    /// Reported C library.
+    pub libc: Option<Libc>,
     /// Reported privilege.
     pub privilege: Privilege,
     /// Reported invoking user.
@@ -230,6 +249,7 @@ impl Default for FakeMachine {
             os: Os::Linux,
             arch: Arch::Amd64,
             distro: None,
+            libc: None,
             privilege: Privilege::Unelevated,
             invoking_user: User {
                 name: "tester".to_string(),
@@ -251,6 +271,9 @@ impl Machine for FakeMachine {
     }
     fn distro(&self) -> Option<&Distro> {
         self.distro.as_ref()
+    }
+    fn libc(&self) -> Option<&Libc> {
+        self.libc.as_ref()
     }
     fn privilege(&self) -> Privilege {
         self.privilege
@@ -299,6 +322,7 @@ mod tests {
         assert_eq!(m.arch(), Arch::Amd64);
         assert_eq!(m.privilege(), Privilege::Elevated);
         assert_eq!(m.distro().unwrap().id, "debian");
+        assert!(m.libc().is_none());
         assert_eq!(m.elevation(), Elevation::Sudo);
     }
 
@@ -313,12 +337,17 @@ mod tests {
                 version_id: Some("24.04".into()),
                 version_codename: Some("noble".into()),
             }),
+            Some(Libc {
+                family: bosun_core::LibcFamily::Gnu,
+                version: Some("2.39".into()),
+            }),
             PathBuf::from("/var/lib/bosun/state.json"),
             PathBuf::from("/home/x/.local/state/bosun/state.json"),
         );
         assert_eq!(m.os(), Os::Linux);
         assert_eq!(m.arch(), Arch::Arm64);
         assert_eq!(m.distro().unwrap().id, "ubuntu");
+        assert_eq!(m.libc().unwrap().to_string(), "gnu 2.39");
         assert_eq!(m.elevation(), Elevation::Sudo);
         assert_eq!(
             m.state_path(Scope::System),
@@ -333,8 +362,15 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn linux_machine_without_distro_reports_none() {
-        let m = LinuxMachine::new(Arch::Amd64, None, PathBuf::from("/s"), PathBuf::from("/u"));
+        let m = LinuxMachine::new(
+            Arch::Amd64,
+            None,
+            None,
+            PathBuf::from("/s"),
+            PathBuf::from("/u"),
+        );
         assert!(m.distro().is_none());
+        assert!(m.libc().is_none());
     }
 
     #[test]
@@ -420,6 +456,7 @@ Mandatory Label\\Medium Mandatory Level Label            S-1-16-8192
         assert_eq!(m.os(), Os::Windows);
         assert_eq!(m.arch(), Arch::Amd64);
         assert!(m.distro().is_none());
+        assert!(m.libc().is_none());
         assert_eq!(m.privilege(), Privilege::Elevated);
         assert_eq!(m.invoking_user().name, "ben");
         assert_eq!(m.elevation(), Elevation::AdministratorTerminal);

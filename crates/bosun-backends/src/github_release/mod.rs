@@ -23,8 +23,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bosun_core::{
-    Arch, BackendId, Capabilities, Checksum, Installed, Os, Ref, Scheme, Scope, Source, Target,
-    Version,
+    Arch, BackendId, Capabilities, Checksum, Installed, LibcFamily, Os, Ref, Scheme, Scope, Source,
+    Target, Version,
 };
 use bosun_ports::{
     ArchiveFormat, Backend, BackendFactory, HostInfo, HttpFetcher, HttpRequest, HttpResponse,
@@ -47,6 +47,7 @@ pub struct GithubReleaseFactory {
     bin_dir: PathBuf,
     os: Os,
     arch: Arch,
+    libc: Option<LibcFamily>,
 }
 
 impl GithubReleaseFactory {
@@ -63,7 +64,15 @@ impl GithubReleaseFactory {
             bin_dir,
             os,
             arch,
+            libc: None,
         }
+    }
+
+    /// The host's C library family, for the `libc` and `rust_target` asset
+    /// template variables (§5.4); without it they are an error.
+    pub fn with_libc(mut self, libc: Option<LibcFamily>) -> GithubReleaseFactory {
+        self.libc = libc;
+        self
     }
 }
 
@@ -100,6 +109,7 @@ impl BackendFactory for GithubReleaseFactory {
             bin_dir: self.bin_dir.clone(),
             os: self.os,
             arch: self.arch,
+            libc: self.libc,
             token: std::env::var("GITHUB_TOKEN").ok(),
         };
         Backend {
@@ -137,6 +147,7 @@ struct GithubReleaseBackend {
     bin_dir: PathBuf,
     os: Os,
     arch: Arch,
+    libc: Option<LibcFamily>,
     token: Option<String>,
 }
 
@@ -171,8 +182,16 @@ impl ReleaseLookup {
             bin_dir: PathBuf::new(),
             os,
             arch,
+            libc: None,
             token: std::env::var("GITHUB_TOKEN").ok(),
         })
+    }
+
+    /// The host's C library family, for the `libc` and `rust_target` asset
+    /// template variables (§5.4).
+    pub(crate) fn with_libc(mut self, libc: Option<LibcFamily>) -> ReleaseLookup {
+        self.0.libc = libc;
+        self
     }
 
     /// The versions `pkg`'s releases carry, by its tag pattern.
@@ -348,6 +367,7 @@ impl GithubReleaseBackend {
                 tag,
                 os: self.os,
                 arch: self.arch,
+                libc: self.libc,
             },
         )
     }
@@ -662,6 +682,7 @@ mod tests {
             bin_dir,
             os: Os::Linux,
             arch: Arch::Amd64,
+            libc: None,
             token: None,
         }
     }
@@ -890,7 +911,7 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(err, PortError::Backend { detail }
-            if detail.contains(crate::errmsg::ASSET_NOT_YET)));
+            if detail.contains(crate::errmsg::ASSET_LIBC_UNKNOWN)));
     }
 
     fn with_qualifiers(base: &str, pairs: &[(&str, &str)]) -> Ref {
@@ -1392,6 +1413,45 @@ mod tests {
         };
         let probe = factory.probe(&host).unwrap().unwrap();
         assert_eq!(probe.backend.as_str(), "github-release");
+    }
+
+    #[test]
+    fn the_factorys_libc_reaches_the_asset_template() {
+        let tag_url = "https://api.github.com/repos/o/r/releases/tags/v1.0.0";
+        let release = r#"{"tag_name":"v1.0.0","assets":[]}"#;
+        let detail = |libc: Option<LibcFamily>| {
+            let factory = GithubReleaseFactory::new(
+                Arc::new(FakeHttpFetcher::new().with_body(tag_url, release)),
+                PathBuf::from("/b"),
+                Os::Linux,
+                Arch::Amd64,
+            )
+            .with_libc(libc);
+            let runner = bosun_ports::testing::FakeCommandRunner::new();
+            let host = HostInfo {
+                os: Os::Linux,
+                arch: Arch::Amd64,
+                distro: None,
+                runner: &runner,
+            };
+            let backend = factory.build(factory.probe(&host).unwrap().unwrap());
+            match backend.index.checksum(
+                &with_asset("pkg:github/o/r", "{{ rust_target }}.tar.gz"),
+                &sem("1.0.0"),
+                &"linux/amd64".parse().unwrap(),
+            ) {
+                Err(PortError::Backend { detail }) => detail,
+                other => panic!("want an asset error, got {other:?}"),
+            }
+        };
+        // Rendered, then not found among the release's (no) assets.
+        let musl = detail(Some(LibcFamily::Musl));
+        assert!(musl.contains("x86_64-unknown-linux-musl.tar.gz"), "{musl}");
+        let unknown = detail(None);
+        assert!(
+            unknown.contains(crate::errmsg::ASSET_LIBC_UNKNOWN),
+            "{unknown}"
+        );
     }
 
     #[test]

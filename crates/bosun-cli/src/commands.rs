@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use bosun_core::record::{LockDocument, LockLeaf, LockPackage, Package, StateDocument, StateLeaf};
-use bosun_core::{BackendId, Manifest, Scope, Spec};
+use bosun_core::{BackendId, Libc, Manifest, Os, Scope, Spec};
 use bosun_io::{check_options, load_manifest, lock, manifest_hash};
 use bosun_ports::{Installer, StateStore};
 use bosun_resolve::{resolve, resolve_with_lock, NotApplicable, Outcome, Resolution};
@@ -127,6 +127,39 @@ pub(crate) fn load(env: &Env, file: &Path) -> Result<Manifest, CliError> {
     Ok(manifest)
 }
 
+// --- the machine's C library ---------------------------------------------------
+
+/// The machine's C library (§5.4), as `backends` and `status` show it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+struct LibcInfo {
+    family: String,
+    version: Option<String>,
+}
+
+/// The C library facts for output: `None` when unknown.
+fn libc_info(libc: Option<&Libc>) -> Option<LibcInfo> {
+    libc.map(|l| LibcInfo {
+        family: l.family.to_string(),
+        version: l.version.clone(),
+    })
+}
+
+/// The text line naming the C library, on Linux (`libc: gnu 2.36`, or
+/// `libc: unknown`); elsewhere there is none.
+fn libc_line(os: Os, libc: Option<&LibcInfo>) -> Option<String> {
+    (os == Os::Linux).then(|| match libc {
+        Some(LibcInfo {
+            family,
+            version: Some(v),
+        }) => format!("libc: {family} {v}"),
+        Some(LibcInfo {
+            family,
+            version: None,
+        }) => format!("libc: {family}"),
+        None => "libc: unknown".to_string(),
+    })
+}
+
 // --- backends --------------------------------------------------------------
 
 /// The `backends` output (§5.3).
@@ -134,6 +167,10 @@ pub(crate) fn load(env: &Env, file: &Path) -> Result<Manifest, CliError> {
 pub struct BackendsOutput {
     registered: Vec<BackendInfo>,
     skipped: Vec<SkippedInfo>,
+    /// The machine's C library, which libc selectors match (§5.4).
+    libc: Option<LibcInfo>,
+    #[serde(skip)]
+    os: Os,
 }
 
 #[derive(Serialize)]
@@ -167,6 +204,8 @@ pub fn backends(env: &Env) -> BackendsOutput {
                 reason: s.reason.clone(),
             })
             .collect(),
+        libc: libc_info(env.machine().libc()),
+        os: env.machine().os(),
     }
 }
 
@@ -180,10 +219,10 @@ impl Render for BackendsOutput {
             lines.push(format!("{:<16} skipped: {}", s.id, s.reason));
         }
         if lines.is_empty() {
-            "no backends registered".to_string()
-        } else {
-            lines.join("\n")
+            lines.push("no backends registered".to_string());
         }
+        lines.extend(libc_line(self.os, self.libc.as_ref()));
+        lines.join("\n")
     }
 }
 
@@ -194,6 +233,10 @@ impl Render for BackendsOutput {
 pub struct StatusOutput {
     packages: Vec<PackageStatus>,
     diagnostics: Vec<String>,
+    /// The C library the manifest's libc selectors were matched against.
+    libc: Option<LibcInfo>,
+    #[serde(skip)]
+    os: Os,
 }
 
 #[derive(Serialize)]
@@ -317,6 +360,8 @@ pub fn status(env: &Env, path: PathBuf, pref: &[BackendId]) -> Result<StatusOutp
     Ok(StatusOutput {
         packages,
         diagnostics,
+        libc: libc_info(env.machine().libc()),
+        os: env.machine().os(),
     })
 }
 
@@ -371,10 +416,10 @@ impl Render for StatusOutput {
             lines.push(d.clone());
         }
         if lines.is_empty() {
-            "no packages".to_string()
-        } else {
-            lines.join("\n")
+            lines.push("no packages".to_string());
         }
+        lines.extend(libc_line(self.os, self.libc.as_ref()));
+        lines.join("\n")
     }
 }
 
@@ -1333,6 +1378,30 @@ mod tests {
 
     fn ids(order: &[BackendId]) -> Vec<&str> {
         order.iter().map(BackendId::as_str).collect()
+    }
+
+    #[test]
+    fn the_libc_line_is_linux_only_and_says_what_is_known() {
+        let glibc = Libc {
+            family: bosun_core::LibcFamily::Gnu,
+            version: Some("2.36".into()),
+        };
+        let known = libc_info(Some(&glibc));
+        assert_eq!(
+            libc_line(Os::Linux, known.as_ref()).as_deref(),
+            Some("libc: gnu 2.36")
+        );
+        let versionless = libc_info(Some(&Libc {
+            version: None,
+            ..glibc
+        }));
+        assert_eq!(
+            libc_line(Os::Linux, versionless.as_ref()).as_deref(),
+            Some("libc: gnu")
+        );
+        assert_eq!(libc_line(Os::Linux, None).as_deref(), Some("libc: unknown"));
+        assert_eq!(libc_line(Os::Windows, None), None);
+        assert_eq!(libc_line(Os::Macos, known.as_ref()), None);
     }
 
     fn strings(v: &[&str]) -> Vec<String> {

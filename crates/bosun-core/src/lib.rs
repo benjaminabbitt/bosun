@@ -17,7 +17,9 @@ pub use model::{
     BackendId, Capabilities, Checksum, Claim, HoldSupport, Installed, Origin, Ref, Scope, Source,
     SourceId,
 };
-pub use platform::{Arch, Distro, Os, PlatformError, Selector, Target};
+pub use platform::{
+    Arch, Distro, Libc, LibcFamily, LibcRange, Os, PlatformError, Selector, Target,
+};
 pub use purl::{Purl, PurlError};
 pub use record::{
     LockDocument, LockLeaf, LockPackage, Package, Placement, StateDocument, StateLeaf, StatePackage,

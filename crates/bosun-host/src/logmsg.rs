@@ -13,3 +13,10 @@ pub const BACKEND_PROBE_PANIC: &str = "backend probe panicked; skipped";
 /// A command exited with a nonzero code its step says is success, and what
 /// that code says beyond it (msiexec 3010: reboot to finish).
 pub const OK_EXIT: &str = "command succeeded with a nonzero exit";
+
+/// The machine's C library was read from the loader `/bin/sh` asks for.
+pub const LIBC_DETECTED: &str = "libc detected";
+/// No libc could be read: no `/bin/sh`, a static one, or an unfamiliar loader.
+pub const LIBC_UNKNOWN: &str = "libc unknown; libc selectors will not match";
+/// The libc family is known but its loader reported no version.
+pub const LIBC_VERSION_UNKNOWN: &str = "libc version unknown; libc ranges will not match";
