@@ -393,7 +393,7 @@ fn from_host() -> Result<Env, CliError> {
 
     let runner: Arc<dyn CommandRunner> = Arc::new(ProcessCommandRunner);
     let fetcher: Arc<dyn HttpFetcher> = Arc::new(UreqHttpFetcher::new());
-    let bin_dir = home_dir().join(".local").join("bin");
+    let bin_dir = user_bin_dir(&home_dir());
     let factories = compiled_in_factories(runner.clone(), fetcher.clone(), bin_dir, os, arch);
     // §6: the version scheme for a backend comes from its factory metadata and
     // must be known for every compiled-in backend — not only those present this
@@ -445,6 +445,11 @@ fn from_host() -> Result<Env, CliError> {
         machine,
         exec: Exec::Host { runner, fetcher },
     })
+}
+
+/// Where bosun installs release binaries for a user whose home is `home`.
+fn user_bin_dir(home: &Path) -> PathBuf {
+    home.join(".local").join("bin")
 }
 
 /// The user's home: `%USERPROFILE%` on Windows, `$HOME` elsewhere.
@@ -500,10 +505,11 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
         canned = canned.with_body(url.clone(), body);
     }
     let fetcher: Arc<dyn HttpFetcher> = Arc::new(canned);
-    let bin_dir = fx
-        .bin_dir
+    let home = fx
+        .home
         .clone()
-        .unwrap_or_else(|| PathBuf::from(state_dir).join("bin"));
+        .unwrap_or_else(|| PathBuf::from(state_dir).join("home"));
+    let bin_dir = user_bin_dir(&home);
     let any_real = fx.backends.iter().any(|b| b.real);
     let packages: PackageDb = Arc::default();
     let cache_dir = PathBuf::from(state_dir).join("cache");
@@ -572,6 +578,7 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
     for b in &backends {
         option_keys.entry(b.id.as_str().to_string()).or_default();
     }
+    let skipped = absent_backends(&fx.absent, fetcher.clone(), &bin_dir, os, arch)?;
     let store = FileStateStore::new(system.clone(), user.clone(), schemes.clone());
     let lock_dir = bosun_io::paths::locks_beside(&user);
     let machine = FakeMachine {
@@ -593,7 +600,7 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
     Ok(Env {
         state: store,
         backends,
-        skipped: Vec::new(),
+        skipped,
         schemes,
         option_keys,
         lock_dir,
@@ -604,6 +611,58 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
             any_real.then(|| RealSteps { fetcher, packages }),
         ))),
     })
+}
+
+/// The compiled-in backends named `absent`, probed through the registry on a
+/// machine where no program exists — the skips a real host without them
+/// reports. One that registers anyway (it needs no program) is a fixture error.
+fn absent_backends(
+    absent: &[String],
+    fetcher: Arc<dyn HttpFetcher>,
+    bin_dir: &Path,
+    os: Os,
+    arch: Arch,
+) -> Result<Vec<Skipped>, CliError> {
+    let no_programs: Arc<dyn CommandRunner> =
+        Arc::new(bosun_ports::testing::FakeCommandRunner::new());
+    let factories: Vec<_> = compiled_in_factories(
+        no_programs.clone(),
+        fetcher,
+        bin_dir.to_path_buf(),
+        os,
+        arch,
+    )
+    .into_iter()
+    .filter(|f| absent.iter().any(|id| id == f.id().as_str()))
+    .collect();
+    if let Some(unknown) = absent
+        .iter()
+        .find(|id| !factories.iter().any(|f| f.id().as_str() == id.as_str()))
+    {
+        return Err(env_err(format!(
+            "fixture backend {unknown} cannot be absent; bosun has no such backend"
+        )));
+    }
+    let host = HostInfo {
+        os,
+        arch,
+        distro: None,
+        runner: no_programs.as_ref(),
+    };
+    let (registered, skipped) = build_registry(factories, &host).into_parts();
+    if let Some(present) = registered.first() {
+        return Err(env_err(format!(
+            "fixture backend {} cannot be absent; it needs no program",
+            present.id.as_str()
+        )));
+    }
+    Ok(skipped
+        .into_iter()
+        .map(|s| Skipped {
+            id: s.id.as_str().to_string(),
+            reason: reason_text(&s.reason),
+        })
+        .collect())
 }
 
 /// Where a fixture's real backends fetch from and install to.
@@ -768,6 +827,60 @@ mod tests {
             Some(&vec!["asset".to_string(), "tag".to_string()])
         );
         assert_eq!(env.option_keys().get("brew"), Some(&vec![]));
+    }
+
+    fn fixture_error(dir: &std::path::Path, json: &str) -> String {
+        let fx = dir.join("fixture.json");
+        std::fs::write(&fx, json).unwrap();
+        match from_fixture(fx.to_str().unwrap(), dir.join("state").to_str().unwrap()) {
+            Ok(_) => panic!("want a fixture error for {json}"),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    #[test]
+    fn an_absent_fixture_backend_is_skipped_as_not_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = fixture_env(
+            dir.path(),
+            r#"{"os":"linux","arch":"amd64","absent":["apt","cargo"],"backends":[]}"#,
+        );
+        let mut skipped: Vec<(&str, &str)> = env
+            .skipped
+            .iter()
+            .map(|s| (s.id.as_str(), s.reason.as_str()))
+            .collect();
+        skipped.sort();
+        assert_eq!(
+            skipped,
+            vec![("apt", "not present"), ("cargo", "not present")]
+        );
+    }
+
+    #[test]
+    fn a_fixture_backend_bosun_lacks_or_that_needs_no_program_cannot_be_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let unknown = fixture_error(
+            dir.path(),
+            r#"{"os":"linux","arch":"amd64","absent":["brew"],"backends":[]}"#,
+        );
+        assert!(unknown.contains("brew cannot be absent"), "{unknown}");
+        let builtin = fixture_error(
+            dir.path(),
+            r#"{"os":"linux","arch":"amd64","absent":["github-release"],"backends":[]}"#,
+        );
+        assert!(
+            builtin.contains("github-release cannot be absent"),
+            "{builtin}"
+        );
+    }
+
+    #[test]
+    fn release_binaries_go_to_the_users_local_bin() {
+        assert_eq!(
+            user_bin_dir(Path::new("/home/ben")),
+            Path::new("/home/ben").join(".local").join("bin")
+        );
     }
 
     #[test]

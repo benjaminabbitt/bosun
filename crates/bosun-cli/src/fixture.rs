@@ -5,8 +5,13 @@
 //!
 //! A backend marked `real` is bosun's own compiled-in backend (github-release,
 //! where bosun is the installer) run against canned HTTP responses (`http`:
-//! URL to a local file) and a scratch `bin_dir`, so its asset picking,
-//! checksum lookup and extraction run for real without the network.
+//! URL to a local file) and a scratch `home` (binaries go to its
+//! `.local/bin`, as on a real host), so its asset picking, checksum lookup
+//! and extraction run for real without the network.
+//!
+//! A compiled-in backend named in `absent` is probed for real on a machine
+//! where no program exists, so `bosun backends` reports it as a real host
+//! without that package manager would.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -57,9 +62,13 @@ pub struct Fixture {
     /// its 200 body. Any other URL fails.
     #[serde(default)]
     pub http: BTreeMap<String, PathBuf>,
-    /// Where `real` backends install binaries (github-release's bin dir).
+    /// The invoking user's home directory; `real` backends install binaries
+    /// into its `.local/bin`, as they do on a real host.
     #[serde(default)]
-    pub bin_dir: Option<PathBuf>,
+    pub home: Option<PathBuf>,
+    /// Compiled-in backends this machine lacks the program for.
+    #[serde(default)]
+    pub absent: Vec<String>,
 }
 
 /// Fixture distro facts (§5.4).

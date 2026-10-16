@@ -120,6 +120,8 @@ struct BosunWorld {
     dir: Option<TempDir>,
     machine: Option<Machine>,
     backends: Vec<Backend>,
+    /// Compiled-in backends whose program this machine lacks.
+    absent: Vec<String>,
     fail_step: Option<String>,
     /// GitHub releases by `(owner/repo, tag)`.
     releases: BTreeMap<(String, String), Release>,
@@ -186,8 +188,9 @@ impl BosunWorld {
                 "installed": b.installed,
                 "real": b.real,
             })).collect::<Vec<_>>(),
+            "absent": self.absent,
             "http": self.http(),
-            "bin_dir": self.bin_dir(),
+            "home": self.home(),
         });
         if let Some((id, codename)) = &m.distro {
             fx["distro"] = json!({"id": id, "codename": codename});
@@ -198,9 +201,14 @@ impl BosunWorld {
         fx
     }
 
-    /// The scratch bin dir bosun's own installer writes into.
+    /// The scratch home directory of the user bosun runs as.
+    fn home(&self) -> PathBuf {
+        self.dir.as_ref().expect("a temp dir").path().join("home")
+    }
+
+    /// Where bosun's own installer puts binaries: `~/.local/bin`.
     fn bin_dir(&self) -> PathBuf {
-        self.dir.as_ref().expect("a temp dir").path().join("bin")
+        self.home().join(".local").join("bin")
     }
 
     /// The canned HTTP for the published releases: each repo's release list,
@@ -332,6 +340,13 @@ fn backend_available(world: &mut BosunWorld, id: String, version: String) {
         installed: BTreeMap::new(),
         real: false,
     });
+}
+
+/// A compiled-in backend whose program is not on this machine: bosun probes
+/// for it and finds nothing.
+#[given(regex = r"^the machine has no (\S+)$")]
+fn backend_absent(world: &mut BosunWorld, id: String) {
+    world.absent.push(id);
 }
 
 // ---- GitHub releases --------------------------------------------------------
@@ -660,7 +675,34 @@ fn i_run_elsewhere(world: &mut BosunWorld, cmdline: String) {
     run_bosun(world, &cmdline, &empty);
 }
 
-fn run_bosun(world: &mut BosunWorld, cmdline: &str, cwd: &Path) {
+/// I run `bosun <cmdline>` from a terminal and type `answer` at its prompt.
+/// A terminal has one output stream, so stdout and stderr arrive interleaved,
+/// both as `stdout`.
+#[cfg(unix)]
+#[when(regex = r#"^I run `bosun (.+)` at a terminal and answer "(.*)"$"#)]
+fn run_at_terminal(world: &mut BosunWorld, cmdline: String, answer: String) {
+    use rexpect::process::WaitStatus;
+    let p = world.path();
+    let command = bosun_command(world, &cmdline, &p);
+    let mut session =
+        rexpect::session::spawn_command(command, Some(30_000)).expect("run bosun in a pty");
+    let prompt = "[y/N] ";
+    let asked = session
+        .exp_string(prompt)
+        .unwrap_or_else(|e| panic!("bosun asked nothing: {e}"));
+    session.send_line(&answer).expect("answer the prompt");
+    let rest = session.exp_eof().expect("bosun exits");
+    world.code = match session.process().wait().expect("wait for bosun") {
+        WaitStatus::Exited(_, code) => code,
+        other => panic!("bosun ended {other:?}"),
+    };
+    world.stdout = format!("{asked}{prompt}{rest}");
+    world.stderr = String::new();
+}
+
+/// The `bosun` invocation for `cmdline`, run from `cwd` against this
+/// scenario's fixture, state and config.
+fn bosun_command(world: &mut BosunWorld, cmdline: &str, cwd: &Path) -> Command {
     let p = world.path();
     fs::write(p.join("fixture.json"), world.fixture().to_string()).unwrap();
     let args: Vec<String> = words(cmdline)
@@ -668,14 +710,20 @@ fn run_bosun(world: &mut BosunWorld, cmdline: &str, cwd: &Path) {
         // a bare `.` means "this project directory".
         .map(|a| if a == "." { p.display().to_string() } else { a })
         .collect();
-    let output = Command::new(env!("CARGO_BIN_EXE_bosun"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_bosun"));
+    command
         .env("BOSUN_FIXTURE", p.join("fixture.json"))
         .env("BOSUN_STATE_DIR", p.join("state"))
         // the user config is this scenario's own, never the developer's.
         .env("XDG_CONFIG_HOME", p.join("config"))
         .env("APPDATA", p.join("config"))
         .current_dir(cwd)
-        .args(&args)
+        .args(&args);
+    command
+}
+
+fn run_bosun(world: &mut BosunWorld, cmdline: &str, cwd: &Path) {
+    let output = bosun_command(world, cmdline, cwd)
         .output()
         .expect("run bosun");
     world.code = output.status.code().unwrap_or(-1);
@@ -890,6 +938,103 @@ fn reports(world: &mut BosunWorld, needle: String) {
     assert!(all.contains(&needle), "output:\n{all}");
 }
 
+#[then(expr = "it does not report {string}")]
+fn does_not_report(world: &mut BosunWorld, needle: String) {
+    let all = format!("{}{}", world.stdout, world.stderr);
+    assert!(!all.contains(&needle), "output:\n{all}");
+}
+
+#[then(expr = "it asked {string}")]
+fn asked(world: &mut BosunWorld, question: String) {
+    assert!(
+        world.stdout.contains(&question),
+        "terminal:\n{}",
+        world.stdout
+    );
+}
+
+/// The words after `id` on its line of `bosun backends` text output.
+fn backends_line(world: &BosunWorld, id: &str) -> String {
+    world
+        .stdout
+        .lines()
+        .find_map(|line| {
+            let mut words = line.split_whitespace();
+            (words.next() == Some(id)).then(|| words.collect::<Vec<_>>().join(" "))
+        })
+        .unwrap_or_else(|| panic!("{id} is not listed:\n{}", world.stdout))
+}
+
+#[then(regex = r"^it lists (\S+) (\S+) as registered$")]
+fn lists_registered(world: &mut BosunWorld, id: String, version: String) {
+    assert_eq!(backends_line(world, &id), version, "{}", world.stdout);
+}
+
+#[then(regex = r"^it lists (\S+) as skipped: (.+)$")]
+fn lists_skipped(world: &mut BosunWorld, id: String, reason: String) {
+    assert_eq!(
+        backends_line(world, &id),
+        format!("skipped: {reason}"),
+        "{}",
+        world.stdout
+    );
+}
+
+/// Every step of every action in a `--format json` plan.
+fn plan_steps(world: &BosunWorld) -> Vec<Value> {
+    let doc: Value = serde_json::from_str(&world.stdout)
+        .unwrap_or_else(|e| panic!("{e}; stdout:\n{}", world.stdout));
+    doc["actions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|a| a["steps"].as_array().cloned().unwrap_or_default())
+        .collect()
+}
+
+#[then(regex = r"^the plan downloads (\S+) checked against the sha256 (\S+) lists for it$")]
+fn plan_downloads_checked(world: &mut BosunWorld, asset: String, sums: String) {
+    let listed = world
+        .releases
+        .values()
+        .flat_map(|r| &r.assets)
+        .filter(|(name, _)| *name == sums)
+        .flat_map(|(_, body)| {
+            String::from_utf8_lossy(body)
+                .lines()
+                .filter_map(|l| l.split_once("  "))
+                .filter(|(_, name)| *name == asset)
+                .map(|(sha, _)| sha.to_string())
+                .collect::<Vec<_>>()
+        })
+        .next()
+        .unwrap_or_else(|| panic!("no {sums} lists {asset}"));
+    let steps = plan_steps(world);
+    let fetch = steps
+        .iter()
+        .find(|s| {
+            s["step"] == "fetch"
+                && s["url"]
+                    .as_str()
+                    .is_some_and(|u| u.ends_with(&format!("/{asset}")))
+        })
+        .unwrap_or_else(|| panic!("the plan downloads no {asset}:\n{}", world.stdout));
+    assert_eq!(fetch["sha256"], listed.as_str(), "{fetch}");
+}
+
+#[then(regex = r"^the plan puts (\S+) in ~/(\S+)$")]
+fn plan_puts_in(world: &mut BosunWorld, binary: String, dir: String) {
+    let want = world.home().join(dir).join(&binary).display().to_string();
+    let steps = plan_steps(world);
+    assert!(
+        steps.iter().any(|s| s["step"] == "extract"
+            && s["member"] == binary.as_str()
+            && s["dest"] == want.as_str()),
+        "want {binary} extracted to {want}:\n{}",
+        world.stdout
+    );
+}
+
 #[then(regex = r"^(\S+) is installed from (\S+)$")]
 fn installed_from(world: &mut BosunWorld, binary: String, asset: String) {
     let path = world.bin_dir().join(&binary);
@@ -1013,9 +1158,17 @@ fn lock_checksum(world: &mut BosunWorld, checksum: String) {
 
 fn main() {
     // An undefined step skips its scenario; that must fail the suite, not pass it.
+    // Scenarios tagged @pty drive a pseudo-terminal, which only unix has.
     futures::executor::block_on(
         BosunWorld::cucumber()
             .fail_on_skipped()
-            .run_and_exit("tests/acceptance/features"),
+            .filter_run_and_exit("tests/acceptance/features", |feature, _, scenario| {
+                cfg!(unix)
+                    || !feature
+                        .tags
+                        .iter()
+                        .chain(&scenario.tags)
+                        .any(|t| t == "pty")
+            }),
     );
 }

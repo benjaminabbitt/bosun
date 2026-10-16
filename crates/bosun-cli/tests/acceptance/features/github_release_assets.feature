@@ -8,6 +8,28 @@ Feature: github-release names the archive by template and finds the binary insid
     Given a Linux amd64 machine, not elevated
     And bosun installs GitHub releases itself
 
+  Scenario: the plan downloads the archive checked against checksums.txt and puts the binary in ~/.local/bin
+    Given muesli/duf v0.8.1 publishes duf_0.8.1_linux_x86_64.tar.gz with duf at its root
+    And muesli/duf v0.8.1 publishes checksums.txt
+    And the manifest:
+      """
+      version: 2
+      packages:
+        - name: duf
+          spec: ">=0.8.0|<0.9.0"
+          install:
+            linux:
+              backends:
+                github-release:
+                  package: muesli/duf
+                  asset: "{{ binary }}_{{ version }}_{{ os }}_{{ arch_goreleaser }}.tar.gz"
+      """
+    When I run `bosun --format json install . --plan`
+    Then it reports changes pending
+    And the plan downloads duf_0.8.1_linux_x86_64.tar.gz checked against the sha256 checksums.txt lists for it
+    And the plan puts duf in ~/.local/bin
+    And duf is not installed
+
   Scenario: duf spells its platform linux_x86_64 and keeps the binary at the root
     Given muesli/duf v0.8.1 publishes duf_0.8.1_linux_x86_64.tar.gz with duf at its root
     And muesli/duf v0.8.1 also publishes duf_0.8.1_linux_arm64.tar.gz

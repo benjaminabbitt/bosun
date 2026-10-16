@@ -70,3 +70,5 @@ assert_cmd = "2.2.2"
 predicates = "3.1.4"
 cucumber = "0.23.0"
 futures = "0.3.34"
+# Drives bosun under a pseudo-terminal, for the confirmation prompt (unix only).
+rexpect = "0.7.1"

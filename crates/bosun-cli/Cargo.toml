@@ -41,6 +41,9 @@ ruzstd.workspace = true
 bzip2.workspace = true
 futures.workspace = true
 
+[target.'cfg(unix)'.dev-dependencies]
+rexpect.workspace = true
+
 [[test]]
 name = "acceptance"
 harness = false

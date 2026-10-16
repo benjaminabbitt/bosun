@@ -19,3 +19,10 @@ Feature: bosun backends lists the backends available on this host
     And it says "registered"
     And it says "skipped"
     And it says "1.76.0"
+
+  Scenario: a package manager the machine lacks is skipped as not present
+    Given the machine has no apt
+    When I run `bosun --format text backends`
+    Then it succeeds
+    And it lists cargo 1.76.0 as registered
+    And it lists apt as skipped: not present
