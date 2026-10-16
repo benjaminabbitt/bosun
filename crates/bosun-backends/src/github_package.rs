@@ -22,7 +22,7 @@ use bosun_core::{
 };
 use bosun_ports::{
     Backend, BackendFactory, BackendMeta, Command, CommandRunner, HostInfo, HttpFetcher, Index,
-    Installer, PortError, Probe, Step, Steps,
+    Installer, PortError, Probe, Step, Steps, UserInstalls,
 };
 
 use crate::errmsg;
@@ -346,6 +346,12 @@ impl Installer for GithubPackageBackend {
             PackageKind::Rpm => vec![self.run(&["dnf", "remove", "-y", &name])],
         })
     }
+
+    fn user_installs(&self) -> Result<UserInstalls, PortError> {
+        // apt and dnf list these as the user's own, but only bosun knows the
+        // release each came from.
+        Ok(UserInstalls::BosunState)
+    }
 }
 
 #[cfg(test)]
@@ -488,6 +494,18 @@ mod tests {
                 sys(&["apt-get", "remove", "-y", "bat"], NONINTERACTIVE),
             ]
         );
+    }
+
+    #[test]
+    fn what_the_user_installed_is_what_bosun_recorded() {
+        for kind in [PackageKind::Deb, PackageKind::Rpm] {
+            assert_eq!(
+                backend(kind, FakeCommandRunner::new())
+                    .user_installs()
+                    .unwrap(),
+                UserInstalls::BosunState
+            );
+        }
     }
 
     #[test]

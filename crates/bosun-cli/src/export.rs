@@ -1,7 +1,7 @@
 //! `bosun export` (§4.2, §9): seed a manifest from what this machine has
 //! installed by hand. Each present backend reports what the user installed
 //! through it, by its own record (`apt-mark showmanual` less the base system,
-//! `cargo install --list`; bosun's state for github-release); each package
+//! `cargo install --list`; bosun's state for the GitHub release backends); each package
 //! becomes an entry as `add` writes it, then the manifest is locked. Entries
 //! the manifest already has stay as they are. It never installs.
 

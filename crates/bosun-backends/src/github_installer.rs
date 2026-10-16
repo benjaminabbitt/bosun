@@ -30,7 +30,7 @@ use bosun_core::{
 };
 use bosun_ports::{
     Backend, BackendFactory, BackendMeta, Command, CommandRunner, HostInfo, HttpFetcher, Index,
-    Installer, OkExit, PortError, Probe, Step, Steps,
+    Installer, OkExit, PortError, Probe, Step, Steps, UserInstalls,
 };
 
 use crate::errmsg;
@@ -414,6 +414,12 @@ impl Installer for GithubInstallerBackend {
         };
         Ok(vec![run(argv)])
     }
+
+    fn user_installs(&self) -> Result<UserInstalls, PortError> {
+        // The registry lists every program, however it came; only bosun
+        // knows which release each of these came from.
+        Ok(UserInstalls::BosunState)
+    }
 }
 
 #[cfg(test)]
@@ -532,6 +538,14 @@ HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Nsis
                 meaning: "done; Windows needs a reboot to finish",
             }],
         }
+    }
+
+    #[test]
+    fn what_the_user_installed_is_what_bosun_recorded() {
+        assert_eq!(
+            backend(quiet()).user_installs().unwrap(),
+            UserInstalls::BosunState
+        );
     }
 
     #[test]

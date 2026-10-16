@@ -94,8 +94,8 @@ pub enum UserInstalls {
     Unsupported,
     /// The packages the package manager records as installed by the user.
     Listed(Vec<UserInstall>),
-    /// bosun is this backend's installer (github-release), so its record is
-    /// bosun's own machine state.
+    /// bosun is this backend's installer (the GitHub release backends), so its
+    /// record is bosun's own machine state.
     BosunState,
 }
 

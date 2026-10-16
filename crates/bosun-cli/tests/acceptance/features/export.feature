@@ -3,10 +3,11 @@ Feature: bosun export seeds a manifest from what this machine has installed by h
   `export` asks each package manager what the user installed themselves, never
   for everything installed: apt's manual marks, less the distro's base system
   (priority required, important or standard); every crates.io crate cargo
-  installed; and what bosun itself installed from GitHub releases. Each becomes
-  an entry like `add` writes: the range from the installed version up to the
-  next breaking one, under `any` for a platform-independent backend, else this
-  machine's OS. Entries the manifest already has are left as they are. It shows
+  installed; and what bosun itself installed from GitHub releases (binaries,
+  .deb and .rpm packages, installers), with the options each was installed
+  with. Each becomes an entry like `add` writes: the range from the installed
+  version up to the next breaking one, under `any` for a platform-independent
+  backend, else this machine's OS. Entries the manifest already has are left as they are. It shows
   what it adds and asks first; with no terminal to ask on, it writes. Then it
   locks. It never installs.
 
@@ -157,4 +158,65 @@ Feature: bosun export seeds a manifest from what this machine has installed by h
             linux:
               backends:
                 github-release: {package: muesli/duf, asset: "{{ binary }}_{{ version }}_{{ os }}_{{ arch_goreleaser }}.tar.gz"}
+      """
+
+  Scenario: export takes a release .deb from what bosun installed
+    Given a Debian trixie amd64 machine, elevated
+    And bosun installs release .deb packages
+    And sharkdp/bat v0.26.1 publishes bat_0.26.1_amd64.deb holding just the binary
+    And sharkdp/bat v0.26.1 publishes checksums.txt
+    And the manifest:
+      """
+      version: 2
+      packages:
+        - name: bat
+          spec: ">=0.26.0|<0.27.0"
+          install:
+            linux:
+              backends:
+                github-deb: {package: sharkdp/bat, asset: "{{ binary }}_{{ version }}_{{ arch }}.deb"}
+      """
+    When I run `bosun install . --yes`
+    And I run `bosun export --yes` in an empty directory
+    Then it succeeds
+    And the file elsewhere/bosun.yaml reads:
+      """
+      version: 2
+      packages:
+        - name: bat
+          spec: ">=0.26.1|<0.27.0"
+          install:
+            linux:
+              backends:
+                github-deb: {package: sharkdp/bat, asset: "{{ binary }}_{{ version }}_{{ arch }}.deb"}
+      """
+
+  Scenario: export takes a release .rpm with its package name and checksum waiver
+    Given a Linux amd64 machine, elevated
+    And bosun installs release .rpm packages
+    And sharkdp/bat v0.26.1 publishes bat-0.26.1-1.x86_64.rpm holding just the binary
+    And the manifest:
+      """
+      version: 2
+      packages:
+        - name: bat
+          spec: ">=0.26.0|<0.27.0"
+          install:
+            linux:
+              backends:
+                github-rpm: {package: sharkdp/bat, asset: "{{ binary }}-{{ version }}-1.{{ arch_uname }}.rpm", package_name: bat-cat, unverified: allow}
+      """
+    When I run `bosun install . --yes`
+    And I run `bosun export --yes` in an empty directory
+    Then it succeeds
+    And the file elsewhere/bosun.yaml reads:
+      """
+      version: 2
+      packages:
+        - name: bat
+          spec: ">=0.26.1|<0.27.0"
+          install:
+            linux:
+              backends:
+                github-rpm: {package: sharkdp/bat, asset: "{{ binary }}-{{ version }}-1.{{ arch_uname }}.rpm", package_name: bat-cat, unverified: allow}
       """
