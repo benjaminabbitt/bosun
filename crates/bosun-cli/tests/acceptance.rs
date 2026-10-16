@@ -113,6 +113,10 @@ struct Backend {
     available: BTreeMap<String, Vec<String>>,
     checksums: BTreeMap<String, String>,
     installed: BTreeMap<String, String>,
+    /// What the package manager records as installed by the user.
+    by_hand: Vec<String>,
+    /// apt's priority per package, where it is not `optional`.
+    priorities: BTreeMap<String, String>,
     /// bosun's own backend, run against [`BosunWorld::releases`].
     real: bool,
 }
@@ -194,6 +198,8 @@ impl BosunWorld {
                 "available": b.available,
                 "checksums": b.checksums,
                 "installed": b.installed,
+                "by_hand": b.by_hand,
+                "priorities": b.priorities,
                 "real": b.real,
             })).collect::<Vec<_>>(),
             "absent": self.absent,
@@ -372,6 +378,8 @@ fn backend_available(world: &mut BosunWorld, id: String, version: String) {
         available: BTreeMap::new(),
         checksums: BTreeMap::new(),
         installed: BTreeMap::new(),
+        by_hand: Vec::new(),
+        priorities: BTreeMap::new(),
         real: false,
     });
 }
@@ -395,6 +403,8 @@ fn github_release_itself(world: &mut BosunWorld) {
         available: BTreeMap::new(),
         checksums: BTreeMap::new(),
         installed: BTreeMap::new(),
+        by_hand: Vec::new(),
+        priorities: BTreeMap::new(),
         real: true,
     });
 }
@@ -416,6 +426,8 @@ fn github_package_itself(world: &mut BosunWorld, kind: String) {
         available: BTreeMap::new(),
         checksums: BTreeMap::new(),
         installed: BTreeMap::new(),
+        by_hand: Vec::new(),
+        priorities: BTreeMap::new(),
         real: true,
     });
 }
@@ -583,6 +595,22 @@ fn release_checksum(world: &mut BosunWorld, pkg: String, checksum: String) {
 #[given(regex = r"^(\S+) (\S+) is installed outside bosun$")]
 fn installed_outside(world: &mut BosunWorld, pkg: String, version: String) {
     world.backend_for(&pkg).installed.insert(pkg, version);
+}
+
+#[given(regex = r"^(\S+) (\S+) is installed by hand$")]
+fn installed_by_hand(world: &mut BosunWorld, pkg: String, version: String) {
+    let b = world.backend_for(&pkg);
+    b.installed.insert(pkg.clone(), version);
+    b.by_hand.push(pkg);
+}
+
+/// What the Debian installer leaves: the base system, marked manual.
+#[given(
+    regex = r"^(\S+) (\S+) is part of the base system \(priority (\S+)\), marked as installed by hand$"
+)]
+fn base_system(world: &mut BosunWorld, pkg: String, version: String, priority: String) {
+    installed_by_hand(world, pkg.clone(), version);
+    world.backend_for(&pkg).priorities.insert(pkg, priority);
 }
 
 #[given(regex = r"^installing (\S+) fails$")]
@@ -1125,6 +1153,12 @@ fn manifest_unchanged(world: &mut BosunWorld) {
     let got = fs::read_to_string(p.join("bosun.yaml")).unwrap();
     let want = world.manifest.clone().expect("a manifest was given");
     assert_eq!(got, want, "bosun.yaml changed");
+}
+
+#[then("no manifest is written")]
+fn manifest_absent(world: &mut BosunWorld) {
+    let p = world.path();
+    assert!(!p.join("bosun.yaml").exists(), "bosun.yaml was written");
 }
 
 #[then(regex = r"^the lock does not mention (\S+)$")]

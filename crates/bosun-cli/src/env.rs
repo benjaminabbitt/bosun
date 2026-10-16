@@ -34,8 +34,8 @@ use bosun_resolve::{Host, ResolvableBackend};
 
 use crate::error::CliError;
 use crate::fixture::{
-    Fixture, FixtureIndex, FixtureInstaller, FixtureStepRunner, PackageDb, PackageDbRunner,
-    RealSteps,
+    Fixture, FixtureIndex, FixtureInstaller, FixtureStepRunner, HandRecord, PackageDb,
+    PackageDbRunner, RealSteps,
 };
 
 /// One backend available this run: the resolver metadata, the query index, and
@@ -550,7 +550,12 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
                 b.supports_downgrade,
                 b.vers_type.clone(),
                 machine_state.clone(),
-            );
+            )
+            .with_record(HandRecord {
+                backend: b.id.clone(),
+                names: b.by_hand,
+                priorities: b.priorities,
+            });
             Ok(BackendEntry {
                 id: BackendId::new(b.id),
                 version,

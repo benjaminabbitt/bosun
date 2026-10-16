@@ -176,7 +176,7 @@ fn resolve_alone(
 /// The selector `add` writes under without `--on`: `any` when every backend
 /// is a registered platform-independent one (npm, cargo, …), since nothing
 /// ties it to this OS; else this machine's OS.
-fn default_selector(env: &Env, backends: &[String]) -> Selector {
+pub(crate) fn default_selector(env: &Env, backends: &[String]) -> Selector {
     let resolvables = env.resolvables();
     let independent = !backends.is_empty()
         && backends.iter().all(|b| {

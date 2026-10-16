@@ -27,7 +27,7 @@ use bosun_host::StepExecutor;
 use bosun_ports::backend::{Index, Installer};
 use bosun_ports::step::{Step, StepRunner, Steps};
 use bosun_ports::testing::FakeCommandRunner;
-use bosun_ports::{Command, CommandRunner, HttpFetcher, Output, PortError};
+use bosun_ports::{Command, CommandRunner, HttpFetcher, Output, PortError, UserInstalls};
 use serde::Deserialize;
 
 /// The fixture's in-memory machine: native id → installed version. Steps mutate
@@ -123,6 +123,14 @@ pub struct FixtureBackend {
     /// means Present; absence means Absent — e.g. an install that did not land).
     #[serde(default)]
     pub installed: BTreeMap<String, String>,
+    /// What the package manager records as installed by the user (apt's
+    /// manual marks, cargo's install list), by native id; each is also in
+    /// `installed`.
+    #[serde(default)]
+    pub by_hand: Vec<String>,
+    /// apt's `Priority` per native id; a package not named is `optional`.
+    #[serde(default)]
+    pub priorities: BTreeMap<String, String>,
 }
 
 /// An [`Index`] that answers from a fixture's canned version lists.
@@ -185,6 +193,76 @@ pub struct FixtureInstaller {
     supports_downgrade: bool,
     vers_type: String,
     machine: Machine,
+    record: Option<HandRecord>,
+}
+
+/// A fixture backend's record of what the user installed, read by bosun's
+/// own apt and cargo parsers through a [`HandRunner`].
+#[derive(Clone)]
+pub struct HandRecord {
+    /// The backend id, which picks the parser (`apt`, `cargo`); any other
+    /// keeps no record.
+    pub backend: String,
+    /// What the user installed, by native id.
+    pub names: Vec<String>,
+    /// apt's priority per native id (default `optional`).
+    pub priorities: BTreeMap<String, String>,
+}
+
+/// Answers the commands a backend reads its user installs with — `apt-mark
+/// showmanual`, `dpkg-query -W -f=… <names>`, `cargo install --list` — from
+/// a [`HandRecord`] and what the fixture machine has installed now.
+struct HandRunner {
+    installed: BTreeMap<String, String>,
+    record: HandRecord,
+}
+
+impl HandRunner {
+    /// The recorded names still installed, with their versions.
+    fn present(&self) -> impl Iterator<Item = (&String, &String)> {
+        self.record
+            .names
+            .iter()
+            .filter_map(|n| self.installed.get(n).map(|v| (n, v)))
+    }
+}
+
+impl CommandRunner for HandRunner {
+    fn run(&self, command: &Command) -> Result<Output, PortError> {
+        let args: Vec<&str> = command.args.iter().map(String::as_str).collect();
+        let (code, stdout) = match (command.program.as_str(), args.as_slice()) {
+            ("apt-mark", ["showmanual"]) => {
+                (0, self.present().map(|(n, _)| format!("{n}\n")).collect())
+            }
+            ("dpkg-query", ["-W", _, names @ ..]) => {
+                let lines: Vec<String> = names
+                    .iter()
+                    .filter_map(|n| {
+                        let version = self.installed.get(*n)?;
+                        let priority = self
+                            .record
+                            .priorities
+                            .get(*n)
+                            .map_or("optional", String::as_str);
+                        Some(format!("{n}\t{version}\t{priority}\n"))
+                    })
+                    .collect();
+                (0, lines.concat())
+            }
+            ("cargo", ["install", "--list"]) => (
+                0,
+                self.present()
+                    .map(|(n, v)| format!("{n} v{v}:\n    {n}\n"))
+                    .collect(),
+            ),
+            _ => (127, String::new()),
+        };
+        Ok(Output {
+            code: Some(code),
+            stdout: stdout.into_bytes(),
+            stderr: Vec::new(),
+        })
+    }
 }
 
 impl FixtureInstaller {
@@ -202,6 +280,15 @@ impl FixtureInstaller {
             supports_downgrade,
             vers_type,
             machine,
+            record: None,
+        }
+    }
+
+    /// The same installer, reporting `record` as what the user installed.
+    pub fn with_record(self, record: HandRecord) -> FixtureInstaller {
+        FixtureInstaller {
+            record: Some(record),
+            ..self
         }
     }
 
@@ -261,6 +348,20 @@ impl Installer for FixtureInstaller {
     }
     fn uninstall(&self, pkg: &Ref) -> Result<Steps, PortError> {
         Ok(self.step("remove", pkg, None))
+    }
+    fn user_installs(&self) -> Result<UserInstalls, PortError> {
+        let Some(record) = &self.record else {
+            return Ok(UserInstalls::Unsupported);
+        };
+        let runner = HandRunner {
+            installed: self.machine.borrow().clone(),
+            record: record.clone(),
+        };
+        match record.backend.as_str() {
+            "apt" => bosun_backends::apt::user_installs(&runner),
+            "cargo" => bosun_backends::cargo::user_installs(&runner),
+            _ => Ok(UserInstalls::Unsupported),
+        }
     }
 }
 

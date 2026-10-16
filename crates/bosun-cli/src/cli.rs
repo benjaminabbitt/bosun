@@ -98,6 +98,18 @@ pub enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Add what this machine has installed by hand to a manifest (creating
+    /// it when there is none), then lock it. Never installs.
+    Export {
+        /// The manifest directory or file (default: current directory).
+        path: Option<PathBuf>,
+        /// Show what would be added and stop (changes nothing).
+        #[arg(long)]
+        plan: bool,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
     /// List registered backends and why the others were skipped.
     Backends,
     /// Report installed-vs-wanted versions for a manifest, and who claims each;

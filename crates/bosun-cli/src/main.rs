@@ -7,6 +7,7 @@ mod commands;
 mod edit;
 mod env;
 mod error;
+mod export;
 mod fixture;
 mod logmsg;
 mod migrate;
@@ -96,6 +97,17 @@ fn dispatch(cli: &Cli, format: Format) -> Result<i32, CliError> {
                 }
             };
             let value = removal.finish(&env, report, &pref)?;
+            emit(&value, format, &mut out)
+        }
+        Command::Export { path, plan, yes } => {
+            let export = export::prepare(&env, path.clone(), &pref)?;
+            if *plan || export.is_empty() {
+                return emit(&export.planned(), format, &mut out);
+            }
+            if !*yes && !confirm(&export.planned().text(), "Write it?")? {
+                return Ok(0);
+            }
+            let value = export.finish(&env, &pref)?;
             emit(&value, format, &mut out)
         }
         Command::Backends => {
