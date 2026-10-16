@@ -223,8 +223,9 @@ impl GithubPackageBackend {
         }
     }
 
-    /// Fetch the package file, then hand it to the package manager with
-    /// `verb` (`install` or a downgrade).
+    /// Fetch the package file, then hand it to the package manager to install
+    /// or downgrade. apt refuses to change a held package under `-y`, and
+    /// bosun holds the `.deb`s it installs, so apt releases the hold first.
     fn fetch_and(&self, pkg: &Ref, version: &Version, downgrade: bool) -> Result<Steps, PortError> {
         let file = self.file(pkg, version)?;
         let dest = self
@@ -243,14 +244,16 @@ impl GithubPackageBackend {
             (PackageKind::Rpm, false) => self.run(&["dnf", "install", "-y", &path]),
             (PackageKind::Rpm, true) => self.run(&["dnf", "downgrade", "-y", &path]),
         };
-        Ok(vec![
-            Step::Fetch {
-                url: file.url,
-                sha256: file.sha256,
-                dest,
-            },
-            install,
-        ])
+        let mut steps = vec![Step::Fetch {
+            url: file.url,
+            sha256: file.sha256,
+            dest,
+        }];
+        if self.kind == PackageKind::Deb {
+            steps.push(self.run(&["apt-mark", "unhold", &Self::package_name(pkg)]));
+        }
+        steps.push(install);
+        Ok(steps)
     }
 }
 
@@ -421,7 +424,7 @@ mod tests {
     const NONINTERACTIVE: &[(&str, &str)] = &[("DEBIAN_FRONTEND", "noninteractive")];
 
     #[test]
-    fn a_deb_is_fetched_into_the_cache_then_installed_with_apt() {
+    fn a_deb_is_fetched_into_the_cache_then_unheld_and_installed_with_apt() {
         let b = backend(PackageKind::Deb, FakeCommandRunner::new());
         let steps = b
             .install_exact(
@@ -438,6 +441,7 @@ mod tests {
                     sha256: None,
                     dest: PathBuf::from(path),
                 },
+                sys(&["apt-mark", "unhold", "bat"], NONINTERACTIVE),
                 sys(
                     &["apt-get", "install", "-y", "--no-install-recommends", path],
                     NONINTERACTIVE
@@ -471,17 +475,20 @@ mod tests {
         let b = backend(PackageKind::Deb, FakeCommandRunner::new());
         let p = pkg(&[("asset", "{{ binary }}_{{ version }}_{{ arch }}.deb")]);
         assert_eq!(
-            b.downgrade(&p, &v("0.26.1")).unwrap()[1],
-            sys(
-                &[
-                    "apt-get",
-                    "install",
-                    "-y",
-                    "--allow-downgrades",
-                    "/var/cache/bosun/github-deb/bat/bat_0.26.1_amd64.deb"
-                ],
-                NONINTERACTIVE
-            )
+            b.downgrade(&p, &v("0.26.1")).unwrap()[1..],
+            [
+                sys(&["apt-mark", "unhold", "bat"], NONINTERACTIVE),
+                sys(
+                    &[
+                        "apt-get",
+                        "install",
+                        "-y",
+                        "--allow-downgrades",
+                        "/var/cache/bosun/github-deb/bat/bat_0.26.1_amd64.deb"
+                    ],
+                    NONINTERACTIVE
+                ),
+            ]
         );
         assert_eq!(
             b.hold(&p, &v("0.26.1")).unwrap(),

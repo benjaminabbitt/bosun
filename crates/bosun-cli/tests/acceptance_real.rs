@@ -67,6 +67,13 @@ fn clean(_w: &mut RealWorld) {
     let _ = run("apt-get", &["remove", "-y", "hello"]);
 }
 
+#[given(expr = "the system state is clean and apt has no {word}")]
+fn clean_apt(_w: &mut RealWorld, pkg: String) {
+    let _ = fs::remove_file("/var/lib/bosun/state.json");
+    let _ = run("apt-mark", &["unhold", &pkg]);
+    let _ = run("apt-get", &["remove", "-y", &pkg]);
+}
+
 #[given("the dnf index is refreshed")]
 fn dnf_refresh(_w: &mut RealWorld) {
     let (code, out) = run("dnf", &["makecache"]);

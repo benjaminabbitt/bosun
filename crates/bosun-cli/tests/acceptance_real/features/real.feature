@@ -80,6 +80,71 @@ Feature: real backends against a disposable container
     And dpkg reports bosun-probe not installed
     And apt-mark reports bosun-probe not held
 
+  # github-deb holds the release .deb it installs through apt, so it too
+  # releases the hold before it moves the package to another release.
+  @apt-get
+  Scenario: github-deb moves a release .deb it holds up and down
+    Given the system state is clean and apt has no bat
+    And the manifest:
+      """
+      version: 2
+      packages:
+        - name: bat
+          spec: "0.26.0"
+          install:
+            linux:
+              backends:
+                github-deb:
+                  package: sharkdp/bat
+                  asset: "{{ binary }}_{{ version }}_{{ arch }}.deb"
+                  unverified: allow
+      """
+    When I run `bosun install . --yes --scope system`
+    Then it succeeds
+    And dpkg reports bat at 0.26.0
+    And apt-mark reports bat held
+    When the manifest becomes:
+      """
+      version: 2
+      packages:
+        - name: bat
+          spec: "0.26.1"
+          install:
+            linux:
+              backends:
+                github-deb:
+                  package: sharkdp/bat
+                  asset: "{{ binary }}_{{ version }}_{{ arch }}.deb"
+                  unverified: allow
+      """
+    And I run `bosun install . --yes --scope system`
+    Then it succeeds
+    And dpkg reports bat at 0.26.1
+    And apt-mark reports bat held
+    When the manifest becomes:
+      """
+      version: 2
+      packages:
+        - name: bat
+          spec: "0.26.0"
+          install:
+            linux:
+              backends:
+                github-deb:
+                  package: sharkdp/bat
+                  asset: "{{ binary }}_{{ version }}_{{ arch }}.deb"
+                  unverified: allow
+      """
+    And I run `bosun install . --yes --scope system`
+    Then it succeeds
+    And dpkg reports bat at 0.26.0
+    And apt-mark reports bat held
+    When the manifest is deleted
+    And I run `bosun prune --yes --scope system`
+    Then it succeeds
+    And dpkg reports bat not installed
+    And apt-mark reports bat not held
+
   @dnf
   Scenario: dnf installs and versionlocks a package, then prune removes and unlocks it
     Given the dnf index is refreshed
