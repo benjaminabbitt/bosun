@@ -9,6 +9,7 @@
 //! - [`Scheme::Debian`] → `deb-version` (epoch, `~`, revision);
 //! - [`Scheme::Semver`] → `semver` (pre-release precedence: `0.7.0-pre1 <
 //!   0.7.0`);
+//! - [`Scheme::Rpm`] → `rpmvercmp` over `[epoch:]version-release` (`rpm`);
 //! - [`Scheme::Generic`] → bosun's own typed-[`Segment`] engine (`segment`).
 //!
 //! Comparing two versions of different schemes is not meaningful — it never
@@ -16,6 +17,7 @@
 //! [`Ord`] stays total by ordering on the scheme first; [`Version::try_cmp`]
 //! returns `None` on a scheme mismatch for callers that want to assert.
 
+mod rpm;
 mod segment;
 
 use std::cmp::Ordering;
@@ -34,6 +36,8 @@ pub enum Scheme {
     Semver,
     /// Anything else: bosun's typed-chunk engine.
     Generic,
+    /// RPM `[epoch:]version-release`, ordered as rpm's `rpmvercmp` does.
+    Rpm,
 }
 
 impl Scheme {
@@ -42,6 +46,7 @@ impl Scheme {
             Scheme::Debian => 0,
             Scheme::Semver => 1,
             Scheme::Generic => 2,
+            Scheme::Rpm => 3,
         }
     }
 }
@@ -72,6 +77,7 @@ enum Parsed {
     Debian,
     Semver(semver::Version),
     Generic(Vec<Segment>),
+    Rpm(rpm::Evr),
 }
 
 impl Version {
@@ -88,6 +94,7 @@ impl Version {
                 .map(Parsed::Semver)
                 .map_err(|e| VersionError::Semver(e.to_string()))?,
             Scheme::Generic => Parsed::Generic(segment::tokenize(&raw)),
+            Scheme::Rpm => Parsed::Rpm(rpm::Evr::parse(&raw)),
         };
         Ok(Version {
             raw,
@@ -107,12 +114,12 @@ impl Version {
     }
 
     /// Whether this version is a pre-release of its final form: a SemVer
-    /// pre-release segment, or a Debian/generic `~` chunk (which sorts below
+    /// pre-release segment, or a Debian/RPM/generic `~` (which sorts below
     /// the release). Selection never picks one unless a spec names it (§5.6).
     pub fn is_prerelease(&self) -> bool {
         match &self.parsed {
             Parsed::Semver(v) => !v.pre.is_empty(),
-            Parsed::Debian => self.raw.contains('~'),
+            Parsed::Debian | Parsed::Rpm(_) => self.raw.contains('~'),
             Parsed::Generic(segs) => segs.iter().any(|s| matches!(s, Segment::Tilde)),
         }
     }
@@ -129,6 +136,7 @@ impl Version {
             }
             (Parsed::Semver(a), Parsed::Semver(b)) => a.cmp(b),
             (Parsed::Generic(a), Parsed::Generic(b)) => segment::compare(a, b),
+            (Parsed::Rpm(a), Parsed::Rpm(b)) => a.cmp(b),
             // Unreachable: equal scheme implies equal Parsed variant.
             _ => Ordering::Equal,
         })
@@ -177,6 +185,34 @@ mod tests {
     }
     fn gen(s: &str) -> Version {
         Version::parse(s, Scheme::Generic).unwrap()
+    }
+    fn rpm(s: &str) -> Version {
+        Version::parse(s, Scheme::Rpm).unwrap()
+    }
+
+    #[test]
+    fn rpm_orders_epoch_version_release() {
+        assert!(rpm("1:1.6-1.fc41") > rpm("2.0-1.fc41"));
+        assert!(rpm("1.7.1-10.fc41") > rpm("1.7.1-8.fc41"));
+        assert!(rpm("1.0~rc1-1") < rpm("1.0-1"));
+        assert!(rpm("1.0^git1-1") > rpm("1.0-1"));
+        assert_eq!(rpm("0:1.0-1"), rpm("1.0-1"));
+        assert_ne!(rpm("1.0-1"), rpm("1.0-2"));
+        assert_eq!(rpm("2:4.15.1-12.fc41").as_str(), "2:4.15.1-12.fc41");
+        assert_eq!(Version::parse("", Scheme::Rpm), Err(VersionError::Empty));
+    }
+
+    #[test]
+    fn rpm_prerelease_is_a_tilde_not_a_caret() {
+        assert!(rpm("1.0~rc1-1.fc41").is_prerelease());
+        assert!(!rpm("1.0^git1-1.fc41").is_prerelease());
+        assert!(!rpm("1.0-1.fc41").is_prerelease());
+    }
+
+    #[test]
+    fn rpm_ranks_after_the_other_schemes() {
+        assert!(gen("9") < rpm("0"));
+        assert_eq!(rpm("1.0").try_cmp(&gen("1.0")), None);
     }
 
     #[test]

@@ -15,7 +15,8 @@ verbatim as test fixtures; bosun's `vers` and `purl` code must pass them.
 
 ## What bosun exercises vs. skips
 
-bosun maps vers types onto its §6 version schemes: `deb`→Debian;
+bosun maps vers types onto its §6 version schemes: `deb`→Debian; `rpm`→RPM (rpmvercmp;
+the vers suites carry no rpm cases, so its unit tests use rpm's own `rpmvercmp.at` cases);
 `cargo`/`npm`/`golang`/`semver`→SemVer; everything else→generic chunk ordering.
 
 **Exercised (M1):** `vers/vers_canonical_parse_test.json` (type-agnostic grammar),

@@ -95,6 +95,7 @@ pub enum VersError {
 pub fn scheme_for_type(ty: &str) -> Scheme {
     match ty {
         "deb" => Scheme::Debian,
+        "rpm" => Scheme::Rpm,
         "cargo" | "npm" | "golang" | "semver" => Scheme::Semver,
         _ => Scheme::Generic,
     }
@@ -339,6 +340,18 @@ mod tests {
         assert!(r.contains(&ver("1.7.1-3ubuntu0.1", d)));
         assert!(!r.contains(&ver("1.7.0-9", d))); // below lower
         assert!(!r.contains(&ver("1.7.2", d))); // at/above the ~ upper
+    }
+
+    #[test]
+    fn rpm_interval_containment() {
+        let r = VersRange::parse("vers:rpm/>=1.7.1|<1.7.2~").unwrap();
+        assert_eq!(r.scheme(), Scheme::Rpm);
+        let v = |s| ver(s, Scheme::Rpm);
+        assert!(r.contains(&v("1.7.1-8.fc41")));
+        assert!(r.contains(&v("1.7.1-10.fc41")));
+        assert!(!r.contains(&v("1.7.1~rc1-1.fc41")));
+        assert!(!r.contains(&v("1.7.2-1.fc41")));
+        assert!(!r.contains(&v("1:1.7.1-1.fc41"))); // a higher epoch is above
     }
 
     #[test]

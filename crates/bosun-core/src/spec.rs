@@ -46,6 +46,7 @@ fn scheme_name(scheme: Scheme) -> &'static str {
         Scheme::Debian => "Debian",
         Scheme::Semver => "SemVer",
         Scheme::Generic => "generic",
+        Scheme::Rpm => "RPM",
     }
 }
 
@@ -141,9 +142,9 @@ impl Spec {
 /// - SemVer: the caret range, `>=X.Y.Z|<(X+1).0.0`; below 1.0 the next minor
 ///   (`0.9.1` → `<0.10.0`) and below 0.1 the next patch is the bound.
 ///   Build metadata is dropped; a pre-release stays as the lower bound.
-/// - Debian: any revision of the same upstream version, `>=U|<U'~` where `U'`
-///   bumps the last number of `U`'s leading numeric part (`1.7.1-3` →
-///   `>=1.7.1|<1.7.2~`); an epoch is kept on both bounds.
+/// - Debian and RPM: any revision (release) of the same upstream version,
+///   `>=U|<U'~` where `U'` bumps the last number of `U`'s leading numeric
+///   part (`1.7.1-3` → `>=1.7.1|<1.7.2~`); an epoch is kept on both bounds.
 /// - Otherwise, or when the version has no numeric part to bump: the exact
 ///   version.
 pub fn default_spec(latest: &Version) -> String {
@@ -165,14 +166,14 @@ pub fn default_spec(latest: &Version) -> String {
             }
             Err(_) => exact,
         },
-        Scheme::Debian => debian_default(latest.as_str()).unwrap_or(exact),
+        Scheme::Debian | Scheme::Rpm => epoch_release_default(latest.as_str()).unwrap_or(exact),
         Scheme::Generic => exact,
     }
 }
 
-/// `>=U|<U'~` for a Debian version (see [`default_spec`]), or `None` when its
-/// upstream part does not start with a number.
-fn debian_default(raw: &str) -> Option<String> {
+/// `>=U|<U'~` for a Debian or RPM version (see [`default_spec`]), or `None`
+/// when its upstream part does not start with a number.
+fn epoch_release_default(raw: &str) -> Option<String> {
     let (epoch, rest) = match raw.split_once(':') {
         Some((e, r)) => (format!("{e}:"), r),
         None => (String::new(), raw),
@@ -359,6 +360,25 @@ mod tests {
     }
 
     #[test]
+    fn default_spec_for_rpm_is_any_release_of_the_version() {
+        assert_eq!(default_of("1.7.1-8.fc41", Scheme::Rpm), ">=1.7.1|<1.7.2~");
+        assert_eq!(
+            default_of("2:4.15.1-12.fc41", Scheme::Rpm),
+            ">=2:4.15.1|<2:4.15.2~"
+        );
+        assert_eq!(default_of("2026e-1.el9_8", Scheme::Rpm), ">=2026e|<2027~");
+        assert_eq!(default_of("beta-1", Scheme::Rpm), "beta-1");
+    }
+
+    #[test]
+    fn scheme_names_read_as_their_ecosystem() {
+        assert_eq!(scheme_name(Scheme::Debian), "Debian");
+        assert_eq!(scheme_name(Scheme::Semver), "SemVer");
+        assert_eq!(scheme_name(Scheme::Generic), "generic");
+        assert_eq!(scheme_name(Scheme::Rpm), "RPM");
+    }
+
+    #[test]
     fn default_spec_is_the_exact_version_when_no_range_fits() {
         assert_eq!(default_of("beta-1", Scheme::Debian), "beta-1");
         assert_eq!(default_of("2024.10.1", Scheme::Generic), "2024.10.1");
@@ -373,6 +393,8 @@ mod tests {
             ("1.7.1-3", Scheme::Debian, "deb"),
             ("1:2.3-4", Scheme::Debian, "deb"),
             ("beta-1", Scheme::Debian, "deb"),
+            ("1.7.1-8.fc41", Scheme::Rpm, "rpm"),
+            ("2:4.15.1-12.fc41", Scheme::Rpm, "rpm"),
         ] {
             let v = Version::parse(raw, scheme).unwrap();
             let spec = Spec::new(default_spec(&v), ty).unwrap();
