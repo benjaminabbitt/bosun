@@ -9,9 +9,9 @@ pub const BAD_SPEC: &str = "invalid spec";
 /// The identity purl could not be built from the entry and host facts.
 pub const BAD_PURL: &str = "could not build package identity";
 
-/// A deb or rpm identity needs distro facts (os-release) this host did not
+/// A deb, rpm or apk identity needs distro facts (os-release) this host did not
 /// provide.
-pub const NO_DISTRO: &str = "deb/rpm backend needs distro facts this host lacks";
+pub const NO_DISTRO: &str = "package identity needs distro facts this host lacks";
 
 /// A github package id must be written `owner/repo`.
 pub const BAD_GITHUB_ID: &str = "github package id must be owner/repo";

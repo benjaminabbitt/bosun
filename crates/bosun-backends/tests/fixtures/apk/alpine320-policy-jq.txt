@@ -1,0 +1,8 @@
+jq policy:
+  1.7.1-r0:
+    lib/apk/db/installed
+    https://dl-cdn.alpinelinux.org/alpine/v3.20/main
+  1.7.1-r0:
+    https://dl-cdn.alpinelinux.org/alpine/v3.21/main
+  1.8.2-r0:
+    @v323 https://dl-cdn.alpinelinux.org/alpine/v3.23/main

@@ -110,7 +110,7 @@ real to check later):
 | `uninstall [path] [--plan] [--scope system\|user] [--yes]` | the inverse of `install` for one manifest: drop all of its claims, then uninstall each package bosun installed that no other manifest still claims; same plan → confirm → apply flow (§9) |
 | `prune [--plan] [--scope system\|user] [--yes]` | machine-wide cleanup: uninstall what bosun installed that no manifest claims any more, and drop claims whose manifest no longer exists (§9) |
 | `upgrade [pkg…] [--manifest]` | let go of the named pins (all, when none are named), re-resolve those packages to the newest version their spec allows, write this machine's lock, and show old → new; installs nothing |
-| `export [path] [--plan] [--yes]` | seed a manifest from what this machine has installed by hand, by each package manager's own record (§9): apt's manual marks less the distro's base system (priority required, important or standard), cargo's crates.io installs (not path or git ones), and the GitHub releases bosun's state records; a backend with no such record (winget, scoop, choco for now) gives nothing and is named. Each package becomes an entry as `add` writes it: the default range from its installed version, under `any` or this machine's OS. A name the manifest already has is left as written, as is a second backend's package of the same name; one whose range nothing available meets is left out. Creates the manifest when there is none; shows what it adds and confirms (§4.8), then writes and runs `lock`. Never installs |
+| `export [path] [--plan] [--yes]` | seed a manifest from what this machine has installed by hand, by each package manager's own record (§9): apt's manual marks less the distro's base system (priority required, important or standard), apk's world file less the Alpine base packages, cargo's crates.io installs (not path or git ones), and the GitHub releases bosun's state records; a backend with no such record (winget, scoop, choco for now) gives nothing and is named. Each package becomes an entry as `add` writes it: the default range from its installed version, under `any` or this machine's OS. A name the manifest already has is left as written, as is a second backend's package of the same name; one whose range nothing available meets is left out. Creates the manifest when there is none; shows what it adds and confirms (§4.8), then writes and runs `lock`. Never installs |
 | `status [path]` | with a manifest: each of its packages, installed against wanted, and every manifest that claims it (path, spec, user; a claim whose manifest is gone is marked, `prune` drops it). With no path: everything bosun manages on this machine, both scopes, with origin and claims; no manifest needed. Drift is `install --plan`'s job |
 | `adopt <name>` | explicitly take ownership of an existing install: `accepted` → `installed` (§4.6) |
 | `lock` | resolve the manifest for this machine (its platform, plus platform-independent `any` entries) and write this machine's lock for it, keeping each version it already pins while that still fits (§4.5, §7). Warns when an older bosun's `bosun.lock` sits beside the manifest: it is no longer read |
@@ -488,7 +488,7 @@ commands too.
 | Family | install-exact | hold/pin | version availability |
 |---|---|---|---|
 | **Language** (go/cargo/npm/pipx/gem/uv-tool) | strong (any version) | **weak** (re-run overwrites; no durable hold) | registry — ~everything |
-| **OS, versioned** (apt/dnf/winget) | good, repo-bound | strong (`apt-mark hold` / `dnf versionlock` / `winget pin`) | repo — latest 1–2 |
+| **OS, versioned** (apt/dnf/apk/winget) | good, repo-bound | strong (`apt-mark hold` / `dnf versionlock` / apk's world `pkg=ver` / `winget pin`) | repo — latest 1–2 (apk: one per branch) |
 | **OS, rolling** (brew/scoop) | weak | freeze-current only | weak — old versions scarce |
 | **Universal app** (snap/flatpak) | weak: snap selects a channel (track/risk), not a version; flatpak can check out a past commit | strong (`snap refresh --hold`, `flatpak mask`) | snap: current release per channel; flatpak: the remote's commit history |
 
@@ -1437,7 +1437,7 @@ this table as each slice lands.
 
 ## Appendix A — PM version-pinning mechanics (verified 2026-10-13)
 
-Command-level reference for the four researched backends. (apt, dnf, uv, npm.)
+Command-level reference for the five researched backends. (apt, dnf, apk, uv, npm.)
 
 ### apt / dpkg
 - Discover: `apt-cache madison <pkg>`, `apt list -a <pkg>`, `apt-cache policy <pkg>` (authoritative
@@ -1491,6 +1491,37 @@ Command-level reference for the four researched backends. (apt, dnf, uv, npm.)
   epoch, then `rpmvercmp` on version, then release (`~` before the end, `^` after it); an
   absent release sorts below any release, so the order stays total.
 
+### apk (Alpine; built and checked 2026-10-16 on Alpine 3.20, 3.21 and 3.23)
+- Two majors in use: apk-tools 2.14 (Alpine ≤ 3.22) and 3.0 (3.23); every command below
+  behaves alike on both. `apk --version` prints `apk-tools 2.14.4, compiled for x86_64.`.
+- Discover: `apk policy <pkg>` lists each version (indented two spaces) and where it comes
+  from (four): `lib/apk/db/installed`, a repository URL, or `@tag URL` for a tagged
+  repository. An unknown name exits 0 with nothing. A repository carries **one version per
+  branch**, so what's on offer is one version per configured branch; adding another branch's
+  repository (`/etc/apk/repositories`) offers its version too. A version only a tagged
+  repository carries needs the tag to install (`apk add jq@edge=1.8.2-r0`); bosun leaves it out.
+- Installed: `apk info -e -v <pkg>` prints `<pkg>-<version>`; exits with the number of names it
+  did not find (1 for one absent package).
+- Install exact / up / down: `apk add <pkg>=<version>`; apk moves to whatever the world asks
+  for, so a downgrade is the same command, reaching only versions a repository still has.
+  `--no-interactive` (both majors) keeps an `/etc/apk/interactive` from prompting.
+- Pin: `apk add <pkg>=<version>` writes `<pkg>=<version>` to `/etc/apk/world`, and no
+  `apk upgrade` moves it until the world changes: that is the hold, so bosun's hold adds no
+  step. Other world forms: `<pkg>` (unpinned), `<pkg>>=1.7`, `<pkg>~1.7` (fuzzy), `<pkg>@tag`,
+  `!<pkg>` (conflict), `cmd:`/`so:` virtuals. `apk add <pkg>` re-adds it unpinned.
+- Remove: `apk del <pkg>` removes the package and its world line, pin included.
+- What the user asked for (export): the world file, less the image's base (`alpine-baselayout`,
+  `alpine-keys`, `alpine-release`, `apk-tools`, `busybox`, `libc-utils`, `musl-utils`;
+  `alpine-base` on a disk install), conflicts, virtuals and tagged entries.
+- Versions: `digit{.digit}…{letter}{_suffix{#}}…{~hash}{-r#}`, ordered by apk-tools'
+  `version.c` (vers type `apk`): suffixes `_alpha < _beta < _pre < _rc < (none) < _cvs < _svn
+  < _git < _hg < _p`; a `.`-number with a leading zero compares as a string; a `~hash` (apk-tools
+  3; 2.14 does not order by it) sits between the suffixes and the `-r` revision. bosun
+  follows apk-tools 3 and rejects what it rejects (`1.0-1`, `1.0bc`); checked against `apk version -t` on 3,000 pairs.
+- Identity: `pkg:apk/<ID>/<name>?arch=<x86_64|aarch64>`, no release qualifier (§5.4).
+- Repositories need their signing key in `/etc/apk/keys` as well as a URL, so bosun
+  configures none; `ensure_source` adds no step.
+
 ### uv (Python)
 - Project: `pyproject.toml` `==` specifiers + `uv.lock` (true lockfile). `uv add 'pkg==X'`,
   `uv lock [--check|--upgrade|--upgrade-package pkg==X]`, `uv sync [--frozen|--locked|--inexact]`
@@ -1526,7 +1557,7 @@ Command-level reference for the four researched backends. (apt, dnf, uv, npm.)
   `choco pin add --name=<id> --version=<v>`; downgrade adds `--allow-downgrade`.
 
 ### Cross-cutting
-- True lockfiles: only uv (`uv.lock`) and npm (`package-lock.json`). apt/dnf = policy/list only;
+- True lockfiles: only uv (`uv.lock`) and npm (`package-lock.json`). apt/dnf/apk = policy/list only;
   all binary/tool installs = manifest/imperative only.
 - Impedance mismatches: repo-bound (apt/dnf) vs registry-bound (uv/npm) availability;
   non-interchangeable version grammars; OS/system vs per-user tool scope (OS can cascade erasures →

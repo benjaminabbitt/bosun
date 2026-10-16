@@ -283,6 +283,7 @@ fn compiled_in_factories(
     vec![
         Box::new(AptFactory::new(runner.clone())),
         Box::new(DnfFactory::new(runner.clone())),
+        Box::new(bosun_backends::ApkFactory::new(runner.clone())),
         Box::new(CargoFactory::new(runner.clone(), fetcher.clone())),
         Box::new(GithubReleaseFactory::new(fetcher.clone(), bin_dir, os, arch).with_libc(libc)),
         package(PackageKind::Deb),
@@ -838,6 +839,7 @@ mod tests {
         let schemes = factory_schemes(&factories);
         assert_eq!(schemes.get("apt"), Some(&Scheme::Debian));
         assert_eq!(schemes.get("dnf"), Some(&Scheme::Rpm));
+        assert_eq!(schemes.get("apk"), Some(&Scheme::Alpine));
         assert_eq!(schemes.get("cargo"), Some(&Scheme::Semver));
         assert_eq!(schemes.get("github-release"), Some(&Scheme::Semver));
     }
@@ -860,6 +862,7 @@ mod tests {
             Some(&vec!["asset".to_string(), "tag".to_string()])
         );
         assert_eq!(keys.get("apt"), Some(&vec![]));
+        assert_eq!(keys.get("apk"), Some(&vec![]));
         assert_eq!(keys.get("cargo"), Some(&vec![]));
     }
 

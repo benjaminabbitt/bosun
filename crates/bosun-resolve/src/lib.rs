@@ -159,7 +159,7 @@ pub enum ResolveError {
         #[source]
         source: PurlError,
     },
-    /// A deb or rpm identity needs distro facts this host lacks.
+    /// A deb, rpm or apk identity needs distro facts this host lacks.
     #[error("{kind}: {name}", kind = errmsg::NO_DISTRO)]
     NoDistro {
         /// The entry's logical name.
@@ -516,6 +516,8 @@ fn choose_backend<'b>(
 ///   — the namespace is the distro ID, the arch is rpm's spelling (`x86_64`),
 ///   and `distro` is `ID-VERSION_ID` (`fedora-41`), omitted without a
 ///   `VERSION_ID`.
+/// - `apk`: `pkg:apk/<distro-id>/<name>?arch=<apk arch>` (`x86_64`,
+///   `aarch64`); no release qualifier, as Alpine has no release selectors.
 /// - `github`: `pkg:github/<owner>/<repo>?binary=<logical>` — the package id
 ///   is `owner/repo`; the `binary` qualifier defaults to the entry's logical
 ///   name so `- name: ltk` with `package: owner/repo` selects the `ltk` binary.
@@ -557,6 +559,15 @@ fn build_purl(
                 qualifiers.insert("distro".to_string(), format!("{}-{release}", distro.id));
             }
             Purl::from_components("rpm", Some(&distro.id), native, None, qualifiers, None)
+                .map_err(bad_purl)
+        }
+        "apk" => {
+            let distro = host.distro.ok_or_else(|| ResolveError::NoDistro {
+                name: name.to_string(),
+            })?;
+            // apk spells architectures as rpm does.
+            qualifiers.insert("arch".to_string(), rpm_arch(host.arch).to_string());
+            Purl::from_components("apk", Some(&distro.id), native, None, qualifiers, None)
                 .map_err(bad_purl)
         }
         "github" => {
@@ -1942,6 +1953,66 @@ mod tests {
                 .purl
                 .to_string(),
             "pkg:deb/debian/jq?arch=amd64"
+        );
+    }
+
+    fn apk_backend(index: &dyn Index) -> ResolvableBackend<'_> {
+        ResolvableBackend {
+            id: BackendId::new("apk"),
+            purl_type: "apk".to_string(),
+            vers_type: "apk".to_string(),
+            platform_independent: false,
+            index,
+        }
+    }
+
+    fn apk_purl(arch: Arch, distro: Option<&Distro>) -> Result<String, ResolveError> {
+        let apk = FakeIndex::new(Scheme::Alpine, &["1.7.1-r0"]);
+        let host = Host {
+            os: Os::Linux,
+            arch,
+            distro,
+            libc: None,
+        };
+        let m = manifest(
+            &[],
+            vec![entry(
+                "jq",
+                Some("1.7.1-r0"),
+                &[("linux", block(&["apk"], None, None))],
+            )],
+        );
+        let r = resolve(&m, "h", &host, &[apk_backend(&apk)], &[])?;
+        let target = Target::Platform {
+            os: Os::Linux,
+            arch,
+        };
+        Ok(r.lock.packages[0].targets[&target]
+            .placement
+            .purl
+            .to_string())
+    }
+
+    #[test]
+    fn apk_identity_names_the_distro_and_apk_arch_but_no_release() {
+        let distro = alpine();
+        assert_eq!(
+            apk_purl(Arch::Amd64, Some(&distro)).unwrap(),
+            "pkg:apk/alpine/jq?arch=x86_64"
+        );
+        assert_eq!(
+            apk_purl(Arch::Arm64, Some(&distro)).unwrap(),
+            "pkg:apk/alpine/jq?arch=aarch64"
+        );
+    }
+
+    #[test]
+    fn an_apk_identity_without_distro_facts_is_an_error() {
+        assert_eq!(
+            apk_purl(Arch::Amd64, None).unwrap_err(),
+            ResolveError::NoDistro {
+                name: "jq".to_string()
+            }
         );
     }
 

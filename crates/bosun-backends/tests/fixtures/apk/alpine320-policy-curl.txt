@@ -1,0 +1,7 @@
+curl policy:
+  8.14.1-r2:
+    https://dl-cdn.alpinelinux.org/alpine/v3.20/main
+  8.14.1-r2:
+    https://dl-cdn.alpinelinux.org/alpine/v3.21/main
+  8.22.0-r0:
+    @v323 https://dl-cdn.alpinelinux.org/alpine/v3.23/main

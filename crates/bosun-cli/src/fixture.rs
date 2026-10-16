@@ -216,7 +216,7 @@ pub struct FixtureInstaller {
 /// own apt and cargo parsers through a [`HandRunner`].
 #[derive(Clone)]
 pub struct HandRecord {
-    /// The backend id, which picks the parser (`apt`, `cargo`); any other
+    /// The backend id, which picks the parser (`apt`, `cargo`, `apk`); any other
     /// keeps no record.
     pub backend: String,
     /// What the user installed, by native id.
@@ -226,8 +226,9 @@ pub struct HandRecord {
 }
 
 /// Answers the commands a backend reads its user installs with — `apt-mark
-/// showmanual`, `dpkg-query -W -f=… <names>`, `cargo install --list` — from
-/// a [`HandRecord`] and what the fixture machine has installed now.
+/// showmanual`, `dpkg-query -W -f=… <names>`, `cargo install --list`, the
+/// apk world file and `apk info -e -v <names>` — from a [`HandRecord`] and
+/// what the fixture machine has installed now.
 struct HandRunner {
     installed: BTreeMap<String, String>,
     record: HandRecord,
@@ -264,6 +265,17 @@ impl CommandRunner for HandRunner {
                     })
                     .collect();
                 (0, lines.concat())
+            }
+            ("cat", ["/etc/apk/world"]) => {
+                (0, self.present().map(|(n, _)| format!("{n}\n")).collect())
+            }
+            ("apk", ["info", "-e", "-v", names @ ..]) => {
+                let lines: Vec<String> = names
+                    .iter()
+                    .filter_map(|n| Some(format!("{n}-{}\n", self.installed.get(*n)?)))
+                    .collect();
+                // apk exits with the number of names it did not find.
+                ((names.len() - lines.len()) as i32, lines.concat())
             }
             ("cargo", ["install", "--list"]) => (
                 0,
@@ -376,6 +388,7 @@ impl Installer for FixtureInstaller {
         match record.backend.as_str() {
             "apt" => bosun_backends::apt::user_installs(&runner),
             "cargo" => bosun_backends::cargo::user_installs(&runner),
+            "apk" => bosun_backends::apk::user_installs(&runner),
             _ => Ok(UserInstalls::Unsupported),
         }
     }

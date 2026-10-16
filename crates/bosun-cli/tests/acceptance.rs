@@ -60,6 +60,13 @@ struct BackendMeta {
 /// The metadata of each backend bosun compiles in.
 fn known_backend(id: &str) -> BackendMeta {
     match id {
+        "apk" => BackendMeta {
+            purl_type: "apk",
+            vers_type: "apk",
+            platform_independent: false,
+            scope: "system",
+            supports_hold: true,
+        },
         "apt" => BackendMeta {
             purl_type: "deb",
             vers_type: "deb",
@@ -348,7 +355,7 @@ fn versions(list: &str) -> Vec<String> {
 // ---- the machine and its backends -----------------------------------------
 
 #[given(
-    regex = r"^an? (Linux|Debian \S+|Ubuntu \S+|Fedora \S+|Rocky \S+|Alpine|Windows) (\S+) machine, (not elevated|elevated)$"
+    regex = r"^an? (Linux|Debian \S+|Ubuntu \S+|Fedora \S+|Rocky \S+|Alpine(?: \S+)?|Windows) (\S+) machine, (not elevated|elevated)$"
 )]
 fn a_machine(world: &mut BosunWorld, os: String, arch: String, privilege: String) {
     let distro = match os.split_once(' ') {
@@ -375,6 +382,12 @@ fn a_machine(world: &mut BosunWorld, os: String, arch: String, privilege: String
             id_like: vec!["rhel".into(), "centos".into(), "fedora".into()],
             codename: None,
             version_id: Some(release.into()),
+        }),
+        Some(("Alpine", version_id)) => Some(MachineDistro {
+            id: "alpine".into(),
+            id_like: Vec::new(),
+            codename: None,
+            version_id: Some(version_id.into()),
         }),
         _ if os == "Alpine" => Some(MachineDistro {
             id: "alpine".into(),
@@ -663,6 +676,12 @@ fn installed_by_hand(world: &mut BosunWorld, pkg: String, version: String) {
 fn base_system(world: &mut BosunWorld, pkg: String, version: String, priority: String) {
     installed_by_hand(world, pkg.clone(), version);
     world.backend_for(&pkg).priorities.insert(pkg, priority);
+}
+
+/// What an Alpine image's world file lists before anyone adds to it.
+#[given(regex = r"^(\S+) (\S+) is part of Alpine's base system, in the world file$")]
+fn alpine_base(world: &mut BosunWorld, pkg: String, version: String) {
+    installed_by_hand(world, pkg, version);
 }
 
 #[given(regex = r"^installing (\S+) fails$")]

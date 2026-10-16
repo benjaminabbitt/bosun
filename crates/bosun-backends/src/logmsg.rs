@@ -16,6 +16,10 @@ pub const NO_CHECKSUM: &str =
 pub const FOREIGN_ARCH_LEFT_OUT: &str =
     "manual apt package of another architecture left out of the export";
 
+/// A package the apk world names with a repository tag (`jq@edge`): bosun
+/// installs only from untagged repositories, so it is left out.
+pub const TAGGED_LEFT_OUT: &str = "apk world entry from a tagged repository left out of the export";
+
 /// A crate cargo installed from a path or git, not crates.io, which bosun
 /// installs from; it is left out of the export.
 pub const NOT_FROM_CRATES_IO: &str = "cargo install not from crates.io left out of the export";

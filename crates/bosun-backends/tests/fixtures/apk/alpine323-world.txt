@@ -1,0 +1,12 @@
+alpine-baselayout
+alpine-keys
+alpine-release
+apk-tools
+busybox
+cmd:less
+curl
+jq
+musl-utils
+!nano
+ripgrep>=14
+tree=2.2.1-r0

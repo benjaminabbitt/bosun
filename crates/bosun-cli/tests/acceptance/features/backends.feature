@@ -26,3 +26,9 @@ Feature: bosun backends lists the backends available on this host
     Then it succeeds
     And it lists cargo 1.76.0 as registered
     And it lists apt as skipped: not present
+
+  Scenario: a machine without Alpine's apk skips it as not present
+    Given the machine has no apk
+    When I run `bosun --format text backends`
+    Then it succeeds
+    And it lists apk as skipped: not present
