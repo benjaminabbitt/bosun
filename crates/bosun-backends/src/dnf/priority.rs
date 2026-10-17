@@ -80,11 +80,21 @@ fn bad(line: &str) -> PortError {
 pub(crate) struct Ranking<'a> {
     builds: &'a [Build],
     priorities: &'a Priorities,
+    installed: Option<&'a Version>,
 }
 
 impl<'a> Ranking<'a> {
     pub fn new(builds: &'a [Build], priorities: &'a Priorities) -> Ranking<'a> {
-        Ranking { builds, priorities }
+        Ranking {
+            builds,
+            priorities,
+            installed: None,
+        }
+    }
+
+    /// The same ranking with `installed` the build rpm reports installed.
+    pub fn with_installed(self, installed: Option<&'a Version>) -> Ranking<'a> {
+        Ranking { installed, ..self }
     }
 
     /// Every version offered, each once.
@@ -114,21 +124,40 @@ impl<'a> Ranking<'a> {
     }
 
     /// The version dnf would install among those `want` admits, or the
-    /// first of `prefer` offered and admitted.
+    /// first of `prefer` offered and admitted. A build behind the installed
+    /// one is taken only when `want` admits nothing else: dnf never goes back
+    /// past it but by `downgrade` or `distro-sync`. The installed build,
+    /// admitted, is a candidate even when no repository offers it, below any
+    /// offered one newer.
     pub fn choose(&self, want: &Want, prefer: &[Version]) -> Option<Version> {
         let versions = self.versions();
-        let admissible = want.admissible(&versions);
+        let mut admissible = want.admissible(&versions);
         if let Some(locked) = prefer.iter().find(|p| admissible.contains(p)) {
             return Some(locked.clone());
         }
+        if let Some(installed) = self.installed.filter(|i| want.admits(i)) {
+            if !admissible.contains(&installed) {
+                admissible.push(installed);
+            }
+        }
         admissible
             .into_iter()
-            .max_by(|a, b| {
-                self.priority(b)
-                    .cmp(&self.priority(a))
-                    .then_with(|| a.cmp(b))
-            })
+            .max_by(|a, b| self.rank(a).cmp(&self.rank(b)).then_with(|| a.cmp(b)))
             .cloned()
+    }
+
+    /// How dnf ranks `version` before its version: not behind the installed
+    /// build first, then the better priority, a build no repository offers
+    /// last.
+    fn rank(&self, version: &Version) -> (bool, std::cmp::Reverse<i32>) {
+        let behind = self.installed.is_some_and(|i| version < i);
+        let offered = self.builds.iter().any(|b| &b.version == version);
+        let priority = if offered {
+            self.priority(version)
+        } else {
+            i32::MAX
+        };
+        (!behind, std::cmp::Reverse(priority))
     }
 
     /// The newest version `want` admits above `chosen`, when repository
@@ -291,5 +320,64 @@ mod tests {
             Some(rpm("2:9.1.737-1.fc41"))
         );
         assert_eq!(r.choose(&want(&[">=3:0"]), &locked), None);
+    }
+
+    // Fedora 41 with fedora at `priority=1` (wget2 2.1.0) and updates at 99
+    // (2.2.0); Rocky 9 the same with the 9.5 vault and baseos (checked
+    // 2026-10-17, dnf5 and dnf4).
+
+    #[test]
+    fn a_better_priority_build_behind_the_installed_one_is_not_gone_back_to() {
+        // 2.2.0 installed: `dnf install wget2` and `dnf upgrade wget2` keep
+        // it; only `distro-sync` would take fedora's 2.1.0.
+        let b = builds(&[("2.1.0-12.fc41", "fedora"), ("2.2.0-3.fc41", "updates")]);
+        let p = priorities(&[("fedora", 1), ("updates", 99)]);
+        let installed = rpm("2.2.0-3.fc41");
+        let r = Ranking::new(&b, &p).with_installed(Some(&installed));
+        assert_eq!(r.choose(&want(&["*"]), &[]), Some(installed.clone()));
+        // A spec the installed build is outside of still moves it.
+        assert_eq!(r.choose(&want(&["<2.2"]), &[]), Some(rpm("2.1.0-12.fc41")));
+        // The lock still wins while admitted.
+        assert_eq!(
+            r.choose(&want(&["*"]), &[rpm("2.1.0-12.fc41")]),
+            Some(rpm("2.1.0-12.fc41"))
+        );
+    }
+
+    #[test]
+    fn an_installed_build_in_no_repository_is_kept_over_older_offered_ones() {
+        // baseos disabled: only the vault's older builds are offered, and
+        // `dnf install unzip` keeps 6.0-60.el9_8.
+        let b = builds(&[("6.0-57.el9", "vault95"), ("6.0-58.el9_5", "vault95")]);
+        let p = priorities(&[("vault95", 1)]);
+        let installed = rpm("6.0-60.el9_8");
+        let r = Ranking::new(&b, &p).with_installed(Some(&installed));
+        assert_eq!(r.choose(&want(&["*"]), &[]), Some(installed.clone()));
+        assert_eq!(
+            r.choose(&want(&["<6.0-59"]), &[]),
+            Some(rpm("6.0-58.el9_5"))
+        );
+        assert_eq!(r.versions(), vec![rpm("6.0-57.el9"), rpm("6.0-58.el9_5")]);
+    }
+
+    #[test]
+    fn a_newer_build_is_taken_over_an_installed_one_in_no_repository() {
+        let b = builds(&[("2.0-1", "updates")]);
+        let p = priorities(&[("updates", 99)]);
+        let installed = rpm("1.0-1");
+        let r = Ranking::new(&b, &p).with_installed(Some(&installed));
+        assert_eq!(r.choose(&want(&["*"]), &[]), Some(rpm("2.0-1")));
+    }
+
+    #[test]
+    fn the_installed_build_from_the_best_repository_stays_over_a_newer_worse_one() {
+        // 2.1.0 installed from fedora at 1: `dnf upgrade` leaves it, though
+        // updates has 2.2.0 at 99.
+        let b = builds(&[("2.1.0-12.fc41", "fedora"), ("2.2.0-3.fc41", "updates")]);
+        let p = priorities(&[("fedora", 1), ("updates", 99)]);
+        let installed = rpm("2.1.0-12.fc41");
+        let r = Ranking::new(&b, &p).with_installed(Some(&installed));
+        assert_eq!(r.choose(&want(&["*"]), &[]), Some(installed.clone()));
+        assert_eq!(r.choose(&want(&[">=2.2"]), &[]), Some(rpm("2.2.0-3.fc41")));
     }
 }

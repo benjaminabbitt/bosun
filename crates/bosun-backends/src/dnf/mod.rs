@@ -299,7 +299,8 @@ impl Index for DnfBackend {
         Ok(Ranking::new(&builds, &Priorities::new()).versions())
     }
 
-    /// dnf's own choice in `want`: by repository priority, then version
+    /// dnf's own choice in `want`: by repository priority, then version, never
+    /// back past the installed build while `want` admits another
     /// ([`priority`]).
     fn select(
         &self,
@@ -309,12 +310,20 @@ impl Index for DnfBackend {
         prefer: &[Version],
     ) -> Result<Selection, PortError> {
         let builds = self.builds(pkg, target)?;
-        let ranking = Ranking::new(&builds, self.priorities()?);
+        let priorities = self.priorities()?;
+        let installed = match self.verify_installed(pkg)? {
+            Installed::Present { version } => version,
+            Installed::Absent => None,
+        };
+        let ranking = Ranking::new(&builds, priorities).with_installed(installed.as_ref());
         let chosen = ranking.choose(want, prefer);
         if let Some(v) = &chosen {
             let name = pkg.purl.native_id();
             let priority = ranking.priority(v);
             debug!(message = logmsg::DNF_CHOSEN, package = %name, version = %v, priority);
+            if installed.as_ref() == Some(v) {
+                debug!(message = logmsg::DNF_INSTALLED_KEPT, package = %name, version = %v);
+            }
             if let Some(newer) = ranking.passed_over(want, v) {
                 debug!(
                     message = logmsg::DNF_NEWER_PASSED_OVER,
@@ -847,7 +856,8 @@ mod tests {
         let fake = Arc::new(
             FakeCommandRunner::new()
                 .with_stdout(DNF5_VIM_PRIORITY)
-                .with_stdout(DNF5_DUMP),
+                .with_stdout(DNF5_DUMP)
+                .with_output(exit(1, "package vim-enhanced is not installed\n")),
         );
         let got = backend(fake.clone(), true)
             .select(&reff("vim-enhanced"), &AMD64, &want("vers:rpm/*"), &[])
@@ -863,6 +873,28 @@ mod tests {
     }
 
     #[test]
+    fn select_never_goes_back_past_the_build_rpm_reports_installed() {
+        // 9.1.1914 installed from updates, then fedora at `priority=1`:
+        // `dnf install vim-enhanced` keeps it.
+        let fake = Arc::new(
+            FakeCommandRunner::new()
+                .with_stdout(DNF5_VIM_PRIORITY)
+                .with_stdout(DNF5_DUMP)
+                .with_stdout("2:9.1.1914-1.fc41\n"),
+        );
+        let got = backend(fake.clone(), true)
+            .select(&reff("vim-enhanced"), &AMD64, &want("vers:rpm/*"), &[])
+            .unwrap();
+        assert_eq!(got.chosen, Some(rpm("2:9.1.1914-1.fc41")));
+        let calls = fake.calls();
+        assert_eq!(calls[2].program, "rpm");
+        assert_eq!(
+            calls[2].args.last().map(String::as_str),
+            Some("vim-enhanced")
+        );
+    }
+
+    #[test]
     fn dnf4_selects_by_the_priorities_its_api_reports() {
         // Rocky 9 with the 9.5 vault at `priority=1`: `dnf install curl`
         // takes the vault's 7.76.1-31.el9 over baseos' newer builds.
@@ -870,7 +902,9 @@ mod tests {
             FakeCommandRunner::new()
                 .with_stdout(DNF4_CURL_PRIORITY)
                 .with_stdout(DNF4_PRIORITIES)
-                .with_stdout(DNF4_CURL_PRIORITY),
+                .with_output(exit(1, "package curl is not installed\n"))
+                .with_stdout(DNF4_CURL_PRIORITY)
+                .with_output(exit(1, "package curl is not installed\n")),
         );
         let mut b = backend(fake.clone(), true);
         b.dnf5 = false;
@@ -886,8 +920,9 @@ mod tests {
         assert_eq!(calls[1].program, "python3");
         assert_eq!(calls[1].args, vec!["-c", priority::DNF4_PRIORITIES]);
         // The priorities are asked once.
-        assert_eq!(calls.len(), 3);
-        assert_eq!(calls[2].args[0], "repoquery");
+        assert_eq!(calls.len(), 5);
+        assert_eq!(calls[2].program, "rpm");
+        assert_eq!(calls[3].args[0], "repoquery");
     }
 
     #[test]

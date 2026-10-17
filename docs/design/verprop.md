@@ -1033,7 +1033,10 @@ ranking of its own that could drift from the installer's (`Index::select`):
   choice: apt defers them only in `upgrade`, and `apt-get install pkg` takes them.
 - **dnf** chooses by repository priority, then version, as `dnf install` does; a
   lower-priority repository's build only when the set admits nothing better (an explicit
-  `name-version` installs it). Excludes and module filtering are already `repoquery`'s.
+  `name-version` installs it). Like apt below priority 1000, it never goes back past the
+  installed build while the set admits another: the installed build (`rpm -q`), when admitted,
+  stays over an older one of better priority, and is kept even when no repository offers it.
+  Excludes and module filtering are already `repoquery`'s.
 - **npm and uv** resolve the set themselves on this machine: npm with its own picker (`npm
   pack --dry-run --json name@<range>`: the `latest` dist-tag when it satisfies, then
   non-deprecated, then engine-compatible versions), uv with `uv pip compile` for the
@@ -1654,6 +1657,7 @@ under a pty on Unix only.
 | V-4 | machine architecture from `uname -m` through the runner (Linux/macOS) or `PROCESSOR_ARCHITEW6432` / `PROCESSOR_ARCHITECTURE` (Windows), not bosun's build target (§5.5) | landed; unit tests on `x86_64`, `aarch64`, `arm64`, `armv7l`, `i686` |
 | V-5 | apk ordering and validity by the probed apk-tools major (2 vs 3); real-tier ordering oracle: each index's versions sorted by bosun, every adjacent pair confirmed by `dpkg --compare-versions` / `rpm.vercmp` / `apk version -t`, plus conformance pairs | landed; 0 disagreements: Debian 13 23,276 pairs, Debian 12 21,410, Fedora 41 22,394, Rocky 9 2,800, Alpine 3.20 (apk-tools 2.14.4) 4,921, Alpine 3.23 (3.0.8) 5,282 |
 | TV-6 | system state without elevation: `read` takes its shared lock through the lock file opened read-only; state the user may not read (`PortError::StateDenied`) is left out of a run without elevation, its packages skipped, warned once, never locked or written; elevated runs fail on it as before | landed; real tier in `debian:13`: elevated install, then a non-root `prune` / `status` read it; with the state 0600 a non-root `prune` warns and leaves it untouched |
+| TV-7 | dnf never goes back past the installed build: `select` asks `rpm -q`, ranks builds behind it last, and keeps it, admitted, when no repository offers it | landed; real tier in `fedora:41` (wget2 2.2.0 kept with fedora's 2.1.0 at priority 1 after `upgrade`) and `rockylinux:9` (unzip 6.0-60.el9_8 kept over the 9.5 vault's 6.0-58.el9_5 at priority 1); red without the installed build: a downgrade was planned |
 
 **First real-host smoke run (2026-10-14, release build, Debian 13, read-only `--plan` and
 `lock` in a scratch dir).** `backends` found apt 3.0.3, cargo 1.96.1 and github-release; jq
@@ -1769,6 +1773,16 @@ bookworm-backports and pin files, apt 2.6, and `ubuntu:24.04`, apt 2.8.3):
   repository configuration: ========` header then `priority = N`); dnf4 has no command that
   does, so its Python API is asked (`dnf.Base().read_all_repos()`, `repo.priority`), which
   works unprivileged.
+- The installed build (checked 2026-10-17, `fedora:41` dnf5 and `rockylinux:9` dnf4): with
+  wget2 2.2.0 installed from updates and fedora (2.1.0) raised to priority 1, `dnf install
+  wget2` says it is already installed and `dnf upgrade` does nothing; only `dnf distro-sync`
+  takes 2.1.0. The same holds when no enabled repository offers the installed build (updates,
+  or baseos, disabled), and for unzip 6.0-60.el9_8 against the 9.5 vault's 6.0-58.el9_5 at
+  priority 1. With 2.1.0 installed from fedora at 1, `dnf upgrade` leaves it though updates has
+  2.2.0. dnf4's `install` of an installed package takes a newer build when one is offered
+  (6.0-58 → 6.0-60 with the vault gone); dnf5's says it is installed. So bosun's choice ranks
+  builds behind the installed one last, and the installed one, admitted but offered nowhere,
+  below any offered build newer than it.
 - Installed: `rpm -q --queryformat '%|EPOCH?{%{EPOCH}:}:{}|%{VERSION}-%{RELEASE}\n' <name>`;
   exit 1 with `package <name> is not installed` on stdout means absent; several lines
   (installonly packages) take the newest.

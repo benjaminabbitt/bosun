@@ -479,6 +479,12 @@ fn reports(w: &mut RealWorld, needle: String) {
     assert!(all.contains(&needle), "output:\n{all}");
 }
 
+#[then(expr = "it does not report {string}")]
+fn does_not_report(w: &mut RealWorld, needle: String) {
+    let all = format!("{}{}", w.stdout, w.stderr);
+    assert!(!all.contains(&needle), "output:\n{all}");
+}
+
 #[then("it reports changes pending")]
 fn changes_pending(w: &mut RealWorld) {
     assert_exit(w, 2);

@@ -380,6 +380,84 @@ Feature: real backends against a disposable container
     Then it succeeds
     And rpm reports unzip not installed
 
+  # dnf never goes back past the installed build: with fedora raised to
+  # priority 1, `dnf install wget2` keeps updates' 2.2.0 over fedora's 2.1.0,
+  # and so does bosun's choice when `upgrade` resolves the spec afresh.
+  @dnf5
+  Scenario: dnf5 keeps the installed build over an older one of better priority
+    Given the dnf index is refreshed
+    And the system state is clean and dnf has no wget2
+    And the manifest:
+      """
+      version: 2
+      packages:
+        - name: wget2
+          spec: ">=2.2"
+          install:
+            linux:fedora: {backend: dnf}
+      """
+    When I run `bosun install . --yes --scope system`
+    Then it succeeds
+    And rpm reports wget2 at 2.2.0-3.fc41
+    Given the dnf repository fedora has priority 1
+    When the manifest becomes:
+      """
+      version: 2
+      packages:
+        - name: wget2
+          spec: "*"
+          install:
+            linux:fedora: {backend: dnf}
+      """
+    And I run `bosun upgrade`
+    Then it succeeds
+    When I run `bosun install . --yes --scope system`
+    Then it succeeds
+    And it does not report "downgrade"
+    And rpm reports wget2 at 2.2.0-3.fc41
+    When the manifest is deleted
+    And I run `bosun prune --yes --scope system`
+    Then it succeeds
+    And rpm reports wget2 not installed
+
+  # Rocky 9 (dnf4): baseos' unzip 6.0-60.el9_8 installed, then the 9.5 vault
+  # at priority 1 offering 6.0-58.el9_5.
+  @dnf-3
+  Scenario: dnf4 keeps the installed build over an older one of better priority
+    Given the system state is clean and dnf has no unzip
+    And the manifest:
+      """
+      version: 2
+      packages:
+        - name: unzip
+          spec: ">=6.0-59"
+          install:
+            linux:rhel: {backend: dnf}
+      """
+    When I run `bosun install . --yes --scope system`
+    Then it succeeds
+    And rpm reports unzip at 6.0-60.el9_8
+    Given a dnf repository vault95 at "https://dl.rockylinux.org/vault/rocky/9.5/BaseOS/x86_64/os/" with priority 1
+    When the manifest becomes:
+      """
+      version: 2
+      packages:
+        - name: unzip
+          spec: "*"
+          install:
+            linux:rhel: {backend: dnf}
+      """
+    And I run `bosun upgrade`
+    Then it succeeds
+    When I run `bosun install . --yes --scope system`
+    Then it succeeds
+    And it does not report "downgrade"
+    And rpm reports unzip at 6.0-60.el9_8
+    When the manifest is deleted
+    And I run `bosun prune --yes --scope system`
+    Then it succeeds
+    And rpm reports unzip not installed
+
   @dnf-3
   Scenario: dnf4 without the versionlock plugin installs an exact spec unheld and says so
     Given the dnf index is refreshed

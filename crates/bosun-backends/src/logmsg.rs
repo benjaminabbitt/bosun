@@ -169,3 +169,7 @@ pub const APT_STOCK_SOURCES: &str =
 /// bosun's reading of the mirrors does not.
 pub const APT_PINS_IGNORED: &str =
     "the target pins apt packages (preferences), which are applied only when apt-get is on this machine";
+
+/// dnf keeps the installed build: `dnf install` never goes back past it, and
+/// no repository offers a newer one it would take.
+pub const DNF_INSTALLED_KEPT: &str = "dnf keeps the installed build within the spec";
