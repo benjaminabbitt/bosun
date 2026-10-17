@@ -251,6 +251,12 @@ pub struct RenderMachine {
     /// `ubuntu@noble`, `fedora@fedora-41`).
     #[arg(long)]
     pub distro: Option<String>,
+    /// The families `--distro` is like, comma-separated, as its os-release
+    /// `ID_LIKE` says (`--like debian` for Ubuntu); with none, only
+    /// `--distro`'s own selectors match. An image's or root filesystem's
+    /// families come from its os-release.
+    #[arg(long, requires = "distro", value_delimiter = ',')]
+    pub like: Vec<String>,
     /// The target's C library (`gnu`, `musl`, `gnu@2.36`); without it, libc
     /// selectors don't match.
     #[arg(long)]

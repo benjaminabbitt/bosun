@@ -36,6 +36,8 @@ pub struct Request {
     pub from: Option<From>,
     /// `--distro`, as written.
     pub distro: Option<String>,
+    /// `--like`: the families `--distro` is like.
+    pub like: Vec<String>,
     /// `--libc`, as written.
     pub libc: Option<String>,
     /// `--installer`, the preferred order.
@@ -45,7 +47,11 @@ pub struct Request {
 /// The manifest rendered for each requested target, with the targets in the
 /// order asked.
 pub fn rendered(req: Request) -> Result<(Vec<Target>, Rendered), CliError> {
-    let flag_distro = req.distro.as_deref().map(parse_distro).transpose()?;
+    let flag_distro = req
+        .distro
+        .as_deref()
+        .map(|d| parse_distro(d, &req.like))
+        .transpose()?;
     let libc = req.libc.as_deref().map(parse_libc).transpose()?;
     let (os, arch) = env::this_platform()?;
     let here = Target::Platform { os, arch };
@@ -254,36 +260,33 @@ fn parse_target(s: &str) -> Result<Target, CliError> {
     }
 }
 
-/// The families a distro is like, as its os-release `ID_LIKE` says, for the
-/// distros bosun knows (§5.4); none for the rest.
-fn id_like(id: &str) -> Vec<String> {
-    let like: &[&str] = match id {
-        "ubuntu" => &["debian"],
-        "linuxmint" | "pop" => &["ubuntu", "debian"],
-        "rhel" | "amzn" => &["fedora"],
-        "centos" => &["rhel", "fedora"],
-        "rocky" | "almalinux" => &["rhel", "centos", "fedora"],
-        _ => &[],
-    };
-    like.iter().map(|s| s.to_string()).collect()
+/// A distro or family id as `--distro` and `--like` take it.
+fn token(t: &str) -> bool {
+    !t.is_empty() && !t.contains(['@', ':', '/', ' '])
 }
 
 /// `--distro <id>[@<release>]`: the distro's `ID`, and the release as its
 /// packages' purl spells it (§5.4), so `debian@bookworm` is the codename and
-/// `fedora@fedora-41` is `VERSION_ID` 41.
-fn parse_distro(s: &str) -> Result<Distro, CliError> {
+/// `fedora@fedora-41` is `VERSION_ID` 41. It is like the families `like`
+/// names (`--like`, its os-release `ID_LIKE`), and no others.
+fn parse_distro(s: &str, like: &[String]) -> Result<Distro, CliError> {
     let bad = || CliError::Usage(format!("{}: {s:?}", errmsg::RENDER_BAD_DISTRO));
     let (id, release) = match s.split_once('@') {
         Some((id, release)) => (id, Some(release)),
         None => (s, None),
     };
-    let token = |t: &str| !t.is_empty() && !t.contains(['@', ':', '/', ' ']);
     if !token(id) || !release.is_none_or(token) {
         return Err(bad());
     }
+    if let Some(family) = like.iter().find(|f| !token(f)) {
+        return Err(CliError::Usage(format!(
+            "{}: {family:?}",
+            errmsg::RENDER_BAD_LIKE
+        )));
+    }
     Ok(Distro {
         id: id.to_string(),
-        id_like: id_like(id),
+        id_like: like.to_vec(),
         version_id: release
             .and_then(|r| r.strip_prefix(&format!("{id}-")))
             .map(str::to_string),
@@ -322,33 +325,35 @@ mod tests {
 
     #[test]
     fn a_distro_is_its_id_and_release_spelled_for_both_package_types() {
-        let d = parse_distro("debian@bookworm").unwrap();
+        let d = parse_distro("debian@bookworm", &[]).unwrap();
         assert_eq!(d.id, "debian");
         assert!(d.id_like.is_empty());
         assert_eq!(d.release("deb").as_deref(), Some("bookworm"));
         assert_eq!(d.version_id, None);
 
-        let f = parse_distro("fedora@fedora-41").unwrap();
+        let f = parse_distro("fedora@fedora-41", &[]).unwrap();
         assert_eq!(f.version_id.as_deref(), Some("41"));
         assert_eq!(f.release("rpm").as_deref(), Some("fedora-41"));
 
-        let bare = parse_distro("alpine").unwrap();
+        let bare = parse_distro("alpine", &[]).unwrap();
         assert_eq!((bare.version_codename, bare.version_id), (None, None));
     }
 
     #[test]
-    fn a_known_distro_is_like_its_families() {
-        assert!(parse_distro("ubuntu@noble")
+    fn a_distro_is_like_the_families_given_and_no_others() {
+        let like = |l: &[&str]| -> Vec<String> { l.iter().map(|s| s.to_string()).collect() };
+        let mint = parse_distro("linuxmint@wilma", &like(&["ubuntu", "debian"])).unwrap();
+        assert_eq!(mint.id_like, vec!["ubuntu", "debian"]);
+        assert!(mint.satisfies_family("debian"));
+        assert!(!parse_distro("ubuntu@noble", &[])
             .unwrap()
             .satisfies_family("debian"));
-        assert_eq!(id_like("linuxmint"), vec!["ubuntu", "debian"]);
-        assert_eq!(id_like("pop"), vec!["ubuntu", "debian"]);
-        assert_eq!(id_like("rhel"), vec!["fedora"]);
-        assert_eq!(id_like("amzn"), vec!["fedora"]);
-        assert_eq!(id_like("centos"), vec!["rhel", "fedora"]);
-        assert_eq!(id_like("rocky"), vec!["rhel", "centos", "fedora"]);
-        assert_eq!(id_like("almalinux"), vec!["rhel", "centos", "fedora"]);
-        assert!(id_like("arch").is_empty());
+        for bad in ["", "linux:debian", "a b", "x@y", "a/b"] {
+            let err = parse_distro("kali", &like(&["debian", bad]))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(errmsg::RENDER_BAD_LIKE), "{bad:?}: {err}");
+        }
     }
 
     #[test]
@@ -360,8 +365,9 @@ mod tests {
             "debian@a@b",
             "linux:debian",
             "deb ian",
+            "debian@a/b",
         ] {
-            let err = parse_distro(bad).unwrap_err().to_string();
+            let err = parse_distro(bad, &[]).unwrap_err().to_string();
             assert!(err.contains(errmsg::RENDER_BAD_DISTRO), "{bad:?}: {err}");
         }
     }

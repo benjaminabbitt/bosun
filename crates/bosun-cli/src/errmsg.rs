@@ -34,3 +34,6 @@ pub const RENDER_NO_ENGINE: &str =
 
 /// `render --image` could not copy the image's files out.
 pub const RENDER_IMAGE: &str = "could not read the target image";
+
+/// `--like` was given something that isn't a distro family id.
+pub const RENDER_BAD_LIKE: &str = "--like takes distro ids, comma-separated (ubuntu,debian)";

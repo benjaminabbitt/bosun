@@ -76,3 +76,32 @@ Feature: render reads the target machine from its image
     When I run `bosun render env . --image debian:12 --rootfs target`
     Then it refuses the command line
     And it reports "--rootfs"
+
+  Scenario: the families the target is like come from its os-release
+    Given Ubuntu noble lists jq 1.7.1-3build1 for amd64
+    And the target's file etc/os-release:
+      """
+      ID=pop
+      ID_LIKE="ubuntu debian"
+      VERSION_ID="24.04"
+      VERSION_CODENAME=noble
+      """
+    And the target's file etc/apt/sources.list.d/debian.sources:
+      """
+      Types: deb
+      URIs: http://archive.ubuntu.com/ubuntu
+      Suites: noble
+      Components: main
+      """
+    And the manifest:
+      """
+      version: 2
+      packages:
+        - name: jq
+          spec: "*"
+          install:
+            linux:ubuntu: {backend: apt}
+      """
+    When I run `bosun render env . --target linux/amd64 --rootfs target`
+    Then it succeeds
+    And it says "JQ_VERSION=1.7.1-3build1"

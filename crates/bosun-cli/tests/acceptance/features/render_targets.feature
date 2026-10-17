@@ -119,12 +119,23 @@ Feature: render resolves versions for a machine bosun isn't running on
     Then it succeeds
     And it says "JQ_VERSION=1.6-2.1+deb12u3"
 
-  Scenario: an Ubuntu release is like Debian
+  Scenario: a distro is like the families --like names, as its os-release says
     Given Ubuntu noble lists jq 1.7.1-3build1 for amd64
     And Ubuntu noble-updates lists jq 1.7.1-3ubuntu0.24.04.1 for amd64
-    When I run `bosun render env . --target linux/amd64 --distro ubuntu@noble`
+    When I run `bosun render env . --target linux/amd64 --distro ubuntu@noble --like debian`
     Then it succeeds
     And it says "JQ_VERSION=1.7.1-3ubuntu0.24.04.1"
+    When I run `bosun render env . --target linux/amd64 --distro ubuntu@noble`
+    Then it succeeds
+    And it does not say "JQ_"
+
+  Scenario: --like describes the --distro given
+    When I run `bosun render env . --target linux/amd64 --like debian`
+    Then it refuses the command line
+    And it reports "--distro"
+    When I run `bosun render env . --target linux/amd64 --distro kali --like debian,linux:x`
+    Then it fails
+    And it reports "--like takes distro ids"
 
   Scenario: platform-independent backends resolve for the target as they do here
     Given cargo 1.76.0 is available

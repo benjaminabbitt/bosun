@@ -235,6 +235,7 @@ fn render_command(style: &RenderStyle, installer: &[String]) -> Result<i32, CliE
         targets: t.target.iter().cloned().collect(),
         from: from(&t.machine),
         distro: t.machine.distro.clone(),
+        like: t.machine.like.clone(),
         libc: t.machine.libc.clone(),
         installer: installer.to_vec(),
     };
@@ -253,6 +254,7 @@ fn render_command(style: &RenderStyle, installer: &[String]) -> Result<i32, CliE
                 targets: t.targets.clone(),
                 from: from(&t.machine),
                 distro: t.machine.distro.clone(),
+                like: t.machine.like.clone(),
                 libc: t.machine.libc.clone(),
                 installer: installer.to_vec(),
             };
