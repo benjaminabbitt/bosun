@@ -20,3 +20,15 @@ pub const RENDER_NO_LIBC: &str =
 /// distro selectors don't match there.
 pub const RENDER_NO_DISTRO: &str =
     "the target's distro was not given (--distro), so distro selectors don't match it";
+
+/// `render` reads the target from an image's files, copied out with a
+/// container engine.
+pub const RENDER_FROM_IMAGE: &str =
+    "reading the target's os-release and apt sources from the image";
+
+/// `render` reads the target from a root filesystem directory.
+pub const RENDER_FROM_ROOTFS: &str =
+    "reading the target's os-release and apt sources from the root filesystem";
+
+/// A path render copies out of an image is not in it.
+pub const RENDER_IMAGE_LACKS: &str = "the image has no such path; left out";

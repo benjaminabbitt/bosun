@@ -127,3 +127,9 @@ pub const UV_NO_MATCH: &str = "uv resolves no version in the spec";
 /// A uv tool installed from a path or URL, not PyPI, which bosun installs
 /// from; it is left out of the export.
 pub const NOT_FROM_PYPI: &str = "uv tool not from PyPI left out of the export";
+
+/// A source list line or stanza bosun could not read; apt would refuse it.
+pub const APT_SOURCE_SKIPPED: &str = "unreadable apt source entry; skipped";
+
+/// An `http://` mirror from the target's sources is read over HTTPS.
+pub const APT_HTTPS: &str = "reading the apt mirror over HTTPS";

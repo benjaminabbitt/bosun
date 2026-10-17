@@ -26,3 +26,11 @@ pub const RENDER_BAD_DISTRO: &str =
 
 /// `--libc` is not `<family>[@<version>]`.
 pub const RENDER_BAD_LIBC: &str = "--libc takes gnu or musl, optionally @<version> (gnu@2.36)";
+
+/// `render --image` found no container engine to copy the image's files
+/// out with.
+pub const RENDER_NO_ENGINE: &str =
+    "render --image needs a container engine; none of these is on PATH";
+
+/// `render --image` could not copy the image's files out.
+pub const RENDER_IMAGE: &str = "could not read the target image";

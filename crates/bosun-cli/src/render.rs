@@ -8,9 +8,11 @@
 use std::path::{Path, PathBuf};
 
 use bosun_apply::render::{render, Rendered};
+use bosun_backends::apt::remote::TargetRoot;
 use bosun_core::platform::Selector;
 use bosun_core::record::LockDocument;
 use bosun_core::{Distro, Libc, LibcFamily, Manifest, Target};
+use bosun_host::ProcessCommandRunner;
 use bosun_io::manifest_hash;
 use bosun_resolve::{resolve, Host, NotApplicable, Outcome, ResolveError};
 
@@ -19,6 +21,7 @@ use crate::commands::{
 };
 use crate::env::{self, Env, RemoteEnv};
 use crate::error::CliError;
+use crate::target_root::{From, Root};
 use crate::{errmsg, logmsg};
 
 /// What to render, and for which machines.
@@ -27,6 +30,8 @@ pub struct Request {
     pub path: Option<PathBuf>,
     /// The target platforms as written; none means this machine's.
     pub targets: Vec<String>,
+    /// Where the target is read from: an image or a root filesystem.
+    pub from: Option<From>,
     /// `--distro`, as written.
     pub distro: Option<String>,
     /// `--libc`, as written.
@@ -38,7 +43,7 @@ pub struct Request {
 /// The manifest rendered for each requested target, with the targets in the
 /// order asked.
 pub fn rendered(req: Request) -> Result<(Vec<Target>, Rendered), CliError> {
-    let distro = req.distro.as_deref().map(parse_distro).transpose()?;
+    let flag_distro = req.distro.as_deref().map(parse_distro).transpose()?;
     let libc = req.libc.as_deref().map(parse_libc).transpose()?;
     let (os, arch) = env::this_platform()?;
     let here = Target::Platform { os, arch };
@@ -51,14 +56,25 @@ pub fn rendered(req: Request) -> Result<(Vec<Target>, Rendered), CliError> {
             .collect::<Result<Vec<_>, _>>()?
     };
     let file = manifest_file(req.path)?;
-    let foreign = |t: &Target| distro.is_some() || libc.is_some() || *t != here;
+    let foreign =
+        |t: &Target| req.from.is_some() || flag_distro.is_some() || libc.is_some() || *t != here;
 
     let mut manifest: Option<Manifest> = None;
     let mut locks: Vec<(Target, LockDocument)> = Vec::new();
     let mut local: Option<Env> = None;
     for target in &targets {
         let lock = if foreign(target) {
-            let remote = remote_env(target, libc.as_ref())?;
+            let root = req
+                .from
+                .as_ref()
+                .map(|from| Root::read(from, target, &ProcessCommandRunner))
+                .transpose()?;
+            let distro = match &root {
+                Some(root) => root.distro(),
+                None => flag_distro.clone(),
+            };
+            let apt_root = root.as_ref().and_then(|r| r.apt(distro.as_ref()));
+            let remote = remote_env(target, libc.as_ref(), apt_root)?;
             let m = loaded(&mut manifest, || load_checked(remote.option_keys(), &file))?;
             if libc.is_none() && has_selector(m, |s| s.libc().is_some()) {
                 tracing::warn!(message = logmsg::RENDER_NO_LIBC, target = %target);
@@ -126,11 +142,15 @@ fn this_machines_lock(
 }
 
 /// The remote indexes for `target`'s platform.
-fn remote_env(target: &Target, libc: Option<&Libc>) -> Result<RemoteEnv, CliError> {
+fn remote_env(
+    target: &Target,
+    libc: Option<&Libc>,
+    root: Option<TargetRoot>,
+) -> Result<RemoteEnv, CliError> {
     let Target::Platform { os, arch } = *target else {
         unreachable!("a render target is a platform; parse_target refuses `any`")
     };
-    env::remote(os, arch, libc.map(|l| l.family))
+    env::remote(os, arch, libc.map(|l| l.family), root)
 }
 
 /// A machine bosun isn't running on: its platform and what the command line

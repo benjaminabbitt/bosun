@@ -14,6 +14,7 @@ mod logmsg;
 mod migrate;
 mod output;
 mod render;
+mod target_root;
 
 use std::io::{IsTerminal, Write};
 
@@ -216,6 +217,15 @@ fn dispatch(cli: &Cli, format: Format) -> Result<i32, CliError> {
     }
 }
 
+/// Where `render` reads the target from, if anywhere: `--image` or `--rootfs`.
+fn from(machine: &cli::RenderMachine) -> Option<target_root::From> {
+    match (&machine.image, &machine.rootfs) {
+        (Some(image), _) => Some(target_root::From::Image(image.clone())),
+        (None, Some(dir)) => Some(target_root::From::Rootfs(dir.clone())),
+        (None, None) => None,
+    }
+}
+
 /// `bosun render` (§8.3). The output style is the subcommand's, whatever
 /// `--format` says: `$(bosun render args)` is piped, which would otherwise
 /// mean JSON.
@@ -223,6 +233,7 @@ fn render_command(style: &RenderStyle, installer: &[String]) -> Result<i32, CliE
     let one = |t: &cli::RenderTarget| render::Request {
         path: t.path.clone(),
         targets: t.target.iter().cloned().collect(),
+        from: from(&t.machine),
         distro: t.machine.distro.clone(),
         libc: t.machine.libc.clone(),
         installer: installer.to_vec(),
@@ -240,6 +251,7 @@ fn render_command(style: &RenderStyle, installer: &[String]) -> Result<i32, CliE
             let req = render::Request {
                 path: t.path.clone(),
                 targets: t.targets.clone(),
+                from: from(&t.machine),
                 distro: t.machine.distro.clone(),
                 libc: t.machine.libc.clone(),
                 installer: installer.to_vec(),

@@ -234,10 +234,19 @@ pub struct RenderTargets {
     pub machine: RenderMachine,
 }
 
-/// The facts of a target machine bosun isn't running on. Either one makes
-/// the target another machine, resolved through remote indexes.
+/// The facts of a target machine bosun isn't running on. Any one makes the
+/// target another machine, resolved through remote indexes.
 #[derive(clap::Args)]
 pub struct RenderMachine {
+    /// The target image (`debian:12`): its os-release gives the distro, and
+    /// its apt sources the repositories apt versions come from. Its files are
+    /// copied out with podman or docker; the image is not run.
+    #[arg(long, conflicts_with_all = ["rootfs", "distro"])]
+    pub image: Option<String>,
+    /// The target's root filesystem, as a directory: read as `--image` reads
+    /// an image's files.
+    #[arg(long, conflicts_with = "distro")]
+    pub rootfs: Option<PathBuf>,
     /// The target's distro and release, in selector form (`debian@bookworm`,
     /// `ubuntu@noble`, `fedora@fedora-41`).
     #[arg(long)]

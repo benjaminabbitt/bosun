@@ -126,14 +126,18 @@ fn a_release_is_for_the_suite_it_names_by_suite_or_codename() {
 
 // ---- package indexes ---------------------------------------------------------
 
+fn listed<'a>(available: &'a Available, name: &str) -> Vec<&'a str> {
+    available[name].iter().map(|(v, _)| v.as_str()).collect()
+}
+
 #[test]
 fn a_real_package_index_gives_each_package_its_version() {
     let mut available = Available::new();
-    add_package_versions(&decompressed(BOOKWORM_XZ), &mut available);
-    assert_eq!(available["jq"], vec!["1.6-2.1+deb12u2"]);
-    assert_eq!(available["fd-find"], vec!["8.6.0-3"]);
+    add_package_versions(&decompressed(BOOKWORM_XZ), 500, &mut available);
+    assert_eq!(available["jq"], vec![("1.6-2.1+deb12u2".to_string(), 500)]);
+    assert_eq!(listed(&available, "fd-find"), vec!["8.6.0-3"]);
     // Architecture: all packages are in each arch's index.
-    assert_eq!(available["tzdata"], vec!["2026b-0+deb12u1"]);
+    assert_eq!(listed(&available, "tzdata"), vec!["2026b-0+deb12u1"]);
     assert_eq!(available.len(), 5);
 }
 
@@ -141,12 +145,21 @@ fn a_real_package_index_gives_each_package_its_version() {
 fn versions_gather_across_indexes_once_each() {
     let mut available = Available::new();
     for xz in [BOOKWORM_XZ, UPDATES_XZ, SECURITY_XZ, SECURITY_XZ] {
-        add_package_versions(&decompressed(xz), &mut available);
+        add_package_versions(&decompressed(xz), 500, &mut available);
     }
     assert_eq!(
-        available["openssl"],
+        listed(&available, "openssl"),
         vec!["3.0.20-1~deb12u2", "3.0.17-1~deb12u2", "3.0.22-1~deb12u1"]
     );
+}
+
+#[test]
+fn a_version_listed_twice_keeps_its_highest_priority() {
+    let mut available = Available::new();
+    add_package_versions("Package: a\nVersion: 1\n", 100, &mut available);
+    add_package_versions("Package: a\nVersion: 1\n", 500, &mut available);
+    add_package_versions("Package: a\nVersion: 1\n", 1, &mut available);
+    assert_eq!(available["a"], vec![("1".to_string(), 500)]);
 }
 
 #[test]
@@ -154,15 +167,42 @@ fn a_stanza_needs_both_package_and_version() {
     let mut available = Available::new();
     add_package_versions(
         "Package: a\nVersion: 1\n\nPackage: b\n\nVersion: 3\n\nPackage: c\nVersion: 2",
+        500,
         &mut available,
     );
     assert_eq!(
         available,
         BTreeMap::from([
-            ("a".to_string(), vec!["1".to_string()]),
-            ("c".to_string(), vec!["2".to_string()]),
+            ("a".to_string(), vec![("1".to_string(), 500)]),
+            ("c".to_string(), vec![("2".to_string(), 500)]),
         ])
     );
+}
+
+#[test]
+fn apt_considers_only_its_highest_priority_versions() {
+    let v = |list: &[(&str, i32)]| -> Vec<(String, i32)> {
+        list.iter().map(|(v, p)| (v.to_string(), *p)).collect()
+    };
+    assert_eq!(
+        candidates(&v(&[("2", 100), ("1", 500), ("1.1", 500)])),
+        vec!["1", "1.1"]
+    );
+    assert_eq!(candidates(&v(&[("2", 100)])), vec!["2"]);
+    assert_eq!(candidates(&v(&[("2", 1), ("1", 0)])), vec!["2"]);
+    assert_eq!(candidates(&v(&[("1", 0)])), vec!["1"]);
+    assert!(candidates(&v(&[("1", -1)])).is_empty());
+    assert!(candidates(&[]).is_empty());
+}
+
+#[test]
+fn a_release_gives_apts_default_priority() {
+    let r = |text: &str| parse_release(text).unwrap().priority();
+    assert_eq!(r("Suite: stable\n"), 500);
+    assert_eq!(r("NotAutomatic: yes\nButAutomaticUpgrades: yes\n"), 100);
+    assert_eq!(r("NotAutomatic: yes\n"), 1);
+    assert_eq!(r("NotAutomatic: no\nButAutomaticUpgrades: yes\n"), 500);
+    assert_eq!(r("NotAutomatic: yes\nButAutomaticUpgrades: no\n"), 1);
 }
 
 // ---- sources -----------------------------------------------------------------
@@ -170,13 +210,17 @@ fn a_stanza_needs_both_package_and_version() {
 #[test]
 fn debian_reads_main_from_its_release_updates_and_security_suites() {
     let s = default_sources("debian", "bookworm", Arch::Arm64).unwrap();
-    assert_eq!(s.components, vec!["main"]);
     assert_eq!(
         s.suites,
         vec![
-            suite(DEBIAN, "bookworm".to_string(), true),
-            suite(DEBIAN, "bookworm-updates".to_string(), false),
-            suite(DEBIAN_SECURITY, "bookworm-security".to_string(), false),
+            suite(DEBIAN, "bookworm".to_string(), &["main"], true),
+            suite(DEBIAN, "bookworm-updates".to_string(), &["main"], false),
+            suite(
+                DEBIAN_SECURITY,
+                "bookworm-security".to_string(),
+                &["main"],
+                false
+            ),
         ]
     );
 }
@@ -184,10 +228,10 @@ fn debian_reads_main_from_its_release_updates_and_security_suites() {
 #[test]
 fn ubuntu_reads_four_components_from_the_archive_or_ports() {
     let amd = default_sources("ubuntu", "noble", Arch::Amd64).unwrap();
-    assert_eq!(
-        amd.components,
-        vec!["main", "restricted", "universe", "multiverse"]
-    );
+    assert!(amd
+        .suites
+        .iter()
+        .all(|s| s.components == ["main", "restricted", "universe", "multiverse"]));
     assert_eq!(amd.suites[0].mirror, UBUNTU);
     assert_eq!(amd.suites[1].suite, "noble-updates");
     assert_eq!(amd.suites[2].mirror, UBUNTU_SECURITY);
@@ -199,6 +243,74 @@ fn ubuntu_reads_four_components_from_the_archive_or_ports() {
 #[test]
 fn a_distro_without_a_known_mirror_has_no_sources() {
     assert_eq!(default_sources("linuxmint", "wilma", Arch::Amd64), None);
+}
+
+#[test]
+fn a_suite_is_under_dists_and_a_flat_repository_at_its_path() {
+    let s = |suite: &str| Suite {
+        mirror: "https://m.example/r".to_string(),
+        suite: suite.to_string(),
+        components: vec!["main".to_string(), "contrib".to_string()],
+        required: true,
+    };
+    assert_eq!(s("stable").dist_url(), "https://m.example/r/dists/stable");
+    assert_eq!(s("./").dist_url(), "https://m.example/r");
+    assert_eq!(s("/").dist_url(), "https://m.example/r");
+    assert_eq!(s("sub/").dist_url(), "https://m.example/r/sub");
+    assert_eq!(s("./sub/").dist_url(), "https://m.example/r/sub");
+    assert_eq!(
+        s("stable").index_dirs(Arch::Arm64),
+        vec!["main/binary-arm64", "contrib/binary-arm64"]
+    );
+    assert_eq!(s("./").index_dirs(Arch::Arm64), vec![""]);
+}
+
+#[test]
+fn http_mirrors_are_read_over_https() {
+    assert_eq!(
+        https("http://deb.debian.org/debian"),
+        "https://deb.debian.org/debian"
+    );
+    assert_eq!(https("https://a.example"), "https://a.example");
+    assert_eq!(https("file:/srv/repo"), "file:/srv/repo");
+}
+
+#[test]
+fn a_targets_entries_give_its_suites_for_the_arch() {
+    let entries = sources::parse_one_line(
+        "\
+deb http://archive.ubuntu.com/ubuntu/ jammy main restricted
+deb http://archive.ubuntu.com/ubuntu/ jammy universe main
+deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy main
+deb [arch=amd64] https://vendor.example/apt stable main
+deb https://flat.example/repo ./
+",
+    );
+    let amd = sources_from(&entries, Arch::Amd64);
+    assert_eq!(
+        amd.suites,
+        vec![
+            suite(
+                "https://archive.ubuntu.com/ubuntu",
+                "jammy".to_string(),
+                &["main", "restricted", "universe"],
+                true
+            ),
+            suite(
+                "https://vendor.example/apt",
+                "stable".to_string(),
+                &["main"],
+                true
+            ),
+            suite("https://flat.example/repo", "./".to_string(), &[], true),
+        ]
+    );
+    let arm = sources_from(&entries, Arch::Arm64);
+    assert_eq!(
+        arm.suites[1].mirror,
+        "https://ports.ubuntu.com/ubuntu-ports"
+    );
+    assert_eq!(arm.suites.len(), 3);
 }
 
 #[test]
@@ -717,4 +829,145 @@ fn logged(f: impl FnOnce()) -> String {
     CAPTURED.with(|c| c.borrow_mut().clear());
     f();
     CAPTURED.with(|c| String::from_utf8(c.take()).unwrap())
+}
+
+// ---- the target's root -------------------------------------------------------
+
+const VENDOR: &str = "https://vendor.example/apt";
+
+/// A root whose `etc/apt` holds `sources.list.d/<name>` with `text`.
+fn root_with(name: &str, text: &str) -> tempfile::TempDir {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("etc/apt/sources.list.d");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join(name), text).unwrap();
+    root
+}
+
+fn rooted(fetcher: &Arc<FakeHttpFetcher>, cache: &Path, root: &Path) -> RemoteAptIndex {
+    index(fetcher, cache).with_root(Some(TargetRoot {
+        distro: "debian".to_string(),
+        codename: "bookworm".to_string(),
+        path: root.to_path_buf(),
+    }))
+}
+
+/// A flat repository at `VENDOR` listing `packages` in its `Packages.gz`,
+/// with `release` fields before its SHA256 section.
+fn flat_vendor(fetcher: FakeHttpFetcher, release: &str, packages: &str) -> FakeHttpFetcher {
+    let gz = gzip(packages.as_bytes());
+    let inrelease = format!(
+        "{release}SHA256:\n {} {} Packages.gz\n",
+        hex_sha256(&gz),
+        gz.len()
+    );
+    fetcher
+        .with_body(format!("{VENDOR}/InRelease"), inrelease)
+        .with_body(format!("{VENDOR}/Packages.gz"), gz)
+}
+
+#[test]
+fn the_targets_own_sources_are_read_and_its_vendor_repositories_with_them() {
+    let root = root_with(
+        "debian.sources",
+        "Types: deb\nURIs: http://deb.debian.org/debian\nSuites: bookworm\nComponents: main\n",
+    );
+    fs::write(
+        root.path().join("etc/apt/sources.list.d/vendor.list"),
+        format!("deb [signed-by=/etc/apt/keyrings/v.gpg] {VENDOR} ./\n"),
+    )
+    .unwrap();
+    let fetcher = Arc::new(flat_vendor(
+        bookworm_mirror(),
+        "Origin: vendor\n",
+        "Package: tool\nVersion: 2.0-1\n\nPackage: jq\nVersion: 1.7.1-9vendor\n",
+    ));
+    let dir = tempfile::tempdir().unwrap();
+    let idx = rooted(&fetcher, dir.path(), root.path());
+    assert_eq!(
+        versions(&idx, "pkg:deb/debian/tool?arch=amd64&distro=bookworm"),
+        vec!["2.0-1"]
+    );
+    // Only the suites the root lists: the release, not its updates or security.
+    assert_eq!(versions(&idx, JQ), vec!["1.6-2.1+deb12u2", "1.7.1-9vendor"]);
+    let urls: Vec<String> = fetcher.calls().iter().map(|c| c.url.clone()).collect();
+    assert!(urls.iter().all(|u| u.starts_with("https://")), "{urls:?}");
+    assert!(
+        !urls.iter().any(|u| u.contains("bookworm-updates")),
+        "{urls:?}"
+    );
+}
+
+#[test]
+fn a_suite_apt_picks_only_when_asked_offers_only_what_nothing_else_does() {
+    let root = root_with(
+        "a.list",
+        &format!("deb https://deb.debian.org/debian bookworm main\ndeb {VENDOR} ./\n"),
+    );
+    let fetcher = Arc::new(flat_vendor(
+        bookworm_mirror(),
+        "NotAutomatic: yes\nButAutomaticUpgrades: yes\n",
+        "Package: jq\nVersion: 9.9\n\nPackage: only-here\nVersion: 1.0\n",
+    ));
+    let dir = tempfile::tempdir().unwrap();
+    let idx = rooted(&fetcher, dir.path(), root.path());
+    assert_eq!(versions(&idx, JQ), vec!["1.6-2.1+deb12u2"]);
+    assert_eq!(
+        versions(&idx, "pkg:deb/debian/only-here?arch=amd64&distro=bookworm"),
+        vec!["1.0"]
+    );
+}
+
+#[test]
+fn a_root_with_no_source_for_the_arch_is_an_error() {
+    let root = root_with(
+        "a.list",
+        "deb [arch=arm64] https://deb.debian.org/debian bookworm main\n",
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let err = query_err(
+        &rooted(&Arc::new(bookworm_mirror()), dir.path(), root.path()),
+        JQ,
+    );
+    assert!(err.contains(errmsg::APT_NO_SOURCES), "{err}");
+    assert!(err.ends_with("for amd64"), "{err}");
+}
+
+#[test]
+fn another_release_than_the_roots_reads_a_stock_images_sources() {
+    let root = root_with("a.list", &format!("deb {VENDOR} ./\n"));
+    let dir = tempfile::tempdir().unwrap();
+    let idx = index(&Arc::new(bookworm_mirror()), dir.path()).with_root(Some(TargetRoot {
+        distro: "debian".to_string(),
+        codename: "trixie".to_string(),
+        path: root.path().to_path_buf(),
+    }));
+    assert_eq!(versions(&idx, JQ).len(), 2);
+    let ubuntu = index(&Arc::new(bookworm_mirror()), dir.path()).with_root(Some(TargetRoot {
+        distro: "ubuntu".to_string(),
+        codename: "bookworm".to_string(),
+        path: root.path().to_path_buf(),
+    }));
+    assert_eq!(versions(&ubuntu, JQ).len(), 2);
+}
+
+#[test]
+fn a_flat_repository_is_fetched_by_hash_when_it_offers_it() {
+    let root = root_with("a.list", &format!("deb {VENDOR} ./\n"));
+    let gz = gzip(b"Package: jq\nVersion: 1\n");
+    let release = format!(
+        "Acquire-By-Hash: yes\nSHA256:\n {} {} Packages.gz\n",
+        hex_sha256(&gz),
+        gz.len()
+    );
+    let fetcher = Arc::new(
+        FakeHttpFetcher::new()
+            .with_body(format!("{VENDOR}/InRelease"), release)
+            .with_body(format!("{VENDOR}/by-hash/SHA256/{}", hex_sha256(&gz)), gz),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(
+        versions(&rooted(&fetcher, dir.path(), root.path()), JQ),
+        vec!["1"]
+    );
 }

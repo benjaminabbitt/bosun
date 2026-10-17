@@ -86,3 +86,6 @@ pub const APT_DECOMPRESS: &str = "could not decompress the apt package index";
 
 /// The apt index cache could not be read or written.
 pub const APT_CACHE: &str = "apt index cache";
+
+/// The target's root filesystem lists no apt source for the arch.
+pub const APT_NO_SOURCES: &str = "the target's apt lists no sources";

@@ -11,6 +11,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use bosun_apply::{ApplyReport, Driver, HostApplier, Plan};
+use bosun_backends::apt::remote::TargetRoot;
 use bosun_backends::{
     AptFactory, CargoFactory, ChocoFactory, DnfFactory, GithubInstallerFactory,
     GithubPackageFactory, GithubReleaseFactory, NpmFactory, PackageKind, ScoopFactory, UvFactory,
@@ -309,19 +310,26 @@ impl CommandRunner for NoPrograms {
 
 /// The remote indexes for a machine of `os`, `arch` and `libc` (§4.7): over
 /// HTTPS on a real host, over the fixture's canned HTTP under the test seam.
-pub fn remote(os: Os, arch: Arch, libc: Option<LibcFamily>) -> Result<RemoteEnv, CliError> {
+/// apt's reads the sources of `root`'s release from that root.
+pub fn remote(
+    os: Os,
+    arch: Arch,
+    libc: Option<LibcFamily>,
+    root: Option<TargetRoot>,
+) -> Result<RemoteEnv, CliError> {
     match seam()? {
-        Some((fixture, state_dir)) => remote_from_fixture(&fixture, &state_dir, os, arch, libc),
+        Some((fixture, state_dir)) => {
+            remote_from_fixture(&fixture, &state_dir, os, arch, libc, root)
+        }
         None => {
             let fetcher: Arc<dyn HttpFetcher> = Arc::new(UreqHttpFetcher::new());
-            let factories = compiled_in_factories(
+            let factories = factories_for(
                 Arc::new(NoPrograms),
                 fetcher,
                 &home_dir(),
-                os,
-                arch,
-                libc,
+                (os, arch, libc),
                 &host_cache()?,
+                root,
             );
             Ok(remote_env(&factories))
         }
@@ -359,16 +367,16 @@ fn remote_from_fixture(
     os: Os,
     arch: Arch,
     libc: Option<LibcFamily>,
+    root: Option<TargetRoot>,
 ) -> Result<RemoteEnv, CliError> {
     let fx = read_fixture(path)?;
-    let factories = compiled_in_factories(
+    let factories = factories_for(
         Arc::new(NoPrograms),
         canned_fetcher(&fx.http)?,
         &PathBuf::from(state_dir).join("home"),
-        os,
-        arch,
-        libc,
+        (os, arch, libc),
         &PathBuf::from(state_dir).join("cache"),
+        root,
     );
     let mut env = remote_env(&factories);
     for b in fx
@@ -479,6 +487,19 @@ fn compiled_in_factories(
     libc: Option<LibcFamily>,
     cache: &Path,
 ) -> Vec<Box<dyn BackendFactory>> {
+    factories_for(runner, fetcher, home, (os, arch, libc), cache, None)
+}
+
+/// [`compiled_in_factories`] for a machine of that OS, arch and libc whose
+/// root filesystem is `root` (§4.7), when bosun was given it.
+fn factories_for(
+    runner: Arc<dyn CommandRunner>,
+    fetcher: Arc<dyn HttpFetcher>,
+    home: &Path,
+    (os, arch, libc): (Os, Arch, Option<LibcFamily>),
+    cache: &Path,
+    root: Option<TargetRoot>,
+) -> Vec<Box<dyn BackendFactory>> {
     let package = |kind| {
         Box::new(
             GithubPackageFactory::new(
@@ -494,7 +515,9 @@ fn compiled_in_factories(
     };
     vec![
         Box::new(
-            AptFactory::new(runner.clone()).with_remote_index(fetcher.clone(), cache.join("apt")),
+            AptFactory::new(runner.clone())
+                .with_remote_index(fetcher.clone(), cache.join("apt"))
+                .with_target_root(root),
         ),
         Box::new(DnfFactory::new(runner.clone())),
         Box::new(bosun_backends::ApkFactory::new(runner.clone())),

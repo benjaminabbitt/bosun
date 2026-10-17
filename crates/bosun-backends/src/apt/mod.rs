@@ -28,6 +28,7 @@ use crate::logmsg;
 
 mod policy;
 pub mod remote;
+pub mod sources;
 
 const BACKEND: &str = "apt";
 
@@ -35,6 +36,7 @@ const BACKEND: &str = "apt";
 pub struct AptFactory {
     runner: Arc<dyn CommandRunner>,
     remote: Option<(Arc<dyn HttpFetcher>, PathBuf)>,
+    root: Option<remote::TargetRoot>,
 }
 
 impl AptFactory {
@@ -43,6 +45,7 @@ impl AptFactory {
         AptFactory {
             runner,
             remote: None,
+            root: None,
         }
     }
 
@@ -54,6 +57,13 @@ impl AptFactory {
         cache: PathBuf,
     ) -> AptFactory {
         self.remote = Some((fetcher, cache));
+        self
+    }
+
+    /// Have its remote index read the sources of `root`'s release from
+    /// that root (§4.7) rather than a stock image's.
+    pub fn with_target_root(mut self, root: Option<remote::TargetRoot>) -> AptFactory {
+        self.root = root;
         self
     }
 }
@@ -101,10 +111,10 @@ impl BackendFactory for AptFactory {
 
     fn remote_index(&self) -> Option<Box<dyn Index>> {
         let (fetcher, cache) = self.remote.as_ref()?;
-        Some(Box::new(remote::RemoteAptIndex::new(
-            fetcher.clone(),
-            cache.clone(),
-        )))
+        Some(Box::new(
+            remote::RemoteAptIndex::new(fetcher.clone(), cache.clone())
+                .with_root(self.root.clone()),
+        ))
     }
 }
 

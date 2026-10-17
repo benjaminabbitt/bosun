@@ -29,6 +29,7 @@ use bosun_ports::{HttpFetcher, HttpRequest, Index, PortError};
 use sha2::{Digest, Sha256};
 use tracing::{debug, warn};
 
+use super::sources::{self, SourceEntry};
 use crate::{errmsg, logmsg};
 
 /// How long a fetched `InRelease` is used before it is fetched again. Debian's
@@ -43,35 +44,69 @@ const UBUNTU: &str = "https://archive.ubuntu.com/ubuntu";
 const UBUNTU_SECURITY: &str = "https://security.ubuntu.com/ubuntu";
 const UBUNTU_PORTS: &str = "https://ports.ubuntu.com/ubuntu-ports";
 
-/// One suite on one mirror.
+/// One suite on one mirror, and the components read from it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Suite {
     /// The mirror's base URL (`https://deb.debian.org/debian`).
     pub mirror: String,
-    /// The suite (`bookworm-updates`).
+    /// The suite (`bookworm-updates`), or a flat repository's path (`./`).
     pub suite: String,
+    /// The components (`main`, …); none for a flat repository.
+    pub components: Vec<String>,
     /// Whether a missing suite is an error (the release itself) or skipped
     /// (its updates and security suites, which a release may not have yet).
     pub required: bool,
 }
 
-/// The apt sources of a distro release: its suites and the components read
-/// from each.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Sources {
-    /// The suites, the release's own first.
-    pub suites: Vec<Suite>,
-    /// The components (`main`, …).
-    pub components: Vec<&'static str>,
+impl Suite {
+    /// Whether this is a flat repository: no `dists/`, a path for a suite.
+    pub fn is_flat(&self) -> bool {
+        self.suite.ends_with('/')
+    }
+
+    /// The URL its release file and package indexes are under.
+    pub fn dist_url(&self) -> String {
+        if !self.is_flat() {
+            return format!("{}/dists/{}", self.mirror, self.suite);
+        }
+        let path = self.suite.trim_end_matches('/').trim_start_matches("./");
+        match path {
+            "" | "." => self.mirror.clone(),
+            path => format!("{}/{path}", self.mirror),
+        }
+    }
+
+    /// The directories of its package indexes for `arch`, relative to
+    /// [`Suite::dist_url`]: `<component>/binary-<arch>`, or the top for a
+    /// flat repository.
+    fn index_dirs(&self, arch: Arch) -> Vec<String> {
+        if self.is_flat() {
+            return vec![String::new()];
+        }
+        self.components
+            .iter()
+            .map(|c| format!("{c}/binary-{arch}"))
+            .collect()
+    }
 }
 
-fn suite(mirror: &str, suite: String, required: bool) -> Suite {
+/// The apt sources of a distro release: its suites, the release's own first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Sources {
+    /// The suites.
+    pub suites: Vec<Suite>,
+}
+
+fn suite(mirror: &str, suite: String, components: &[&str], required: bool) -> Suite {
     Suite {
         mirror: mirror.to_string(),
         suite,
+        components: components.iter().map(|c| c.to_string()).collect(),
         required,
     }
 }
+
+const UBUNTU_COMPONENTS: &[&str] = &["main", "restricted", "universe", "multiverse"];
 
 /// The sources a stock container image of `distro` `codename` lists, for
 /// `arch`: the release, its `-updates` and its `-security` suites. Debian's
@@ -79,24 +114,63 @@ fn suite(mirror: &str, suite: String, required: bool) -> Suite {
 /// Backports are left out: apt never picks them unless asked. `None` for a
 /// distro bosun knows no mirror for.
 pub fn default_sources(distro: &str, codename: &str, arch: Arch) -> Option<Sources> {
-    let (main, security, components) = match (distro, arch) {
-        ("debian", _) => (DEBIAN, DEBIAN_SECURITY, vec!["main"]),
-        ("ubuntu", Arch::Amd64) => (UBUNTU, UBUNTU_SECURITY, ubuntu_components()),
-        ("ubuntu", Arch::Arm64) => (UBUNTU_PORTS, UBUNTU_PORTS, ubuntu_components()),
+    let (main, security, components): (_, _, &[&str]) = match (distro, arch) {
+        ("debian", _) => (DEBIAN, DEBIAN_SECURITY, &["main"]),
+        ("ubuntu", Arch::Amd64) => (UBUNTU, UBUNTU_SECURITY, UBUNTU_COMPONENTS),
+        ("ubuntu", Arch::Arm64) => (UBUNTU_PORTS, UBUNTU_PORTS, UBUNTU_COMPONENTS),
         _ => return None,
     };
     Some(Sources {
         suites: vec![
-            suite(main, codename.to_string(), true),
-            suite(main, format!("{codename}-updates"), false),
-            suite(security, format!("{codename}-security"), false),
+            suite(main, codename.to_string(), components, true),
+            suite(main, format!("{codename}-updates"), components, false),
+            suite(security, format!("{codename}-security"), components, false),
         ],
-        components,
     })
 }
 
-fn ubuntu_components() -> Vec<&'static str> {
-    vec!["main", "restricted", "universe", "multiverse"]
+/// `uri` as bosun fetches it: an `http://` mirror is read over HTTPS, since
+/// bosun trusts a release file for being fetched over HTTPS (its signature
+/// is not checked).
+pub fn https(uri: &str) -> String {
+    match uri.strip_prefix("http://") {
+        Some(rest) => format!("https://{rest}"),
+        None => uri.to_string(),
+    }
+}
+
+/// The suites `entries` name for `arch`, in order, each read over HTTPS. An
+/// entry for other architectures is left out; entries naming one suite of
+/// one mirror are read together. Every suite is required: the target's apt
+/// fails its update without it.
+pub fn sources_from(entries: &[SourceEntry], arch: Arch) -> Sources {
+    let arch = arch.to_string();
+    let mut suites: Vec<Suite> = Vec::new();
+    for e in entries.iter().filter(|e| e.applies_to(&arch)) {
+        let mirror = https(&e.uri);
+        if mirror != e.uri {
+            debug!(message = logmsg::APT_HTTPS, uri = %e.uri);
+        }
+        match suites
+            .iter_mut()
+            .find(|s| s.mirror == mirror && s.suite == e.suite)
+        {
+            Some(known) => {
+                for c in &e.components {
+                    if !known.components.contains(c) {
+                        known.components.push(c.clone());
+                    }
+                }
+            }
+            None => suites.push(Suite {
+                mirror,
+                suite: e.suite.clone(),
+                components: e.components.clone(),
+                required: true,
+            }),
+        }
+    }
+    Sources { suites }
 }
 
 /// One file a release lists: its SHA256 and size.
@@ -117,6 +191,10 @@ pub struct Release {
     pub codename: Option<String>,
     /// `Acquire-By-Hash: yes`: files can be fetched by their hash.
     pub by_hash: bool,
+    /// `NotAutomatic: yes` (backports, experimental).
+    pub not_automatic: bool,
+    /// `ButAutomaticUpgrades: yes`.
+    pub but_automatic_upgrades: bool,
     /// The `SHA256` section, by path (`main/binary-amd64/Packages.xz`).
     pub sha256: BTreeMap<String, FileHash>,
 }
@@ -126,6 +204,17 @@ impl Release {
     /// codename (`bookworm`, `bookworm-security`) or by suite (`noble-updates`).
     pub fn is_for(&self, suite: &str) -> bool {
         self.suite.as_deref() == Some(suite) || self.codename.as_deref() == Some(suite)
+    }
+
+    /// The priority apt gives this release's versions with no pin
+    /// (apt_preferences(5)): 1 when `NotAutomatic`, 100 when also
+    /// `ButAutomaticUpgrades`, else 500.
+    pub fn priority(&self) -> i32 {
+        match (self.not_automatic, self.but_automatic_upgrades) {
+            (false, _) => 500,
+            (true, true) => 100,
+            (true, false) => 1,
+        }
     }
 }
 
@@ -186,22 +275,27 @@ pub fn parse_release(text: &str) -> Result<Release, PortError> {
             "Suite" => release.suite = Some(value.to_string()),
             "Codename" => release.codename = Some(value.to_string()),
             "Acquire-By-Hash" => release.by_hash = value == "yes",
+            "NotAutomatic" => release.not_automatic = value == "yes",
+            "ButAutomaticUpgrades" => release.but_automatic_upgrades = value == "yes",
             _ => {}
         }
     }
     Ok(release)
 }
 
-/// Each package's versions in a `Packages` file, added to `into`.
-pub fn add_package_versions(packages: &str, into: &mut BTreeMap<String, Vec<String>>) {
+/// Each package's versions in a `Packages` file of a release whose versions
+/// apt gives `priority`, added to `into`. A version listed more than once
+/// keeps the highest priority, as apt's does.
+pub fn add_package_versions(packages: &str, priority: i32, into: &mut Available) {
     let mut name: Option<&str> = None;
     let mut version: Option<&str> = None;
     for line in packages.lines().chain(std::iter::once("")) {
         if line.is_empty() {
             if let (Some(n), Some(v)) = (name.take(), version.take()) {
                 let versions = into.entry(n.to_string()).or_default();
-                if !versions.iter().any(|known| known == v) {
-                    versions.push(v.to_string());
+                match versions.iter_mut().find(|(known, _)| known == v) {
+                    Some((_, p)) => *p = (*p).max(priority),
+                    None => versions.push((v.to_string(), priority)),
                 }
             }
             name = None;
@@ -254,15 +348,48 @@ fn fresh(path: &Path, ttl: Duration) -> bool {
         .is_some_and(|age| age < ttl)
 }
 
-/// Package name → its versions across a release's suites and components.
-type Available = BTreeMap<String, Vec<String>>;
+/// Package name → its versions across a release's suites and components,
+/// each with the priority apt gives it.
+pub type Available = BTreeMap<String, Vec<(String, i32)>>;
+
+/// The versions apt would consider installing, with nothing installed: those
+/// of the highest priority among `versions`, none when that is negative.
+pub fn candidates(versions: &[(String, i32)]) -> Vec<&str> {
+    let Some(top) = versions.iter().map(|(_, p)| *p).max() else {
+        return Vec::new();
+    };
+    if top < 0 {
+        return Vec::new();
+    }
+    versions
+        .iter()
+        .filter(|(_, p)| *p == top)
+        .map(|(v, _)| v.as_str())
+        .collect()
+}
+
+/// The machine a render targets, read from its root filesystem (an image's
+/// files, or a directory): the release it is, and the root holding its
+/// `etc/apt`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TargetRoot {
+    /// The distro's `ID` (`debian`).
+    pub distro: String,
+    /// Its `VERSION_CODENAME` (`bookworm`).
+    pub codename: String,
+    /// The root directory.
+    pub path: PathBuf,
+}
 
 /// apt's [`Index`] over a release's mirror (§4.7). The release comes from the
 /// identity: the purl's namespace is the distro (`debian`), its `distro`
-/// qualifier the codename, its `arch` qualifier the architecture.
+/// qualifier the codename, its `arch` qualifier the architecture. Its
+/// sources are the target root's when it is that release, else the ones a
+/// stock image of the release lists.
 pub struct RemoteAptIndex {
     fetcher: Arc<dyn HttpFetcher>,
     cache: PathBuf,
+    root: Option<TargetRoot>,
     /// Each release read this run, by distro, codename and arch.
     releases: RefCell<BTreeMap<(String, String, Arch), Rc<Available>>>,
     /// Set by `refresh`: fetch every `InRelease` again, however fresh.
@@ -275,8 +402,38 @@ impl RemoteAptIndex {
         RemoteAptIndex {
             fetcher,
             cache,
+            root: None,
             releases: RefCell::new(BTreeMap::new()),
             refetch: Cell::new(false),
+        }
+    }
+
+    /// Read the sources of `root`'s release from its `etc/apt`.
+    pub fn with_root(mut self, root: Option<TargetRoot>) -> RemoteAptIndex {
+        self.root = root;
+        self
+    }
+
+    /// The sources of `distro` `codename` for `arch`: the target root's when
+    /// it is that release, else a stock image's.
+    fn sources(&self, distro: &str, codename: &str, arch: Arch) -> Result<Sources, PortError> {
+        match &self.root {
+            Some(root) if root.distro == distro && root.codename == codename => {
+                let sources = sources_from(&sources::read_root(&root.path), arch);
+                if sources.suites.is_empty() {
+                    return Err(PortError::Backend {
+                        detail: format!(
+                            "{}: {} for {arch}",
+                            errmsg::APT_NO_SOURCES,
+                            root.path.display()
+                        ),
+                    });
+                }
+                Ok(sources)
+            }
+            _ => default_sources(distro, codename, arch).ok_or_else(|| PortError::Backend {
+                detail: format!("{}: {distro}", errmsg::APT_NO_MIRROR),
+            }),
         }
     }
 
@@ -287,7 +444,7 @@ impl RemoteAptIndex {
     /// The release file of suite `s`; `None` when the mirror has no such
     /// suite and it isn't required.
     fn release(&self, s: &Suite) -> Result<Option<Release>, PortError> {
-        let url = format!("{}/dists/{}/InRelease", s.mirror, s.suite);
+        let url = format!("{}/InRelease", s.dist_url());
         let cached = self.suite_dir(s).join("InRelease");
         let bytes = if !self.refetch.get() && fresh(&cached, RELEASE_TTL) {
             debug!(message = logmsg::APT_RELEASE_CACHED, url = %url);
@@ -312,7 +469,8 @@ impl RemoteAptIndex {
             }
         };
         let release = parse_release(&signed_text(&String::from_utf8_lossy(&bytes)))?;
-        if !release.is_for(&s.suite) {
+        // A flat repository's release file names no suite of its path.
+        if !s.is_flat() && !release.is_for(&s.suite) {
             return Err(PortError::Backend {
                 detail: format!(
                     "{}: {url} is {}",
@@ -356,14 +514,17 @@ impl RemoteAptIndex {
                 return Ok(bytes);
             }
         }
+        let base = s.dist_url();
         let url = if release.by_hash {
             let dir = path.rsplit_once('/').map_or("", |(dir, _)| dir);
-            format!(
-                "{}/dists/{}/{dir}/by-hash/SHA256/{}",
-                s.mirror, s.suite, hash.sha256
-            )
+            let dir = if dir.is_empty() {
+                String::new()
+            } else {
+                format!("{dir}/")
+            };
+            format!("{base}/{dir}by-hash/SHA256/{}", hash.sha256)
         } else {
-            format!("{}/dists/{}/{path}", s.mirror, s.suite)
+            format!("{base}/{path}")
         };
         let resp = self.fetcher.fetch(&HttpRequest::get(&url))?;
         if !(200..300).contains(&resp.status) {
@@ -396,8 +557,7 @@ impl RemoteAptIndex {
             let Some(release) = self.release(s)? else {
                 continue;
             };
-            for component in &sources.components {
-                let dir = format!("{component}/binary-{arch}");
+            for dir in s.index_dirs(arch) {
                 let Some((path, hash, compression)) = index_file(&release, &dir) else {
                     debug!(message = logmsg::APT_NO_INDEX_LISTED, suite = %s.suite, dir = %dir);
                     continue;
@@ -408,7 +568,11 @@ impl RemoteAptIndex {
                     .map_err(|e| PortError::Backend {
                         detail: format!("{}: {path}: {e}", errmsg::APT_DECOMPRESS),
                     })?;
-                add_package_versions(&String::from_utf8_lossy(&text), &mut available);
+                add_package_versions(
+                    &String::from_utf8_lossy(&text),
+                    release.priority(),
+                    &mut available,
+                );
                 any_index = true;
             }
         }
@@ -470,7 +634,11 @@ pub fn index_file<'r>(
     ]
     .into_iter()
     .find_map(|(name, compression)| {
-        let path = format!("{dir}/{name}");
+        let path = if dir.is_empty() {
+            name.to_string()
+        } else {
+            format!("{dir}/{name}")
+        };
         release
             .sha256
             .get(&path)
@@ -508,19 +676,18 @@ impl Index for RemoteAptIndex {
             Some(a) => a,
             None => {
                 let (distro, codename, arch) = &key;
-                let sources =
-                    default_sources(distro, codename, *arch).ok_or_else(|| PortError::Backend {
-                        detail: format!("{}: {distro}", errmsg::APT_NO_MIRROR),
-                    })?;
+                let sources = self.sources(distro, codename, *arch)?;
                 let read = Rc::new(self.read_release(&sources, *arch)?);
                 self.releases.borrow_mut().insert(key.clone(), read.clone());
                 read
             }
         };
-        Ok(available
+        let versions = available
             .get(pkg.purl.name())
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        Ok(candidates(versions)
             .into_iter()
-            .flatten()
             .filter_map(|v| Version::parse(v, Scheme::Debian).ok())
             .collect())
     }

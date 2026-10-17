@@ -170,6 +170,8 @@ struct BosunWorld {
     releases: BTreeMap<(String, String), Release>,
     /// What distro mirrors list, by `(distro, suite, arch)`: package and version.
     apt_mirror: BTreeMap<(String, String, String), Vec<(String, String)>>,
+    /// What flat vendor apt repositories list, by URL: package and version.
+    vendor_repos: BTreeMap<String, Vec<(String, String)>>,
     /// What the npm registry and PyPI answer, by URL.
     registry: BTreeMap<String, Value>,
     /// Seeded state packages per scope (`system` / `user`).
@@ -313,6 +315,20 @@ impl BosunWorld {
         }
         for (url, body) in self.apt_mirror_files() {
             serve(url, &body);
+        }
+        for (url, packages) in &self.vendor_repos {
+            let mut index = String::new();
+            for (pkg, version) in packages {
+                index.push_str(&format!("Package: {pkg}\nVersion: {version}\n\n"));
+            }
+            let xz = compressed("xz", index.as_bytes());
+            let sha: String = Sha256::digest(&xz)
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            let release = format!("Origin: vendor\nSHA256:\n {sha} {} Packages.xz\n", xz.len());
+            serve(format!("{url}/InRelease"), release.as_bytes());
+            serve(format!("{url}/Packages.xz"), &xz);
         }
         for (url, doc) in &self.registry {
             serve(url.clone(), doc.to_string().as_bytes());
@@ -1004,6 +1020,12 @@ fn fails(world: &mut BosunWorld) {
     assert_exit(world, 1);
 }
 
+/// The command line itself is refused (exit 2), before anything runs.
+#[then("it refuses the command line")]
+fn refuses_command_line(world: &mut BosunWorld) {
+    assert_exit(world, 2);
+}
+
 #[then("it reports changes pending")]
 fn changes_pending(world: &mut BosunWorld) {
     assert_exit(world, 2);
@@ -1484,6 +1506,25 @@ fn mirror_lists(
         .entry((distro.to_lowercase(), suite, arch))
         .or_default()
         .push((pkg, version));
+}
+
+/// A flat apt repository (a vendor's, added by a Dockerfile) lists a package.
+#[given(regex = r"^the vendor repository (\S+) lists (\S+) (\S+)$")]
+fn vendor_lists(world: &mut BosunWorld, url: String, pkg: String, version: String) {
+    world
+        .vendor_repos
+        .entry(url)
+        .or_default()
+        .push((pkg, version));
+}
+
+/// A file of the target machine's root filesystem, under `target/` in the
+/// project directory (`render --rootfs target`).
+#[given(regex = r"^the target's file (\S+):$")]
+fn target_file(world: &mut BosunWorld, path: String, step: &Step) {
+    let file = world.path().join("target").join(path);
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    fs::write(file, docstring(step)).unwrap();
 }
 
 /// The npm registry's or PyPI's metadata for a package lists these versions,
