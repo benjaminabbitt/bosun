@@ -48,6 +48,7 @@ fn scheme_name(scheme: Scheme) -> &'static str {
         Scheme::Generic => "generic",
         Scheme::Rpm => "RPM",
         Scheme::Alpine => "apk",
+        Scheme::Pep440 => "PEP 440",
     }
 }
 
@@ -169,8 +170,34 @@ pub fn default_spec(latest: &Version) -> String {
         },
         Scheme::Debian | Scheme::Rpm => epoch_release_default(latest.as_str()).unwrap_or(exact),
         Scheme::Alpine => alpine_default(latest.as_str()).unwrap_or(exact),
+        Scheme::Pep440 => pep440_default(latest.as_str()).unwrap_or(exact),
         Scheme::Generic => exact,
     }
+}
+
+/// The caret range for a PEP 440 version (see [`default_spec`]).
+fn pep440_default(raw: &str) -> Option<String> {
+    let v: pep440_rs::Version = raw.parse().ok()?;
+    let release = v.release();
+    let bump = release
+        .iter()
+        .position(|n| *n != 0)
+        .unwrap_or(release.len() - 1);
+    let ceiling: Vec<String> = release
+        .iter()
+        .enumerate()
+        .map(|(i, n)| match i.cmp(&bump) {
+            std::cmp::Ordering::Less => n.to_string(),
+            std::cmp::Ordering::Equal => (n + 1).to_string(),
+            std::cmp::Ordering::Greater => "0".to_string(),
+        })
+        .collect();
+    let epoch = match v.epoch() {
+        0 => String::new(),
+        e => format!("{e}!"),
+    };
+    let floor = v.clone().without_local();
+    Some(format!(">={floor}|<{epoch}{}", ceiling.join(".")))
 }
 
 /// `>=U|<U'~` for a Debian or RPM version (see [`default_spec`]), or `None`
@@ -394,6 +421,22 @@ mod tests {
         assert_eq!(scheme_name(Scheme::Generic), "generic");
         assert_eq!(scheme_name(Scheme::Rpm), "RPM");
         assert_eq!(scheme_name(Scheme::Alpine), "apk");
+        assert_eq!(scheme_name(Scheme::Pep440), "PEP 440");
+    }
+
+    #[test]
+    fn default_spec_for_pep440_is_the_caret_range_over_the_release() {
+        let p = |raw| default_of(raw, Scheme::Pep440);
+        assert_eq!(p("3.2.3"), ">=3.2.3|<4.0.0");
+        assert_eq!(p("0.6.9"), ">=0.6.9|<0.7.0");
+        assert_eq!(p("0.0.3"), ">=0.0.3|<0.0.4");
+        assert_eq!(p("2024.10"), ">=2024.10|<2025.0");
+        assert_eq!(p("5"), ">=5|<6");
+        assert_eq!(p("0.0"), ">=0.0|<0.1");
+        assert_eq!(p("1!2.0"), ">=1!2.0|<1!3.0");
+        assert_eq!(p("24.1a1"), ">=24.1a1|<25.0");
+        assert_eq!(p("1.0.post2"), ">=1.0.post2|<2.0");
+        assert_eq!(p("2.1.0+cpu"), ">=2.1.0|<3.0.0");
     }
 
     #[test]
@@ -447,6 +490,10 @@ mod tests {
             ("2:4.15.1-12.fc41", Scheme::Rpm, "rpm"),
             ("1.7.1-r3", Scheme::Alpine, "apk"),
             ("1.8.0_rc1-r0", Scheme::Alpine, "apk"),
+            ("0.6.9", Scheme::Pep440, "pypi"),
+            ("24.1a1", Scheme::Pep440, "pypi"),
+            ("1!2.0.dev3", Scheme::Pep440, "pypi"),
+            ("2.1.0+cpu", Scheme::Pep440, "pypi"),
         ] {
             let v = Version::parse(raw, scheme).unwrap();
             let spec = Spec::new(default_spec(&v), ty).unwrap();

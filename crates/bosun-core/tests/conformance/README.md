@@ -17,17 +17,19 @@ verbatim as test fixtures; bosun's `vers` and `purl` code must pass them.
 
 bosun maps vers types onto its §6 version schemes: `deb`→Debian; `rpm`→RPM (rpmvercmp;
 the vers suites carry no rpm cases, so its unit tests use rpm's own `rpmvercmp.at` cases);
-`cargo`/`npm`/`golang`/`semver`→SemVer; `apk`→Alpine; everything else→generic chunk
-ordering.
+`cargo`/`npm`/`golang`/`semver`→SemVer; `apk`→Alpine; `pypi`→PEP 440 (`pep440_rs`);
+everything else→generic chunk ordering.
 
 **Exercised (M1):** `vers/vers_canonical_parse_test.json` (type-agnostic grammar),
 `vers/npm_range_containment_test.json` (SemVer ordering), `vers/alpine_version_cmp_test.json`
-(Alpine ordering, every case). The purl suites are exercised
-by the purl module (4b part 2).
+(Alpine ordering, every case), `vers/pypi_range_validate_test.json` and
+`vers/pypi_range_containment_test.json` (PEP 440 ordering; several inputs are not in
+canonical order, so the harness first sorts their constraints by version, which is what the
+validate cases expect). The purl suites are exercised by the purl module (4b part 2); the
+types bosun installs (deb, cargo, github, generic, npm, pypi) must pass every case.
 
 **Skipped (reported), out of M1 scope — ecosystems with no bosun backend and version
 grammars outside §6:** the other vers `*_version_cmp` suites (alpm, conan, datetime,
 gentoo, intdot, maven, nuget, openssl, lexicographic) and the `*_range_from_native`
 suites (conan, gem, nginx, npm, nuget, openssl, pypi — native→vers conversion, which
-bosun does not do: authors write vers directly). `pypi_*` needs PEP 440 ordering, which
-bosun approximates with generic chunk ordering and does not claim to pass.
+bosun does not do: authors write vers directly).

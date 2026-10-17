@@ -32,6 +32,7 @@ annals-yaml = { git = "https://github.com/benjaminabbitt/annals.git", rev = "24a
 # Version grammars (§6): reference impls where they exist.
 deb-version = "0.1.1"
 semver = "1.0.28"
+pep440_rs = "0.7.3"
 
 # Serialization: JSON for lock/state, YAML for --format yaml output.
 serde = { version = "1.0.229", features = ["derive"] }

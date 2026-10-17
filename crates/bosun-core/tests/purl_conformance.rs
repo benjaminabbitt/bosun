@@ -1,6 +1,6 @@
 //! purl conformance against the official purl-spec suites (vendored under
-//! tests/conformance/purl, rev ebbeb6fd). The core spec suite and the M1
-//! types bosun installs (deb, cargo, github, generic) must pass every case;
+//! tests/conformance/purl, rev ebbeb6fd). The core spec suite and the types
+//! bosun installs (deb, cargo, github, generic, npm, pypi) must pass every case;
 //! the other registered types run best-effort under the type-agnostic rules
 //! (their type-specific quirks are out of M1 scope). See the fixtures README.
 
@@ -109,7 +109,15 @@ fn load(name: &str) -> Vec<Case> {
 #[test]
 fn purl_spec_and_m1_types_conformance() {
     let mut run = 0;
-    for suite in ["specification", "deb", "cargo", "github", "generic"] {
+    for suite in [
+        "specification",
+        "deb",
+        "cargo",
+        "github",
+        "generic",
+        "npm",
+        "pypi",
+    ] {
         for c in &load(suite) {
             run += 1;
             if let Err(e) = run_case(c) {
@@ -118,14 +126,14 @@ fn purl_spec_and_m1_types_conformance() {
         }
     }
     // Exact count, so a fixture or filter regression fails loudly.
-    assert_eq!(run, 65, "in-scope purl conformance case count changed");
+    assert_eq!(run, 98, "in-scope purl conformance case count changed");
 }
 
 #[test]
 fn purl_other_types_best_effort() {
     let mut run = 0;
     let mut pass = 0;
-    for suite in ["rpm", "npm", "pypi", "gem", "golang", "apk", "alpm", "brew"] {
+    for suite in ["rpm", "gem", "golang", "apk", "alpm", "brew"] {
         for c in &load(suite) {
             run += 1;
             if run_case(c).is_ok() {
@@ -136,5 +144,5 @@ fn purl_other_types_best_effort() {
     eprintln!("purl other-type cases: {pass}/{run} pass under type-agnostic rules");
     // Loud on a fixture regression; type-specific failures are expected and
     // out of M1 scope (documented in tests/conformance/README.md).
-    assert_eq!(run, 107, "other-type purl case count changed");
+    assert_eq!(run, 74, "other-type purl case count changed");
 }

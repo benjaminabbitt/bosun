@@ -1,8 +1,9 @@
 //! vers conformance against the official vers-spec suites (vendored under
 //! tests/conformance/vers, rev 7d0cc191). bosun exercises the cases whose
-//! vers type maps onto a §6 scheme it implements (`npm`→SemVer, `apk`→Alpine);
-//! it reports and skips ecosystems it does not model (datetime, lexicographic,
-//! PEP 440, and native→vers conversion suites). See tests/conformance/README.md.
+//! vers type maps onto a §6 scheme it implements (`npm`→SemVer, `apk`→Alpine,
+//! `pypi`→PEP 440); it reports and skips ecosystems it does not model
+//! (datetime, lexicographic, and native→vers conversion suites). See
+//! tests/conformance/README.md.
 
 use bosun_core::vers::{scheme_for_type, VersRange};
 use bosun_core::Version;
@@ -177,4 +178,75 @@ fn vers_apk_comparison_conformance() {
         }
     }
     assert_eq!(suite.tests.len(), 716, "apk comparison case count changed");
+}
+
+#[derive(Deserialize)]
+struct ValidateSuite {
+    tests: Vec<ValidateCase>,
+}
+
+#[derive(Deserialize)]
+struct ValidateCase {
+    input: String,
+    expected_output: String,
+}
+
+/// A vers string with its constraints in version order (stable, so a repeated
+/// version keeps its place): what the pypi suites' "validate" cases expect,
+/// and the canonical form `VersRange::parse` requires. The suites write some
+/// ranges out of order, which bosun rejects rather than reorders.
+fn sorted_by_version(vers: &str) -> String {
+    let (prefix, constraints) = vers.rsplit_once('/').unwrap();
+    if constraints == "*" {
+        return vers.to_string();
+    }
+    let scheme = scheme_for_type(ty_of(vers));
+    let mut cs: Vec<(Version, &str)> = constraints
+        .split('|')
+        .map(|c| {
+            let v = c.trim_start_matches(['<', '>', '=', '!']);
+            let v = Version::parse(v, scheme).unwrap_or_else(|e| panic!("{c:?} in {vers:?}: {e}"));
+            (v, c)
+        })
+        .collect();
+    cs.sort_by(|a, b| a.0.cmp(&b.0));
+    let joined: Vec<&str> = cs.iter().map(|(_, c)| *c).collect();
+    format!("{prefix}/{}", joined.join("|"))
+}
+
+/// The pypi "validate" suite: each range, put in version order under PEP 440,
+/// is the suite's expected form.
+#[test]
+fn vers_pypi_validate_conformance() {
+    let data = std::fs::read_to_string(format!("{DIR}/pypi_range_validate_test.json")).unwrap();
+    let suite: ValidateSuite = serde_json::from_str(&data).unwrap();
+    for c in &suite.tests {
+        assert_eq!(
+            sorted_by_version(&c.input),
+            c.expected_output,
+            "{:?}",
+            c.input
+        );
+    }
+    assert_eq!(suite.tests.len(), 19, "pypi validate case count changed");
+}
+
+/// The pypi containment suite, each range first put in version order.
+#[test]
+fn vers_pypi_containment_conformance() {
+    let data = std::fs::read_to_string(format!("{DIR}/pypi_range_containment_test.json")).unwrap();
+    let suite: ContainSuite = serde_json::from_str(&data).unwrap();
+    for c in &suite.tests {
+        let range = VersRange::parse(&sorted_by_version(&c.input.vers))
+            .unwrap_or_else(|e| panic!("{:?}: {e}", c.input.vers));
+        let v = Version::parse(&c.input.version, scheme_for_type(range.ty())).unwrap();
+        assert_eq!(
+            range.contains(&v),
+            c.expected_output,
+            "containment {:?} contains {:?}",
+            c.input.vers,
+            c.input.version
+        );
+    }
+    assert_eq!(suite.tests.len(), 10, "pypi containment case count changed");
 }

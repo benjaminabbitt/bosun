@@ -11,6 +11,8 @@
 //!   0.7.0`);
 //! - [`Scheme::Rpm`] → `rpmvercmp` over `[epoch:]version-release` (`rpm`);
 //! - [`Scheme::Alpine`] → apk-tools' own ordering (`alpine`);
+//! - [`Scheme::Pep440`] → `pep440_rs` (epoch, pre/post/dev releases, local
+//!   labels: `1.0.dev1 < 1.0a1 < 1.0 < 1.0+local < 1.0.post1`);
 //! - [`Scheme::Generic`] → bosun's own typed-[`Segment`] engine (`segment`).
 //!
 //! Comparing two versions of different schemes is not meaningful — it never
@@ -42,6 +44,8 @@ pub enum Scheme {
     Rpm,
     /// Alpine `1.2.3_rc1-r0`, ordered as apk-tools orders it.
     Alpine,
+    /// Python's PEP 440 (`1!2.0rc1.post2.dev3+local`), ordered by `pep440_rs`.
+    Pep440,
 }
 
 impl Scheme {
@@ -52,6 +56,7 @@ impl Scheme {
             Scheme::Generic => 2,
             Scheme::Rpm => 3,
             Scheme::Alpine => 4,
+            Scheme::Pep440 => 5,
         }
     }
 }
@@ -68,6 +73,9 @@ pub enum VersionError {
     /// A string outside apk's version grammar.
     #[error("{kind}: {0:?}", kind = errmsg::VERSION_INVALID_APK)]
     Alpine(String),
+    /// A string outside PEP 440's grammar, with the parser's message.
+    #[error("{kind}: {0}", kind = errmsg::VERSION_INVALID_PEP440)]
+    Pep440(String),
 }
 
 /// A version string tagged with the grammar it is read under. Keeps the
@@ -87,6 +95,7 @@ enum Parsed {
     Generic(Vec<Segment>),
     Rpm(rpm::Evr),
     Alpine,
+    Pep440(pep440_rs::Version),
 }
 
 /// What follows a `~` in a Debian version that names a pre-release.
@@ -94,8 +103,8 @@ const DEBIAN_PRERELEASE_TAGS: [&str; 5] = ["alpha", "beta", "rc", "pre", "dev"];
 
 impl Version {
     /// Parse `raw` under `scheme`. Debian and Generic accept any non-empty
-    /// string (their grammars are permissive); SemVer and Alpine are
-    /// validated.
+    /// string (their grammars are permissive); SemVer, Alpine and PEP 440
+    /// are validated.
     pub fn parse(raw: impl Into<String>, scheme: Scheme) -> Result<Version, VersionError> {
         let raw = raw.into();
         if raw.is_empty() {
@@ -110,6 +119,10 @@ impl Version {
             Scheme::Rpm => Parsed::Rpm(rpm::Evr::parse(&raw)),
             Scheme::Alpine if alpine::is_valid(&raw) => Parsed::Alpine,
             Scheme::Alpine => return Err(VersionError::Alpine(raw)),
+            Scheme::Pep440 => raw
+                .parse::<pep440_rs::Version>()
+                .map(Parsed::Pep440)
+                .map_err(|e| VersionError::Pep440(e.to_string()))?,
         };
         Ok(Version {
             raw,
@@ -131,10 +144,11 @@ impl Version {
     /// Whether this version is a pre-release of its final form: a SemVer
     /// pre-release segment, a Debian `~` before a pre-release tag (`~rc1`,
     /// `~beta2`), an RPM/generic `~` chunk (which sorts below the release),
-    /// or an Alpine `_alpha`/`_beta`/`_pre`/`_rc` suffix. Debian's other uses
-    /// of `~` (`~deb12u1` stable updates, `~bpo12+1` backports, Ubuntu's
-    /// `~24.04.1`) build the release itself. Selection never picks a
-    /// pre-release unless a spec names it (§5.6).
+    /// an Alpine `_alpha`/`_beta`/`_pre`/`_rc` suffix, or a PEP 440 alpha,
+    /// beta, release candidate or dev release (a post-release is not one).
+    /// Debian's other uses of `~` (`~deb12u1` stable updates, `~bpo12+1`
+    /// backports, Ubuntu's `~24.04.1`) build the release itself. Selection
+    /// never picks a pre-release unless a spec names it (§5.6).
     pub fn is_prerelease(&self) -> bool {
         match &self.parsed {
             Parsed::Semver(v) => !v.pre.is_empty(),
@@ -147,6 +161,7 @@ impl Version {
             Parsed::Rpm(_) => self.raw.contains('~'),
             Parsed::Generic(segs) => segs.iter().any(|s| matches!(s, Segment::Tilde)),
             Parsed::Alpine => alpine::is_prerelease(&self.raw),
+            Parsed::Pep440(v) => v.any_prerelease(),
         }
     }
 
@@ -164,6 +179,7 @@ impl Version {
             (Parsed::Generic(a), Parsed::Generic(b)) => segment::compare(a, b),
             (Parsed::Rpm(a), Parsed::Rpm(b)) => a.cmp(b),
             (Parsed::Alpine, Parsed::Alpine) => alpine::compare(&self.raw, &other.raw),
+            (Parsed::Pep440(a), Parsed::Pep440(b)) => a.cmp(b),
             // Unreachable: equal scheme implies equal Parsed variant.
             _ => Ordering::Equal,
         })
@@ -302,6 +318,76 @@ mod tests {
         assert!(apk("1.8.0_rc1-r0").is_prerelease());
         assert!(!apk("1.8.0_p1-r0").is_prerelease());
         assert!(!apk("1.8.0-r0").is_prerelease());
+    }
+
+    fn pep(s: &str) -> Version {
+        Version::parse(s, Scheme::Pep440).unwrap()
+    }
+
+    #[test]
+    fn pep440_orders_as_the_pep_lists() {
+        // PEP 440's own summary of ordering within a release, then epochs.
+        let ordered = [
+            "1.dev0",
+            "1.0.dev456",
+            "1.0a1",
+            "1.0a2.dev456",
+            "1.0a12.dev456",
+            "1.0a12",
+            "1.0b1.dev456",
+            "1.0b2",
+            "1.0b2.post345.dev456",
+            "1.0b2.post345",
+            "1.0rc1.dev456",
+            "1.0rc1",
+            "1.0",
+            "1.0+abc.5",
+            "1.0+abc.7",
+            "1.0+5",
+            "1.0.post456.dev34",
+            "1.0.post456",
+            "1.0.15",
+            "1.1.dev1",
+            "1!0.1",
+        ];
+        for pair in ordered.windows(2) {
+            assert!(pep(pair[0]) < pep(pair[1]), "{} < {}", pair[0], pair[1]);
+        }
+    }
+
+    #[test]
+    fn pep440_pads_releases_and_normalizes_spellings() {
+        assert_eq!(pep("1.0"), pep("1.0.0"));
+        assert_eq!(pep("1.0a1"), pep("1.0-alpha.1"));
+        assert_eq!(pep("1.0rc1"), pep("1.0c1"));
+        assert_eq!(pep("v1.0.post1"), pep("1.0-1"));
+        assert!(pep("1.10") > pep("1.9"));
+        // The text stays what the backend reported.
+        assert_eq!(pep("1.0-alpha.1").as_str(), "1.0-alpha.1");
+    }
+
+    #[test]
+    fn pep440_pre_and_dev_releases_are_pre_releases_post_releases_are_not() {
+        for v in ["1.0a1", "1.0b2", "1.0rc1", "1.0.dev3", "1.0.post1.dev1"] {
+            assert!(pep(v).is_prerelease(), "{v}");
+        }
+        for v in ["1.0", "1.0.post1", "1!2.0", "1.0+local"] {
+            assert!(!pep(v).is_prerelease(), "{v}");
+        }
+    }
+
+    #[test]
+    fn pep440_rejects_what_the_pep_rejects() {
+        assert!(matches!(
+            Version::parse("1.0-beta-gamma", Scheme::Pep440),
+            Err(VersionError::Pep440(_))
+        ));
+        assert!(VersionError::Pep440("x".into())
+            .to_string()
+            .starts_with("invalid PEP 440 version: "));
+        assert_eq!(Version::parse("", Scheme::Pep440), Err(VersionError::Empty));
+        assert_eq!(pep("1.0").try_cmp(&sem("1.0.0")), None);
+        assert!(apk("9") < pep("0"));
     }
 
     #[test]

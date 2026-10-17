@@ -4,7 +4,8 @@
 //! machine state (§4.6), replacing a separate package id and source.
 //!
 //! bosun implements the general purl algorithm and the type-specific
-//! normalisation M1 installs (`deb`, `cargo`, `github`, `generic`). Other
+//! normalisation of the types it installs (`deb`, `cargo`, `github`,
+//! `generic`, `npm`, `pypi`). Other
 //! registered types parse under the type-agnostic rules; their type-specific
 //! quirks are out of M1 scope (and reported as skipped conformance cases).
 //! Unregistered types are allowed (`pkg:winget/sharkdp.fd`), per the spec.
@@ -70,7 +71,9 @@ impl Purl {
             .filter(|ns| !ns.is_empty());
 
         let name = non_empty(name).ok_or(PurlError::EmptyName)?;
-        let name = if lower {
+        let name = if ty == "pypi" {
+            name.to_ascii_lowercase().replace('_', "-")
+        } else if lower {
             name.to_ascii_lowercase()
         } else {
             name.to_string()
@@ -139,10 +142,11 @@ impl Purl {
     }
 
     /// The backend's native package id derived from the purl (§5.6): `github`
-    /// uses `namespace/name`; every other M1 type uses the bare `name`.
+    /// and `npm` (whose namespace is the `@scope`) use `namespace/name`; every
+    /// other type uses the bare `name`.
     pub fn native_id(&self) -> String {
         match (self.ty.as_str(), &self.namespace) {
-            ("github", Some(ns)) => format!("{ns}/{}", self.name),
+            ("github" | "npm", Some(ns)) => format!("{ns}/{}", self.name),
             _ => self.name.clone(),
         }
     }
@@ -336,6 +340,23 @@ mod tests {
         assert_eq!(parse("pkg:deb/debian/curl@7.50.3-1").native_id(), "curl");
         assert_eq!(parse("pkg:cargo/rand@0.7.2").native_id(), "rand");
         assert_eq!(parse("pkg:generic/openssl@1.1.10g").native_id(), "openssl");
+        // An npm scope is the namespace; npm names the package with it.
+        assert_eq!(
+            parse("pkg:npm/%40biomejs/biome@1.9.4").native_id(),
+            "@biomejs/biome"
+        );
+        assert_eq!(parse("pkg:npm/cowsay").native_id(), "cowsay");
+        assert_eq!(parse("pkg:pypi/ruff").native_id(), "ruff");
+    }
+
+    #[test]
+    fn pypi_names_are_lowercased_with_dashes() {
+        let p = parse("pkg:PYPI/Django_Upgrade@1.20.0");
+        assert_eq!(p.name(), "django-upgrade");
+        assert_eq!(p.to_string(), "pkg:pypi/django-upgrade@1.20.0");
+        // npm and cargo names keep their case.
+        assert_eq!(parse("pkg:npm/JSONStream").name(), "JSONStream");
+        assert_eq!(parse("pkg:cargo/Inflector").name(), "Inflector");
     }
 
     #[test]

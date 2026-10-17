@@ -4,16 +4,16 @@
 //! (`>=2.40|<3`, the type supplied by the backend).
 //!
 //! Version comparison per type maps onto bosun's §6 schemes: `deb`→Debian;
-//! `cargo`/`npm`/`golang`/`semver`→SemVer; `apk`→Alpine; everything
-//! else→generic chunk ordering. Containment follows the vers algorithm: a version is in the range
+//! `cargo`/`npm`/`golang`/`semver`→SemVer; `apk`→Alpine; `pypi`→PEP 440;
+//! everything else→generic chunk ordering. Containment follows the vers algorithm: a version is in the range
 //! if it falls in any interval the sorted, alternating-bound constraints form,
 //! is an `=` constraint, and is not an `!=` exclusion.
 //!
 //! Canonical parsing is strict (it rejects non-canonical input: whitespace,
 //! empty or mis-piped constraints, an explicit `=` comparator, unsorted
 //! constraints). Type-specific canonical rules for ecosystems bosun does not
-//! model (datetime, lexicographic whitespace, PEP 440) are out of scope and
-//! are reported as skipped conformance cases.
+//! model (datetime, lexicographic whitespace) are out of scope and are
+//! reported as skipped conformance cases.
 
 use std::fmt;
 
@@ -98,6 +98,7 @@ pub fn scheme_for_type(ty: &str) -> Scheme {
         "rpm" => Scheme::Rpm,
         "cargo" | "npm" | "golang" | "semver" => Scheme::Semver,
         "apk" => Scheme::Alpine,
+        "pypi" => Scheme::Pep440,
         _ => Scheme::Generic,
     }
 }
@@ -332,6 +333,21 @@ mod tests {
         assert!(!r.contains(&a("1.7.1_rc1-r0")));
         assert!(!r.contains(&a("1.7.2_rc1-r0")));
         assert!(r.mentions_prerelease());
+    }
+
+    #[test]
+    fn a_pypi_range_compares_under_pep_440() {
+        let r = VersRange::parse("vers:pypi/>=1.0|<2.0").unwrap();
+        assert_eq!(r.scheme(), Scheme::Pep440);
+        let p = |s| ver(s, Scheme::Pep440);
+        assert!(r.contains(&p("1.0.post1")));
+        assert!(r.contains(&p("1.10")));
+        assert!(!r.contains(&p("1.0rc1")));
+        assert!(!r.contains(&p("2.0.0")));
+        assert!(!r.mentions_prerelease());
+        assert!(VersRange::parse("vers:pypi/>=2.0b1")
+            .unwrap()
+            .mentions_prerelease());
     }
 
     #[test]
