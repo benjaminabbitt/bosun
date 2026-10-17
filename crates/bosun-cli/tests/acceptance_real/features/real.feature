@@ -258,10 +258,10 @@ Feature: real backends against a disposable container
     Then it fails
     And it reports "unsatisfiable"
 
-  # npm is user scope, so it runs as a non-root user (§5.5). A system Node's
-  # own prefix is root's, so global installs go under ~/.local.
+  # npm is user scope, so it runs as a non-root user (§5.5), under npm's own
+  # global prefix. A system Node's is root's, so the user sets one of theirs.
   @npm @useradd @runuser
-  Scenario: npm installs a tool into the user's prefix, moves it down, and prune removes it
+  Scenario: npm installs a tool under the user's npm prefix, moves it down, and prune removes it
     Given the manifest:
       """
       version: 2
@@ -270,11 +270,13 @@ Feature: real backends against a disposable container
           spec: "7.6.0"
           install: {backend: npm}
       """
+    And the non-root user's npm prefix is ~/.npm-global
     And a non-root user owns the project
     When the non-root user runs `bosun install . --yes`
     Then it succeeds
-    And the binary semver exists and is executable
-    And npm lists semver 7.6.0 under ~/.local
+    And it warns "npm's global bin dir is not on PATH"
+    And ~/.npm-global/bin/semver exists and is executable
+    And npm lists semver 7.6.0 under ~/.npm-global
     When the manifest becomes:
       """
       version: 2
@@ -285,11 +287,26 @@ Feature: real backends against a disposable container
       """
     And the non-root user runs `bosun install . --yes`
     Then it succeeds
-    And npm lists semver 7.5.0 under ~/.local
+    And npm lists semver 7.5.0 under ~/.npm-global
     When the manifest is deleted
     And the non-root user runs `bosun prune --yes`
     Then it succeeds
-    And the binary semver does not exist
+    And ~/.npm-global/bin/semver does not exist
+
+  @npm @useradd @runuser
+  Scenario: npm under a system Node's prefix needs root, and bosun says so
+    Given the manifest:
+      """
+      version: 2
+      packages:
+        - name: semver
+          spec: "7.6.0"
+          install: {backend: npm}
+      """
+    And a non-root user owns the project
+    When the non-root user runs `bosun install . --yes`
+    Then it fails
+    And it warns "npm install -g there needs root"
 
   # uv is user scope too; it places tools' executables in ~/.local/bin.
   @uv @useradd @runuser

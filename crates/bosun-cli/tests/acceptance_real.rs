@@ -467,10 +467,41 @@ fn binary_gone(w: &mut RealWorld, name: String) {
     assert!(!path.exists(), "{} still exists", path.display());
 }
 
-/// `npm ls -g` under the user's `~/.local` prefix names `pkg` at `version`.
-#[then(expr = "npm lists {word} {word} under ~\\/.local")]
-fn npm_lists(w: &mut RealWorld, pkg: String, version: String) {
-    let prefix = w.home().join(".local").display().to_string();
+/// The non-root user's `~/.npmrc` sets npm's global prefix to `~/<dir>`.
+#[given(regex = r"^the non-root user's npm prefix is ~/(\S+)$")]
+fn npm_prefix(w: &mut RealWorld, dir: String) {
+    let home = w.home();
+    let npmrc = format!("prefix={}\n", home.join(dir).display());
+    fs::write(home.join(".npmrc"), npmrc).unwrap();
+}
+
+#[then(regex = r"^~/(\S+) exists and is executable$")]
+fn home_file_executable(w: &mut RealWorld, rel: String) {
+    let path = w.home().join(rel);
+    let meta = fs::metadata(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    assert!(!meta.is_dir(), "{} is a directory", path.display());
+    #[cfg(unix)]
+    assert!(
+        meta.permissions().mode() & 0o111 != 0,
+        "{} not executable",
+        path.display()
+    );
+}
+
+#[then(regex = r"^~/(\S+) does not exist$")]
+fn home_file_gone(w: &mut RealWorld, rel: String) {
+    let path = w.home().join(rel);
+    assert!(
+        fs::symlink_metadata(&path).is_err(),
+        "{} still exists",
+        path.display()
+    );
+}
+
+/// `npm ls -g` under the prefix `~/<dir>` names `pkg` at `version`.
+#[then(regex = r"^npm lists (\S+) (\S+) under ~/(\S+)$")]
+fn npm_lists(w: &mut RealWorld, pkg: String, version: String, dir: String) {
+    let prefix = w.home().join(dir).display().to_string();
     let (code, out) = run(
         "npm",
         &["ls", "-g", "--depth=0", "--json", "--prefix", &prefix],

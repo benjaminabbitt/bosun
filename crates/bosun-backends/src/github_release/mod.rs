@@ -133,7 +133,7 @@ impl GithubReleaseFactory {
 /// Whether `bin_dir` is one of `path_var`'s entries, as `os` reads `PATH`:
 /// `;`-separated and case-insensitive on Windows (a trailing `\` ignored),
 /// `:`-separated and exact elsewhere.
-fn on_path(bin_dir: &Path, path_var: &str, os: Os) -> bool {
+pub(crate) fn on_path(bin_dir: &Path, path_var: &str, os: Os) -> bool {
     if os == Os::Windows {
         let norm = |p: &str| p.trim_end_matches(['\\', '/']).to_lowercase();
         let want = norm(&bin_dir.to_string_lossy());

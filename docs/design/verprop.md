@@ -244,7 +244,7 @@ records the claim in the matching file:
 | scope | backends (typical) | state file |
 |---|---|---|
 | **system** | apt, dnf, pacman, zypper, apk, snap, flatpak `--system` (its default), winget `--scope machine`, scoop `--global` | Linux `/var/lib/bosun/state.json` (beside `/var/lib/dpkg`, `/var/lib/rpm`); macOS `/Library/Application Support/bosun/state.json`; Windows `%ProgramData%\bosun\state.json`. Owned by root/admin, readable by all users. |
-| **user** | cargo, go install, pipx / uv tool, npm with a user prefix, flatpak `--user`, scoop and winget defaults, **Homebrew** | Linux and macOS `$XDG_STATE_HOME/bosun/state.json` (default `~/.local/state`); Windows `%LOCALAPPDATA%\bosun\state.json` |
+| **user** | cargo, go install, pipx / uv tool, npm under its own global prefix, flatpak `--user`, scoop and winget defaults, **Homebrew** | Linux and macOS `$XDG_STATE_HOME/bosun/state.json` (default `~/.local/state`); Windows `%LOCALAPPDATA%\bosun\state.json` |
 
 - Not `/root` or another superuser home: those are private home directories (other users
   couldn't read system claims) and aren't portable (macOS root is `/var/root`; Windows has
@@ -1468,7 +1468,7 @@ under a pty on Unix only.
 | M3-4 | `bosun render args\|env\|json [path]` for this machine, from its lock (missing or stale: an error naming `bosun lock`); variable stems from the logical name or the entry's `var` (manifest key, checked at load), clashes and digit-led stems refused; the build-args driver is `bosun_apply::render` | landed |
 | M3-5 | apt's remote index (§4.7): a release's suites from its mirror over HTTPS (Debian and Ubuntu defaults, as stock images list them), `InRelease` → package index hash chain (by hash), signature not verified (decided: HTTPS and the hash chain; the image's apt verifies at install), cached under the user cache dir (`InRelease` an hour, indexes while their hash holds); `BackendFactory::remote_index` (apt, cargo, github-release, github-deb, github-rpm) | landed; unit tests over trimmed real Debian 12 captures; same candidates as `apt-cache policy` in `debian:12`, `debian:13` and `ubuntu:24.04` |
 | M3-6 | `render args\|env --target <platform>`, `render json --targets a,b`, `--distro <id>[@<release>]`, `--libc <family>[@<version>]`: another machine is resolved fresh through remote indexes with a runner that runs nothing; a backend without one is an error naming it; missing distro or libc facts are warned about. Debian pre-releases are `~` before a pre-release tag (`~deb12u1`, `~bpo`, `~24.04.1` are releases) | landed |
-| M3-7 | npm and uv backends (user scope, platform-independent, no hold): npm registry abbreviated metadata / `npm install -g --prefix` / `npm ls -g --json`; PyPI JSON API / `uv tool install name==ver` / `uv tool list`; export from each; PEP 440 ordering (`pep440_rs`, vers `pypi`, conformance suites run); `npm` and `pypi` purls must-pass | landed; real tier in `node:22-slim` with uv 0.13.1 (semver 7.6.0 → 7.5.0 → pruned; ruff 0.6.9 → 0.6.8 → pruned) |
+| M3-7 | npm and uv backends (user scope, platform-independent, no hold): npm registry abbreviated metadata / `npm install -g --prefix` under npm's own global prefix (`npm prefix -g`; warned when not writable or its bin dir is off `PATH`) / `npm ls -g --json`; PyPI JSON API / `uv tool install name==ver` / `uv tool list`; export from each; PEP 440 ordering (`pep440_rs`, vers `pypi`, conformance suites run); `npm` and `pypi` purls must-pass | landed; real tier in `node:22-slim` with uv 0.13.1 (semver 7.6.0 → 7.5.0 → pruned under `~/.npm-global`; the system prefix fails, warned; ruff 0.6.9 → 0.6.8 → pruned) |
 | M2-10 | with no terminal, every confirm (install, uninstall, prune, remove, migrate) applies, still printing what it applies to stderr; `--yes` only skips a terminal's prompt | landed |
 | M2-11 | `status [path]` lists every claim on each package (manifest, spec, user, whether the manifest still exists); with no path, everything bosun manages on the machine; `install` records a `claim` on a package bosun installed for another project | landed |
 | M2-12 | release selectors `linux:<distro>@<release>`: the release is the purl `distro` value a block's backend gives this machine (deb codename, rpm `<ID>-<VERSION_ID>`); exact `ID` only | landed; checked in Debian 12/13 and Ubuntu 22.04/24.04 containers |
@@ -1650,11 +1650,16 @@ Command-level reference for the five researched backends. (apt, dnf, apk, uv, np
   - Discover: `https://registry.npmjs.org/<name>` (a scope's `/` as `%2F`) with `Accept:
     application/vnd.npm.install-v1+json` (abbreviated metadata); every key of `versions` that
     is SemVer. An unknown package is a 404.
-  - Prefix: global installs go under npm's configured prefix (`npm config get prefix`) when
-    it lies in the user's home (nvm, fnm, `~/.npm-global`, `%APPDATA%\npm`), else under
-    `~/.local`, whose `bin` is bosun's user bin dir: a system Node's prefix (`/usr/local`) is
-    root's, and a non-root `npm i -g` there fails with EACCES. Every command names it with
-    `--prefix`; the choice is logged.
+  - Prefix: global installs always go under npm's own global prefix (`npm prefix -g`): nvm's
+    or fnm's Node directory, a configured `~/.npm-global`, `%APPDATA%\npm`, or a system Node's
+    `/usr/local`. bosun never picks one of its own. It is read once, logged, and every command
+    names it with `--prefix`. A prefix this user cannot write where npm puts packages
+    (`<p>/lib/node_modules`, `<p>\node_modules` on Windows; tried by creating a file in it or
+    its nearest existing parent) is warned of: `npm install -g` there needs root, user-scope
+    steps never run elevated (§5.5), so the install fails with npm's EACCES, as it would by
+    hand; the remedy is a prefix of the user's own (`npm config set prefix ~/.npm-global`).
+    A prefix whose bin dir (`<p>/bin`, `<p>` on Windows) is not on `PATH` is warned of, as
+    github-release's bin dir is. `npm prefix -g` failing fails every npm step and listing.
   - Install exact / up / down: `npm install -g --prefix <p> <name>@<version>` ("changed N
     packages" when moving an installed one).
   - Installed: `npm ls -g --depth=0 --json --prefix <p>` → `dependencies.<name>.version`. A

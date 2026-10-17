@@ -5,11 +5,13 @@
 //! reads the registry's abbreviated metadata over HTTP (the query side may run
 //! anywhere, §4.7).
 //!
-//! Global installs go to a user prefix: npm's configured prefix when it lies
-//! in the user's home (nvm, fnm, `~/.npm-global`, `%APPDATA%\npm`), else
-//! `~/.local`, whose `bin` is bosun's user bin dir. A system Node's own
-//! prefix (`/usr/local`) is root's, and user-scope installs never run
-//! elevated (§5.5). The prefix is read once, on first use, and logged.
+//! Global installs go under npm's own global prefix (`npm prefix -g`): nvm's
+//! or fnm's Node directory, a configured `~/.npm-global`, `%APPDATA%\npm`, or
+//! a system Node's `/usr/local`. The prefix is read once, on first use, and
+//! logged. A prefix this user cannot write (a system Node's is root's) is
+//! warned of: user-scope steps never run elevated (§5.5), so `npm install -g`
+//! fails there as it would by hand. A prefix whose bin dir is not on `PATH`
+//! is warned of too.
 //!
 //! `npm -g` keeps no durable hold — a re-run re-asserts the exact version — so
 //! `hold` is a no-op and holds are not needed (§5.2).
@@ -24,7 +26,7 @@ use bosun_ports::{
     Backend, BackendFactory, Command, CommandRunner, HostInfo, HttpFetcher, HttpRequest, Index,
     Installer, PortError, Probe, Step, Steps, UserInstall, UserInstalls,
 };
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::logmsg;
 
@@ -40,24 +42,21 @@ const BUNDLED: [&str; 2] = ["npm", "corepack"];
 pub struct NpmFactory {
     runner: Arc<dyn CommandRunner>,
     fetcher: Arc<dyn HttpFetcher>,
-    home: PathBuf,
     os: Os,
 }
 
 impl NpmFactory {
-    /// Construct with the command runner and HTTP fetcher the backend uses,
-    /// the user's home (where a user prefix must lie) and the OS bosun runs
-    /// on (which names the program: `npm.cmd` on Windows).
+    /// Construct with the command runner and HTTP fetcher the backend uses and
+    /// the OS bosun runs on (which names the program, `npm.cmd` on Windows,
+    /// and lays out the prefix).
     pub fn new(
         runner: Arc<dyn CommandRunner>,
         fetcher: Arc<dyn HttpFetcher>,
-        home: PathBuf,
         os: Os,
     ) -> NpmFactory {
         NpmFactory {
             runner,
             fetcher,
-            home,
             os,
         }
     }
@@ -111,7 +110,7 @@ impl BackendFactory for NpmFactory {
             runner: self.runner.clone(),
             fetcher: self.fetcher.clone(),
             program: program(self.os),
-            home: self.home.clone(),
+            os: self.os,
             prefix: Arc::new(OnceLock::new()),
         };
         Backend {
@@ -126,8 +125,9 @@ struct NpmBackend {
     runner: Arc<dyn CommandRunner>,
     fetcher: Arc<dyn HttpFetcher>,
     program: &'static str,
-    home: PathBuf,
-    prefix: Arc<OnceLock<PathBuf>>,
+    os: Os,
+    /// npm's global prefix, asked on first use.
+    prefix: Arc<OnceLock<Result<PathBuf, PortError>>>,
 }
 
 fn argv(parts: &[&str]) -> Vec<String> {
@@ -140,38 +140,108 @@ fn registry_url(name: &str) -> String {
     format!("https://registry.npmjs.org/{}", name.replace('/', "%2F"))
 }
 
-/// Where global installs go (see the module docs): npm's configured prefix
-/// when it is inside `home`, else `home/.local`.
-pub fn user_prefix(runner: &dyn CommandRunner, program: &str, home: &Path) -> PathBuf {
-    let fallback = home.join(".local");
-    let configured = runner
-        .run(&Command::new(program, argv(&["config", "get", "prefix"])))
-        .ok()
-        .filter(|out| out.success())
-        .map(|out| PathBuf::from(out.stdout_utf8().trim()));
-    let prefix = match configured {
-        Some(p) if !home.as_os_str().is_empty() && p.starts_with(home) => p,
-        _ => fallback,
+/// npm's global prefix, as `npm prefix -g` prints it: where `npm install -g`
+/// puts packages, whoever owns it.
+pub fn global_prefix(runner: &dyn CommandRunner, program: &str) -> Result<PathBuf, PortError> {
+    let out = runner.run(&Command::new(program, argv(&["prefix", "-g"])))?;
+    if !out.success() {
+        return Err(PortError::CommandFailed {
+            program: program.to_string(),
+            code: out.code,
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        });
+    }
+    let printed = out.stdout_utf8();
+    let printed = printed.trim();
+    if printed.is_empty() {
+        return Err(PortError::CommandOutput {
+            detail: "npm prefix -g printed no path".to_string(),
+        });
+    }
+    Ok(PathBuf::from(printed))
+}
+
+/// Where npm links global packages' executables: the prefix itself on
+/// Windows, its `bin` elsewhere.
+fn bin_dir(prefix: &Path, os: Os) -> PathBuf {
+    match os {
+        Os::Windows => prefix.to_path_buf(),
+        _ => prefix.join("bin"),
+    }
+}
+
+/// Where npm writes global packages: `node_modules` in the prefix on Windows,
+/// `lib/node_modules` elsewhere.
+fn modules_dir(prefix: &Path, os: Os) -> PathBuf {
+    match os {
+        Os::Windows => prefix.join("node_modules"),
+        _ => prefix.join("lib").join("node_modules"),
+    }
+}
+
+/// Whether `npm install -g` under `prefix` needs root: this user cannot write
+/// where it puts packages (asked of `can_write`).
+fn needs_root(prefix: &Path, os: Os, can_write: impl Fn(&Path) -> bool) -> bool {
+    !can_write(&modules_dir(prefix, os))
+}
+
+/// Whether the prefix's bin dir is missing from `path_var`, so what npm
+/// installs there is not found by name.
+fn bin_off_path(prefix: &Path, os: Os, path_var: &str) -> bool {
+    !crate::github_release::on_path(&bin_dir(prefix, os), path_var, os)
+}
+
+/// Whether this user can make files in `dir`, or, while it does not exist,
+/// in its nearest existing ancestor (npm makes the rest). Tried by creating
+/// and removing a file: permission bits alone don't say whose they are.
+fn writable(dir: &Path) -> bool {
+    let Some(existing) = dir.ancestors().find(|d| d.exists()) else {
+        return false;
     };
-    debug!(message = logmsg::NPM_PREFIX, prefix = %prefix.display());
-    prefix
+    let probe = existing.join(format!(".bosun-write-check-{}", std::process::id()));
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+    {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 impl NpmBackend {
-    fn prefix(&self) -> &Path {
+    /// npm's global prefix, asked once and warned about (module docs).
+    fn prefix(&self) -> Result<&Path, PortError> {
         self.prefix
-            .get_or_init(|| user_prefix(self.runner.as_ref(), self.program, &self.home))
+            .get_or_init(|| {
+                let prefix = global_prefix(self.runner.as_ref(), self.program)?;
+                debug!(message = logmsg::NPM_PREFIX, prefix = %prefix.display());
+                if needs_root(&prefix, self.os, writable) {
+                    warn!(message = logmsg::NPM_PREFIX_NEEDS_ROOT, prefix = %prefix.display());
+                }
+                let path_var = std::env::var("PATH").unwrap_or_default();
+                if bin_off_path(&prefix, self.os, &path_var) {
+                    let bin = bin_dir(&prefix, self.os);
+                    warn!(message = logmsg::NPM_BIN_NOT_ON_PATH, bin_dir = %bin.display());
+                }
+                Ok(prefix)
+            })
+            .as_deref()
+            .map_err(Clone::clone)
     }
 
     /// `npm <verb> -g --prefix <prefix> <arg>`, as a user-scope step.
-    fn global(&self, verb: &str, arg: &str) -> Steps {
-        let prefix = self.prefix().display().to_string();
-        vec![Step::Run {
+    fn global(&self, verb: &str, arg: &str) -> Result<Steps, PortError> {
+        let prefix = self.prefix()?.display().to_string();
+        Ok(vec![Step::Run {
             argv: argv(&[self.program, verb, "-g", "--prefix", &prefix, arg]),
             env: vec![],
             scope: Scope::User,
             ok_exits: Vec::new(),
-        }]
+        }])
     }
 }
 
@@ -320,13 +390,13 @@ impl Installer for NpmBackend {
 
     fn install_exact(&self, pkg: &Ref, version: &Version) -> Result<Steps, PortError> {
         let at = format!("{}@{}", pkg.purl.native_id(), version.as_str());
-        Ok(self.global("install", &at))
+        self.global("install", &at)
     }
 
     fn verify_installed(&self, pkg: &Ref) -> Result<Installed, PortError> {
         let name = pkg.purl.native_id();
         Ok(
-            global_packages(self.runner.as_ref(), self.program, self.prefix())?
+            global_packages(self.runner.as_ref(), self.program, self.prefix()?)?
                 .into_iter()
                 .find(|u| u.package == name)
                 .map_or(Installed::Absent, |u| Installed::Present {
@@ -345,11 +415,11 @@ impl Installer for NpmBackend {
     }
 
     fn user_installs(&self) -> Result<UserInstalls, PortError> {
-        user_installs(self.runner.as_ref(), self.program, self.prefix())
+        user_installs(self.runner.as_ref(), self.program, self.prefix()?)
     }
 
     fn uninstall(&self, pkg: &Ref) -> Result<Steps, PortError> {
-        Ok(self.global("uninstall", &pkg.purl.native_id()))
+        self.global("uninstall", &pkg.purl.native_id())
     }
 }
 
@@ -364,7 +434,7 @@ mod tests {
     const LS_NO_PREFIX: &str = include_str!("../tests/fixtures/npm/ls-no-prefix.json");
     const LS_NODE_IMAGE: &str = include_str!("../tests/fixtures/npm/ls-node-image.json");
 
-    const PREFIX: &str = "/home/u/.local";
+    const PREFIX: &str = "/home/u/.npm-global";
 
     fn sem(v: &str) -> Version {
         Version::parse(v, Scheme::Semver).unwrap()
@@ -377,12 +447,12 @@ mod tests {
     /// A backend whose prefix is already settled at [`PREFIX`].
     fn backend(runner: Arc<dyn CommandRunner>, fetcher: Arc<dyn HttpFetcher>) -> NpmBackend {
         let prefix = OnceLock::new();
-        prefix.set(PathBuf::from(PREFIX)).unwrap();
+        prefix.set(Ok(PathBuf::from(PREFIX))).unwrap();
         NpmBackend {
             runner,
             fetcher,
             program: "npm",
-            home: PathBuf::from("/home/u"),
+            os: Os::Linux,
             prefix: Arc::new(prefix),
         }
     }
@@ -657,46 +727,124 @@ mod tests {
     }
 
     #[test]
-    fn the_prefix_is_npms_own_inside_home_else_dot_local() {
-        let home = Path::new("/home/u");
-        let asked = |stdout: &str| {
-            let fake = FakeCommandRunner::new().with_stdout(stdout);
-            let prefix = user_prefix(&fake, "npm", home);
-            assert_eq!(fake.calls()[0].args, vec!["config", "get", "prefix"]);
-            prefix
-        };
-        assert_eq!(
-            asked("/home/u/.nvm/versions/node/v22.11.0\n"),
-            PathBuf::from("/home/u/.nvm/versions/node/v22.11.0")
-        );
-        assert_eq!(asked("/usr/local\n"), PathBuf::from("/home/u/.local"));
-        // npm failing, or no home to compare with, falls back too.
+    fn the_prefix_is_npms_own_global_prefix_wherever_it_is() {
+        for prefix in ["/home/u/.nvm/versions/node/v22.11.0", "/usr/local"] {
+            let fake = FakeCommandRunner::new().with_stdout(format!("{prefix}\n"));
+            assert_eq!(global_prefix(&fake, "npm").unwrap(), PathBuf::from(prefix));
+            assert_eq!(fake.calls()[0].program, "npm");
+            assert_eq!(fake.calls()[0].args, vec!["prefix", "-g"]);
+        }
+    }
+
+    #[test]
+    fn npm_failing_to_name_its_prefix_is_an_error() {
         let failing = FakeCommandRunner::new().with_output(failed(1, ""));
+        assert!(matches!(
+            global_prefix(&failing, "npm"),
+            Err(PortError::CommandFailed { ref program, code: Some(1), .. }) if program == "npm"
+        ));
+        let blank = FakeCommandRunner::new().with_stdout("\n");
+        assert!(matches!(
+            global_prefix(&blank, "npm"),
+            Err(PortError::CommandOutput { .. })
+        ));
+    }
+
+    #[test]
+    fn a_failed_prefix_fails_every_step_and_listing() {
+        let fake = Arc::new(FakeCommandRunner::new().with_output(failed(1, "")));
+        let factory = NpmFactory::new(fake.clone(), Arc::new(FakeHttpFetcher::new()), Os::Linux);
+        let built = factory.build(Probe {
+            backend: BackendId::new(BACKEND),
+            version: sem("10.9.9"),
+        });
+        let cowsay = reff("pkg:npm/cowsay");
+        assert!(built
+            .installer
+            .install_exact(&cowsay, &sem("1.6.0"))
+            .is_err());
+        assert!(built.installer.uninstall(&cowsay).is_err());
+        assert!(built.installer.verify_installed(&cowsay).is_err());
+        assert!(built.installer.user_installs().is_err());
+        assert_eq!(fake.calls().len(), 1, "the prefix is asked once");
+    }
+
+    #[test]
+    fn executables_and_packages_go_where_npm_puts_them_on_each_os() {
+        let unix = Path::new("/usr/local");
+        assert_eq!(bin_dir(unix, Os::Linux), PathBuf::from("/usr/local/bin"));
+        assert_eq!(bin_dir(unix, Os::Macos), PathBuf::from("/usr/local/bin"));
         assert_eq!(
-            user_prefix(&failing, "npm", home),
-            PathBuf::from("/home/u/.local")
+            modules_dir(unix, Os::Linux),
+            PathBuf::from("/usr/local/lib/node_modules")
         );
-        let anywhere = FakeCommandRunner::new().with_stdout("/usr/local\n");
+        let windows = Path::new(r"C:\Users\u\AppData\Roaming\npm");
+        assert_eq!(bin_dir(windows, Os::Windows), windows.to_path_buf());
         assert_eq!(
-            user_prefix(&anywhere, "npm", Path::new("")),
-            PathBuf::from(".local")
+            modules_dir(windows, Os::Windows),
+            windows.join("node_modules")
         );
+    }
+
+    #[test]
+    fn a_prefix_this_user_cannot_write_needs_root() {
+        let prefix = Path::new("/usr/local");
+        let asked = std::cell::RefCell::new(Vec::new());
+        let needs = |can: bool| {
+            needs_root(prefix, Os::Linux, |dir: &Path| {
+                asked.borrow_mut().push(dir.to_path_buf());
+                can
+            })
+        };
+        assert!(needs(false));
+        assert!(!needs(true));
+        assert_eq!(
+            asked.borrow()[0],
+            PathBuf::from("/usr/local/lib/node_modules")
+        );
+    }
+
+    #[test]
+    fn writable_is_whether_files_can_be_made_there_or_in_the_nearest_existing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(writable(dir.path()));
+        assert!(writable(&dir.path().join("lib").join("node_modules")));
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "leaves nothing behind"
+        );
+        let file = dir.path().join("file");
+        std::fs::write(&file, "").unwrap();
+        assert!(!writable(&file.join("lib")));
+    }
+
+    #[test]
+    fn the_bin_dir_off_path_is_warned_of() {
+        let prefix = Path::new("/home/u/.npm-global");
+        assert!(bin_off_path(prefix, Os::Linux, "/usr/bin:/bin"));
+        assert!(!bin_off_path(
+            prefix,
+            Os::Linux,
+            "/usr/bin:/home/u/.npm-global/bin"
+        ));
+        let windows = Path::new(r"C:\Users\u\AppData\Roaming\npm");
+        assert!(!bin_off_path(
+            windows,
+            Os::Windows,
+            r"C:\Windows;C:\Users\u\AppData\Roaming\npm"
+        ));
     }
 
     #[test]
     fn the_prefix_is_asked_once() {
         let fake = Arc::new(
             FakeCommandRunner::new()
-                .with_stdout("/usr/local\n")
+                .with_stdout(format!("{PREFIX}\n"))
                 .with_stdout(LS_GLOBAL)
                 .with_stdout(LS_GLOBAL),
         );
-        let factory = NpmFactory::new(
-            fake.clone(),
-            Arc::new(FakeHttpFetcher::new()),
-            PathBuf::from("/home/u"),
-            Os::Linux,
-        );
+        let factory = NpmFactory::new(fake.clone(), Arc::new(FakeHttpFetcher::new()), Os::Linux);
         let built = factory.build(Probe {
             backend: BackendId::new(BACKEND),
             version: sem("10.9.9"),
@@ -716,7 +864,6 @@ mod tests {
             let factory = NpmFactory::new(
                 Arc::new(FakeCommandRunner::new()),
                 Arc::new(FakeHttpFetcher::new()),
-                PathBuf::from("/home/u"),
                 os,
             );
             let runner = FakeCommandRunner::new().with_stdout("10.9.9\n");
@@ -738,7 +885,6 @@ mod tests {
         let factory = NpmFactory::new(
             Arc::new(FakeCommandRunner::new()),
             Arc::new(FakeHttpFetcher::new()),
-            PathBuf::from("/home/u"),
             Os::Linux,
         );
         let probe = |out: Output| {
@@ -767,7 +913,6 @@ mod tests {
         let factory = NpmFactory::new(
             Arc::new(FakeCommandRunner::new()),
             Arc::new(FakeHttpFetcher::new()),
-            PathBuf::from("/home/u"),
             Os::Linux,
         );
         let meta = factory.meta();

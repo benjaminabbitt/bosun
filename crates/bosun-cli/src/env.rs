@@ -496,12 +496,7 @@ fn compiled_in_factories(
         Box::new(DnfFactory::new(runner.clone())),
         Box::new(bosun_backends::ApkFactory::new(runner.clone())),
         Box::new(CargoFactory::new(runner.clone(), fetcher.clone())),
-        Box::new(NpmFactory::new(
-            runner.clone(),
-            fetcher.clone(),
-            home.to_path_buf(),
-            os,
-        )),
+        Box::new(NpmFactory::new(runner.clone(), fetcher.clone(), os)),
         Box::new(UvFactory::new(runner.clone(), fetcher.clone())),
         Box::new(
             GithubReleaseFactory::new(fetcher.clone(), user_bin_dir(home), os, arch)

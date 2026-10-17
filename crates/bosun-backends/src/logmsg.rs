@@ -48,9 +48,16 @@ pub const APT_SUITE_ABSENT: &str = "apt suite not on the mirror; skipped";
 /// A suite lists no package index for a component and arch; skipped.
 pub const APT_NO_INDEX_LISTED: &str = "apt suite lists no package index for it; skipped";
 
-/// Where npm global installs go for this user: npm's own prefix when it is in
-/// the user's home, else `~/.local`.
+/// Where npm global installs go: npm's own global prefix (`npm prefix -g`).
 pub const NPM_PREFIX: &str = "npm installs globally under this prefix";
+
+/// npm's global prefix is not this user's to write (a system Node's is
+/// root's); user-scope steps never run elevated, so `npm install -g` fails.
+pub const NPM_PREFIX_NEEDS_ROOT: &str =
+    "npm's global prefix is not writable by this user, so npm install -g there needs root; set a prefix of your own (npm config set prefix ~/.npm-global)";
+
+/// npm's global bin dir is not on PATH, so what it installs is not found by name.
+pub const NPM_BIN_NOT_ON_PATH: &str = "npm's global bin dir is not on PATH";
 
 /// A global package Node ships itself (npm, corepack), not one the user
 /// installed; it is left out of the export.
