@@ -107,7 +107,7 @@ real to check later):
 
 | command | does |
 |---|---|
-| `add <name> --backend … [--package] [--spec] [--on <selector>] [--opt k=v]` / `remove <name> [--plan] [--yes]` | edit one manifest entry, keeping every other byte, then run `lock` on the edited manifest. Both refuse a manifest older than the current version (run `migrate`). `add` writes under `any` when every backend is platform-independent, else this machine's OS, unless `--on` says; it checks the entry first (backend options, then a resolve on this machine) and writes nothing on error; without `--spec` it writes a default from the newest version: cargo and npm the caret range up to the next breaking one (`>=2.0.2\|<3.0.0`, below 1.0 the next minor), PyPI `>=X` as `uv add` writes, apt, dnf and apk `*`, following whatever the release's repositories carry (the distro's stable-update policy is the compatibility promise, and the selector already scopes the entry); it never installs. `remove` first releases the package (drops this manifest's claim, uninstalls only if bosun installed it and no other manifest claims it, behind the usual confirm), then edits and locks |
+| `add <name> --backend … [--package] [--spec] [--on <selector>] [--opt k=v]` / `remove <name> [--plan] [--yes]` | edit one manifest entry, keeping every other byte, then run `lock` on the edited manifest. Both refuse a manifest older than the current version (run `migrate`). `add` writes under `any` when every backend is platform-independent, else this machine's OS, unless `--on` says; it checks the entry first (backend options, then a resolve on this machine) and writes nothing on error; without `--spec` it writes a default from the newest version: cargo and npm the caret range up to the next breaking one (`>=2.0.2\|<3.0.0`, below 1.0 the next minor), PyPI `>=X` as `uv add` writes, apt, dnf and apk `*`, following whatever the release's repositories carry (the distro's stable-update policy is the compatibility promise, and the selector already scopes the entry); it never installs. `remove` first releases the package (drops this manifest's claim, uninstalls only if bosun installed it and no other manifest claims it, behind the usual confirm), then edits and locks. Without elevation, a system-scope claim it would drop is refused before anything changes (`ReleaseNeedsElevation`, remedy `sudo bosun remove <name>`): unlike `install`'s records it cannot wait, since no later run would drop it (§5.5) |
 | `refresh` | explicit index refresh, per backend |
 | `install [path] [--plan] [--scope system\|user] [--yes]` | plan → privilege check → confirm → apply: resolve each entry against this machine's lock (its pins that still fit, the newest in spec for the rest), install, record in the machine state, then write the lock (only after a successful apply; never with `--plan`) (§4.8, §5.5, §7). **Never uninstalls** (except the old name in a `formerly` migration, §5.4) |
 | `uninstall [path] [--plan] [--scope system\|user] [--yes]` | the inverse of `install` for one manifest: drop all of its claims, then uninstall each package bosun installed that no other manifest still claims; same plan → confirm → apply flow (§9) |
@@ -555,7 +555,8 @@ backend, package ID, from → to version, the claim(s) that drove it, and the pr
   is left out of the plan as a note (`jq: accept recorded on the next elevated run`; JSON
   `deferred`), reported as such by apply, and planned again by the next elevated run; the
   user-scope actions beside it still apply. `install`, `uninstall` and `prune` defer;
-  `remove <name>` does not, since its manifest entry is gone afterwards.
+  `remove <name>` does not, since its manifest entry is gone afterwards: a system-scope
+  claim it would drop is refused without elevation before the manifest is edited (§5.5).
 - **Index age** is shown for repo-bound backends, since planning uses whatever index is current
   (refresh is explicit, §9).
 - **Exit codes** (like `terraform plan -detailed-exitcode`): `0` no changes, `2` changes
@@ -984,6 +985,10 @@ root, because updating their index does.
 - **Unelevated, plan changes system scope** → `ElevationRequired`. A system-scope action that
   changes only state (`accept`, `claim`, `drop-claim`) is no change: it waits for the next
   elevated run (§4.8), and the rest of the plan applies.
+- **Unelevated, `remove <name>` drops a system-scope claim** → `ReleaseNeedsElevation`
+  (`elevation_required` in JSON), whatever `--scope` says, before the manifest is edited:
+  with the entry gone no later run would drop the claim, so it cannot wait. The remedy is the
+  command as given: `sudo bosun remove <name>`.
 - **Elevated, plan changes user scope** → `MustNotBeElevated`. Under sudo, user-scope installs
   would land in root's home (and `$HOME` under sudo varies by distro), and Homebrew refuses to
   run as root. `--scope system|user` splits a mixed run:
@@ -1727,6 +1732,7 @@ under a pty on Unix only.
 | TV-15 | apt keeps the installed version no source offers any more: `Policy::choose` admits the installed version (dpkg status, priority 100) as a candidate when the spec admits it, as apt's candidate stays there below priority 1000 | landed; real tier in `debian:13` (apt 3.0.3): bosun-probe 2.0-1 installed, dropped from the local file repository, `upgrade` under `*`, `install` keeps 2.0-1; red without it: a downgrade to 1.0-1 was applied |
 | TV-16 | `prune` (and `status`) count a claim whose manifest can't be checked (`try_exists` errors: permission denied) as present, logged at debug (`MANIFEST_UNCHECKED`) | landed; unit test with a directory this user may not search (skipped as root); red before: the claim counted as gone |
 | TV-17 | a release selector naming a derivative's own codename that is not its release warns with the release to use (`Distro::deb_release_for_own_codename`, `OWN_CODENAME_SELECTOR`), on load for this machine and in `render` for the target | landed; scenario: Mint 22 (`wilma`, `UBUNTU_CODENAME=noble`) with `linux:linuxmint@wilma` warns naming `linux:linuxmint@noble` and locks nothing; `@noble` locks jq without a warning |
+| TV-18 | without elevation, `remove <name>` whose release drops a system-scope claim fails before editing the manifest (`check_release_privilege`, `PrivilegeError::ReleaseNeedsElevation`, `RELEASE_NEEDS_ELEVATION`), remedy `sudo bosun remove <name>`; remove's other privilege remedies name the entry too | landed; scenario: jq accepted for this project in root's system state, `remove jq` fails naming `sudo bosun remove jq`, manifest and system state unchanged; red before: a raw state-lock permission error |
 
 **First real-host smoke run (2026-10-14, release build, Debian 13, read-only `--plan` and
 `lock` in a scratch dir).** `backends` found apt 3.0.3, cargo 1.96.1 and github-release; jq

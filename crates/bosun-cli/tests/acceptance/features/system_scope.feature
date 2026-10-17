@@ -210,3 +210,20 @@ Feature: accept, hold and privilege at system scope (apt)
     Then it succeeds
     And it says "drop-claim jq               recorded on the next elevated run"
     And the system state is unchanged
+
+  # Once the entry is gone no later run would drop its claim, so remove's
+  # drop-claim cannot wait like install's records: it is refused before the
+  # manifest is edited.
+  @unprivileged
+  Scenario: without elevation, remove of a package with a system-scope claim is refused
+    Given a Debian trixie amd64 machine, not elevated
+    And jq 1.7.1-6+deb13u2 is installed outside bosun
+    And bosun accepted jq 1.7.1-6+deb13u2 for this project wanting ">=1.6"
+    And the system state is root's, readable by every user
+    When I run `bosun --format text remove jq --yes`
+    Then it fails
+    And it says "dropping a system-scope claim needs elevation: jq (apt)"
+    And it says "re-run as root: sudo bosun remove jq"
+    And it does not say "--scope"
+    And the manifest is unchanged
+    And the system state is unchanged

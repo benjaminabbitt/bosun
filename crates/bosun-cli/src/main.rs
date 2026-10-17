@@ -18,7 +18,7 @@ mod target_root;
 
 use std::io::{IsTerminal, Write};
 
-use bosun_apply::{check_privilege, defer_system_records, Plan};
+use bosun_apply::{check_privilege, check_release_privilege, defer_system_records, Plan};
 use bosun_core::Scope;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
@@ -86,11 +86,23 @@ fn dispatch(cli: &Cli, format: Format) -> Result<i32, CliError> {
             // Release first: the manifest is edited only once the package is
             // uninstalled (or its claim dropped), so a refused or failed apply
             // leaves everything as it was.
+            let command = format!("remove {name}");
+            // A system-scope claim drop can't wait for a later run: once the
+            // entry is gone, none would drop it.
+            if let Err(e) = check_release_privilege(&removal.plan, env.machine()) {
+                return Ok(render_privilege_error(
+                    &e,
+                    env.machine().elevation(),
+                    &command,
+                    format,
+                    &mut out,
+                ));
+            }
             let report = if removal.plan.actions.is_empty() {
                 None
             } else {
                 let m = Mutation {
-                    command: "remove",
+                    command: &command,
                     plan_only: false,
                     scope: scope.map(Into::into),
                     yes: *yes,
@@ -277,9 +289,9 @@ fn emit<T: Render>(value: &T, format: Format, out: &mut impl Write) -> Result<i3
 }
 
 /// A mutating command and its flags.
-struct Mutation {
-    /// The command name, for the privilege remedy text.
-    command: &'static str,
+struct Mutation<'a> {
+    /// The command and its operands, for the privilege remedy text.
+    command: &'a str,
     /// `--plan`: stop after planning.
     plan_only: bool,
     /// `--scope`: restrict to one install scope.
@@ -291,7 +303,7 @@ struct Mutation {
 /// The plan → privilege → confirm → apply flow for a mutating command (§4.8).
 fn run_mutation(
     env: &Env,
-    m: Mutation,
+    m: Mutation<'_>,
     plan: Plan,
     format: Format,
     out: &mut impl Write,
@@ -328,7 +340,7 @@ enum Applied {
 /// Privilege → confirm → apply for `plan` (§4.8); the caller renders the report.
 fn apply_mutation(
     env: &Env,
-    m: Mutation,
+    m: Mutation<'_>,
     plan: &Plan,
     format: Format,
     out: &mut impl Write,

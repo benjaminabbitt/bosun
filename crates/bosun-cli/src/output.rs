@@ -92,7 +92,9 @@ pub fn render_privilege_error(
 ) -> i32 {
     use bosun_apply::PrivilegeError as P;
     let (code, packages) = match err {
-        P::ElevationRequired { packages } => ("elevation_required", packages.as_slice()),
+        P::ElevationRequired { packages } | P::ReleaseNeedsElevation { packages } => {
+            ("elevation_required", packages.as_slice())
+        }
         P::MustNotBeElevated { packages } => ("must_not_be_elevated", packages.as_slice()),
         P::MixedScope { .. } => ("mixed_scope", [].as_slice()),
     };
@@ -130,6 +132,12 @@ fn remedy_text(
         (P::ElevationRequired { .. }, E::AdministratorTerminal) => {
             format!("open a terminal as Administrator and re-run: bosun {command} --scope system")
         }
+        (P::ReleaseNeedsElevation { .. }, E::Sudo) => {
+            format!("re-run as root: sudo bosun {command}")
+        }
+        (P::ReleaseNeedsElevation { .. }, E::AdministratorTerminal) => {
+            format!("open a terminal as Administrator and re-run: bosun {command}")
+        }
         (P::MustNotBeElevated { .. }, _) => {
             format!("re-run without elevation: bosun {command} --scope user")
         }
@@ -154,4 +162,50 @@ struct PrivilegeErrorValue {
 struct PackageRefValue {
     name: String,
     backend: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bosun_apply::{PackageRef, PrivilegeError};
+    use bosun_core::BackendId;
+    use bosun_ports::Elevation;
+
+    fn release() -> PrivilegeError {
+        PrivilegeError::ReleaseNeedsElevation {
+            packages: vec![PackageRef {
+                name: "jq".to_string(),
+                backend: BackendId::new("apt"),
+            }],
+        }
+    }
+
+    #[test]
+    fn a_release_is_re_run_elevated_as_it_was_given_with_no_scope() {
+        assert_eq!(
+            remedy_text(&release(), Elevation::Sudo, "remove jq"),
+            "re-run as root: sudo bosun remove jq"
+        );
+        assert_eq!(
+            remedy_text(&release(), Elevation::AdministratorTerminal, "remove jq"),
+            "open a terminal as Administrator and re-run: bosun remove jq"
+        );
+    }
+
+    #[test]
+    fn a_release_error_is_elevation_required_naming_its_packages() {
+        let mut out = Vec::new();
+        let code = render_privilege_error(
+            &release(),
+            Elevation::Sudo,
+            "remove jq",
+            Format::Json,
+            &mut out,
+        );
+        assert_eq!(code, 1);
+        let value: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(value["error"], "elevation_required");
+        assert_eq!(value["packages"][0]["name"], "jq");
+        assert_eq!(value["packages"][0]["backend"], "apt");
+    }
 }

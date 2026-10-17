@@ -1291,6 +1291,65 @@ fn privilege_errors_render_their_packages() {
     );
 }
 
+/// A release of jq (apt, system scope) by /w/a: a drop-claim when /w/b also
+/// claims it, else a remove.
+fn jq_release(shared: bool) -> Plan {
+    let apt = apt();
+    let mut claims = vec![claim("/w/a", ">=1.7")];
+    if shared {
+        claims.push(claim("/w/b", ">=1.7"));
+    }
+    let st = state(vec![(
+        "jq",
+        leaf("jq", "1.7.1-3", Origin::Installed, claims),
+    )]);
+    build_release_plan(Path::new("/w/a"), "jq", &st, &installers(&apt)).unwrap()
+}
+
+#[test]
+fn without_elevation_a_release_dropping_a_system_claim_is_refused() {
+    let plan = jq_release(true);
+    assert_eq!(kinds(&plan), vec![ActionKind::DropClaim]);
+    let unelevated = FakeMachine {
+        privilege: Privilege::Unelevated,
+    };
+    let err = check_release_privilege(&plan, &unelevated).unwrap_err();
+    assert_eq!(
+        err,
+        PrivilegeError::ReleaseNeedsElevation {
+            packages: vec![PackageRef {
+                name: "jq".to_string(),
+                backend: BackendId::new("apt"),
+            }],
+        }
+    );
+    assert_eq!(
+        err.to_string(),
+        format!("{}: jq (apt)", crate::errmsg::RELEASE_NEEDS_ELEVATION)
+    );
+}
+
+#[test]
+fn a_release_passes_elevated_or_with_no_system_claim_to_drop() {
+    let elevated = FakeMachine {
+        privilege: Privilege::Elevated,
+    };
+    let unelevated = FakeMachine {
+        privilege: Privilege::Unelevated,
+    };
+    assert_eq!(
+        check_release_privilege(&jq_release(true), &elevated),
+        Ok(())
+    );
+    // A remove changes the machine: that is check_privilege's to judge.
+    let remove = jq_release(false);
+    assert_eq!(kinds(&remove), vec![ActionKind::Remove]);
+    assert_eq!(check_release_privilege(&remove, &unelevated), Ok(()));
+    let mut user = jq_release(true);
+    user.actions[0].scope = Scope::User;
+    assert_eq!(check_release_privilege(&user, &unelevated), Ok(()));
+}
+
 // --- serialization ---------------------------------------------------------
 
 #[test]

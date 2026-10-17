@@ -841,6 +841,12 @@ pub enum PrivilegeError {
         /// The system-scope packages that need elevation.
         packages: Vec<PackageRef>,
     },
+    /// A release (`remove`) drops a system-scope claim but the process is not
+    /// elevated; it cannot be deferred, as nothing would drop it later.
+    ReleaseNeedsElevation {
+        /// The system-scope packages whose claim would be dropped.
+        packages: Vec<PackageRef>,
+    },
     /// The plan changes user scope but the process is elevated.
     MustNotBeElevated {
         /// The user-scope packages that must not run elevated.
@@ -869,6 +875,9 @@ impl std::fmt::Display for PrivilegeError {
         match self {
             PrivilegeError::ElevationRequired { packages } => {
                 write!(f, "{}: {}", errmsg::ELEVATION_REQUIRED, refs(packages))
+            }
+            PrivilegeError::ReleaseNeedsElevation { packages } => {
+                write!(f, "{}: {}", errmsg::RELEASE_NEEDS_ELEVATION, refs(packages))
             }
             PrivilegeError::MustNotBeElevated { packages } => {
                 write!(f, "{}: {}", errmsg::MUST_NOT_BE_ELEVATED, refs(packages))
@@ -931,6 +940,30 @@ pub fn check_privilege(
         return Err(PrivilegeError::MustNotBeElevated { packages: user });
     }
     Ok(())
+}
+
+/// Check a release plan (`remove`, §4.2) for the system-scope claims it drops,
+/// which only elevation may write (§5.5). Unlike install's records these
+/// cannot be deferred: the manifest entry goes, so no later run would drop
+/// them. A requested `--scope` does not narrow it, for the same reason.
+/// Machine-changing actions are left to [`check_privilege`].
+pub fn check_release_privilege(plan: &Plan, machine: &dyn Machine) -> Result<(), PrivilegeError> {
+    if machine.privilege() == Privilege::Elevated {
+        return Ok(());
+    }
+    let packages: Vec<PackageRef> = plan
+        .actions
+        .iter()
+        .filter(|a| a.scope == Scope::System && !a.kind.changes_machine())
+        .map(|a| PackageRef {
+            name: a.name.clone(),
+            backend: a.backend.clone(),
+        })
+        .collect();
+    if packages.is_empty() {
+        return Ok(());
+    }
+    Err(PrivilegeError::ReleaseNeedsElevation { packages })
 }
 
 #[cfg(test)]

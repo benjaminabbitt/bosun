@@ -5,6 +5,11 @@
 /// The plan changes system scope but the process is not elevated (§5.5).
 pub const ELEVATION_REQUIRED: &str = "system-scope changes need elevation";
 
+/// `remove` would drop a system-scope claim without elevation (§5.5). Unlike
+/// install's records it cannot wait: once the entry is gone no later run would
+/// drop the claim.
+pub const RELEASE_NEEDS_ELEVATION: &str = "dropping a system-scope claim needs elevation";
+
 /// The plan changes user scope but the process is elevated (§5.5): user-scope
 /// installs must not run as root.
 pub const MUST_NOT_BE_ELEVATED: &str = "user-scope changes must not run elevated";
