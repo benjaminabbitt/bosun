@@ -107,13 +107,13 @@ real to check later):
 
 | command | does |
 |---|---|
-| `add <name> --backend … [--package] [--spec] [--on <selector>] [--opt k=v]` / `remove <name> [--plan] [--yes]` | edit one manifest entry, keeping every other byte, then run `lock` on the edited manifest. Both refuse a manifest older than the current version (run `migrate`). `add` writes under `any` when every backend is platform-independent, else this machine's OS, unless `--on` says; it checks the entry first (backend options, then a resolve on this machine) and writes nothing on error; without `--spec` it writes the range from the newest version up to the next breaking one (`>=2.0.2\|<3.0.0`, below 1.0 the next minor, apt: any revision of the upstream version, PyPI: `>=X` as `uv add` writes); it never installs. `remove` first releases the package (drops this manifest's claim, uninstalls only if bosun installed it and no other manifest claims it, behind the usual confirm), then edits and locks |
+| `add <name> --backend … [--package] [--spec] [--on <selector>] [--opt k=v]` / `remove <name> [--plan] [--yes]` | edit one manifest entry, keeping every other byte, then run `lock` on the edited manifest. Both refuse a manifest older than the current version (run `migrate`). `add` writes under `any` when every backend is platform-independent, else this machine's OS, unless `--on` says; it checks the entry first (backend options, then a resolve on this machine) and writes nothing on error; without `--spec` it writes a default from the newest version: cargo and npm the caret range up to the next breaking one (`>=2.0.2\|<3.0.0`, below 1.0 the next minor), PyPI `>=X` as `uv add` writes, apt, dnf and apk `*`, following whatever the release's repositories carry (the distro's stable-update policy is the compatibility promise, and the selector already scopes the entry); it never installs. `remove` first releases the package (drops this manifest's claim, uninstalls only if bosun installed it and no other manifest claims it, behind the usual confirm), then edits and locks |
 | `refresh` | explicit index refresh, per backend |
 | `install [path] [--plan] [--scope system\|user] [--yes]` | plan → privilege check → confirm → apply: resolve each entry against this machine's lock (its pins that still fit, the newest in spec for the rest), install, record in the machine state, then write the lock (only after a successful apply; never with `--plan`) (§4.8, §5.5, §7). **Never uninstalls** (except the old name in a `formerly` migration, §5.4) |
 | `uninstall [path] [--plan] [--scope system\|user] [--yes]` | the inverse of `install` for one manifest: drop all of its claims, then uninstall each package bosun installed that no other manifest still claims; same plan → confirm → apply flow (§9) |
 | `prune [--plan] [--scope system\|user] [--yes]` | machine-wide cleanup: uninstall what bosun installed that no manifest claims any more, and drop claims whose manifest no longer exists (§9) |
 | `upgrade [pkg…] [--manifest]` | let go of the named pins (all, when none are named), re-resolve those packages to the newest version their spec allows, write this machine's lock, and show old → new; installs nothing |
-| `export [path] [--plan] [--yes]` | seed a manifest from what this machine has installed by hand, by each package manager's own record (§9): apt's manual marks less the distro's base system (priority required, important or standard), apk's world file less the Alpine base packages, cargo's crates.io installs (not path or git ones), and what bosun's state records it installed from GitHub releases (github-release, github-deb, github-rpm, github-installer), with the options its identity carries; a backend with no such record (winget, scoop, choco for now) gives nothing and is named. Each package becomes an entry as `add` writes it: the default range from its installed version, under `any` or this machine's OS. A name the manifest already has is left as written, as is a second backend's package of the same name; one whose range nothing available meets is left out. Creates the manifest when there is none; shows what it adds and confirms (§4.8), then writes and runs `lock`. Never installs |
+| `export [path] [--plan] [--yes]` | seed a manifest from what this machine has installed by hand, by each package manager's own record (§9): apt's manual marks less the distro's base system (priority required, important or standard), apk's world file less the Alpine base packages, cargo's crates.io installs (not path or git ones), and what bosun's state records it installed from GitHub releases (github-release, github-deb, github-rpm, github-installer), with the options its identity carries; a backend with no such record (winget, scoop, choco for now) gives nothing and is named. Each package becomes an entry as `add` writes it: the default spec for its installed version (`*` for an OS package), under `any` or this machine's OS. A name the manifest already has is left as written, as is a second backend's package of the same name; one whose range nothing available meets is left out. Creates the manifest when there is none; shows what it adds and confirms (§4.8), then writes and runs `lock`. Never installs |
 | `status [path]` | with a manifest: each of its packages, installed against wanted, and every manifest that claims it (path, spec, user; a claim whose manifest is gone is marked, `prune` drops it). With no path: everything bosun manages on this machine, both scopes, with origin and claims; no manifest needed. Drift is `install --plan`'s job |
 | `adopt <name>` | explicitly take ownership of an existing install: `accepted` → `installed` (§4.6) |
 | `lock` | resolve the manifest for this machine (its platform, plus platform-independent `any` entries) and write this machine's lock for it, keeping each version it already pins while that still fits (§4.5, §7). Warns when an older bosun's `bosun.lock` sits beside the manifest: it is no longer read |
@@ -263,7 +263,7 @@ Only the header and the per-target leaf fields differ:
 |---|---|---|
 | header | `lockfileVersion`, `manifest`, `manifestHash` | `stateVersion` |
 | package-level `spec` | present (one manifest) | absent: each claim carries its own |
-| per-target leaf | `resolved`, `indexSnapshot`, `checksum` | `installed`, `origin`, `claimedBy` |
+| per-target leaf | `resolved`, `indexSnapshot`, `checksum` | `installed`, `origin`, `held`, `claimedBy` |
 | targets present | this machine's target and `any` | this machine's target and `any` |
 
 ```json
@@ -275,7 +275,7 @@ Only the header and the per-target leaf fields differ:
       "targets": {
         "linux/amd64": {
           "backend": "apt", "purl": "pkg:deb/ubuntu/jq?arch=amd64&distro=noble",
-          "installed": "1.7.1-3ubuntu0.1", "origin": "installed",
+          "installed": "1.7.1-3ubuntu0.1", "origin": "installed", "held": false,
           "claimedBy": [
             { "manifest": "/home/babbitt/workspace/verprop/bosun.yaml", "spec": "vers:deb/>=1.7|<2" },
             { "manifest": "/home/babbitt/.config/bosun/bosun.yaml",     "spec": "vers:deb/>=1.7.1|<1.7.2~" }
@@ -288,7 +288,7 @@ Only the header and the per-target leaf fields differ:
       "targets": {
         "linux/amd64": {
           "backend": "apt", "purl": "pkg:deb/ubuntu/git?arch=amd64&distro=noble",
-          "installed": "2.43.0", "origin": "accepted",
+          "installed": "2.43.0", "origin": "accepted", "held": false,
           "claimedBy": [
             { "manifest": "/home/babbitt/workspace/verprop/bosun.yaml", "spec": "vers:deb/>=2.40" }
           ]
@@ -315,6 +315,9 @@ Only the header and the per-target leaf fields differ:
   wants it), the backend's dry-run in the plan showing any cascade (e.g. dependents
   `apt-get -s remove` would also take), and confirmation. No separate "pre-existing" marker
   is kept.
+- `held`: whether bosun holds the package at `installed` (§5.2: only while some claim's spec is
+  exact). State written before bosun recorded this has no `held`; a package bosun installed then
+  was held, so it reads as held, and the next `install` releases it if no spec is exact.
 - `claimedBy`: every manifest that wants this package, with the spec it asked for. `install`
   in a project adds or updates that project's claims, and drops its claims for entries no longer
   in its manifest — a state-only change; the package stays installed until `prune`. `status`
@@ -450,13 +453,13 @@ Plan: 1 to remove, 1 stale claim to drop.
 `accept` (record only, no change), `claim` (record this project's claim on a package bosun
 already installed at the resolved version, e.g. for another project; version and origin
 unchanged), `adopt` (explicit only: `accepted` → `installed`),
-`hold` / `unhold` — the `install` plan. `remove` (`installed` origin only, no remaining
+`hold` / `unhold` (§5.2) — the `install` plan. `remove` (`installed` origin only, no remaining
 claims) and `drop-claim` — the `uninstall` and `prune` plans, and `remove <name>`. Each carries scope,
 backend, package ID, from → to version, the claim(s) that drove it, and the privilege it needs.
 
-- **Ordering is fixed:** sources first, then migrations, then installs, upgrades and
-  downgrades, then holds, so a renamed package's old version is gone before the new one is
-  installed.
+- **Ordering is fixed:** sources first, then migrations, then unholds, then installs, upgrades
+  and downgrades, then holds, so a renamed package's old version is gone before the new one is
+  installed, and a hold bosun releases is gone before the version moves.
 - **Diagnostics live in the plan:** conflicting exact pins, entries not applicable on this
   machine, missing backends. Errors block apply.
 - **Index age** is shown for repo-bound backends, since planning uses whatever index is current
@@ -502,7 +505,8 @@ trait Installer {                   // mutation side: local machine only
     fn ensure_source(&self, src: &Source) -> Result<()>;               // registry management
     fn install_exact(&self, pkg: &Ref, v: &Version) -> Result<Installed>;
     fn verify_installed(&self, pkg: &Ref) -> Result<Option<Version>>;
-    fn hold(&self, pkg: &Ref, v: &Version) -> Result<()>;
+    fn hold(&self, pkg: &Ref, v: &Version) -> Result<()>;              // exact specs only (§5.2)
+    fn unhold(&self, pkg: &Ref) -> Result<()>;                         // release bosun's hold
     fn downgrade(&self, pkg: &Ref, v: &Version) -> Result<Installed>;  // explicit flag on apt
     fn uninstall(&self, pkg: &Ref) -> Result<()>;                      // prune; managed set only
 }
@@ -513,7 +517,9 @@ Backends declare **capabilities** (`supports_exact_version`, `supports_hold`,
 degrades-with-a-warning when a backend can't honor a pin.
 
 **Mutations are described, then executed (DECIDED).** The mutating `Installer` methods
-(`ensure_source`, `install_exact`, `hold`, `downgrade`, `uninstall`) don't act directly. Each
+(`ensure_source`, `install_exact`, `hold`, `unhold`, `downgrade`, `uninstall`) don't act
+directly. `install_exact` leaves the package unheld (apt and dnf release a hold first; apk adds
+`pkg=ver`, then the bare name, so the world names it unpinned at that version). Each
 returns a **step list**, a typed value saying what to do, and a separate executor carries it
 out. One description drives every driver (§8): the host driver executes the steps, and the
 container renderer prints them as Dockerfile instructions. The plan (§4.8) can show the exact
@@ -540,9 +546,18 @@ commands too.
 | **OS, rolling** (brew/scoop) | weak | freeze-current only | weak — old versions scarce |
 | **Universal app** (snap/flatpak) | weak: snap selects a channel (track/risk), not a version; flatpak can check out a past commit | strong (`snap refresh --hold`, `flatpak mask`) | snap: current release per channel; flatpak: the remote's commit history |
 
-Behavior differs per tier: language → just re-assert exact every run; versioned-OS → install +
-set a hold; rolling-OS → warn pin is best-effort + fall back to a downloaded artifact;
-universal-app → install the channel or commit, then hold.
+Behavior differs per tier: language → just re-assert exact every run; versioned-OS → install,
+and hold only an exact spec; rolling-OS → warn pin is best-effort + fall back to a downloaded
+artifact; universal-app → install the channel or commit, then hold.
+
+**Hold only exact specs (DECIDED).** A package is held (`apt-mark hold`, `dnf versionlock`,
+apk's world `pkg=ver`, `winget pin`, `choco pin`, `scoop hold`) exactly when some claim's spec
+is one bare version. Under a range or `*` it is installed unheld, so the distro's security and
+stable updates reach it between bosun runs; bosun's state keeps the version it installed, and
+`bosun upgrade` moves the lock on. bosun records each hold in state (§4.6). When a package bosun
+holds no longer has an exact spec, the next `install` plans an `unhold` (logged, and shown in
+the plan) before any version change; one an exact spec newly pins gets a `hold` though its
+version stays. A hold the backend cannot make is a warning only for an exact spec.
 
 snap and flatpak are heavily used on desktop Linux (snap ships by default on Ubuntu, flatpak
 with Flathub on Fedora Workstation, Linux Mint and SteamOS), but they wait until wanted, as do
@@ -563,8 +578,8 @@ Properties worth designing around:
 **Registration: backends register only if present.** Every backend is compiled in. At startup
 each one runs a cheap probe (binary on PATH, its version, for build-from-source backends the
 toolchain); only backends whose probe succeeds are registered for the run. Probes run in
-parallel, once per invocation, in `bosun-host`, which also detects OS, architecture and distro
-family (for `linux:<family>` selectors, §5.4).
+parallel, once per invocation, in `bosun-host`, which also detects OS, architecture (§5.5) and
+distro family (for `linux:<family>` selectors, §5.4).
 
 ```rust
 trait BackendFactory {
@@ -831,6 +846,15 @@ trait Machine {
 | invoking user under elevation | `SUDO_USER` / `SUDO_UID` | `SUDO_USER` / `SUDO_UID` | the token's user |
 | how to elevate (error text) | re-run with `sudo` | re-run with `sudo` | open a terminal with "Run as administrator" and re-run (Windows 11's opt-in `sudo` may work, but is not relied on) |
 
+**Architecture is the machine's, not bosun's build (DECIDED).** An x86_64 bosun can run
+translated or emulated on arm64 (Rosetta, qemu-user), so its compiled target says nothing
+about the machine, as its libc doesn't (§5.4). On Linux and macOS bosun runs `uname -m`
+through the `CommandRunner` port, a native program answering for the machine: `x86_64`
+(`amd64` on the BSDs) is amd64, `aarch64` (`arm64` on macOS) is arm64. On Windows it reads
+`PROCESSOR_ARCHITEW6432`, set only for a 32-bit process under WOW64 and naming the native
+processor, else `PROCESSOR_ARCHITECTURE` (`AMD64`, `ARM64`). Any other architecture (`armv7l`,
+`i686`, `x86`) is an error naming it, as is a `uname` that fails.
+
 **`Machine` is orthogonal to backends.** It knows nothing about package managers. Which
 backends exist on a machine is decided only by each backend's own probe (§5.3) against the
 machine's facts, and each backend reports the install scope of what it installs. Homebrew
@@ -967,14 +991,19 @@ There is no `policy` field in the manifest, lockfile or state, and no `deviation
 resolved is always inside what was written.
 
 - "Prefer 1.7.1, but accept a later revision" is a range: `vers:deb/>=1.7.1|<1.7.2~`.
-  Because selection takes the highest, write an upper bound to stay close to a version.
-- **Pre-releases:** they are *in* a vers set by plain ordering, but selection never picks
-  one unless some constraint version is itself a pre-release (the SemVer convention, §12
-  item 3), or the spec is a bare pre-release version. A Debian version is a pre-release when a
-  `~` in it comes before a pre-release tag (`~alpha`, `~beta`, `~rc`, `~pre`, `~dev`): Debian
-  and Ubuntu use `~` for much else, stable updates (`3.0.22-1~deb12u1`, and in native
-  packages `20250419~deb12u1`), backports (`~bpo12+1`) and Ubuntu updates (`~24.04.1`), which
-  are the release itself and what apt installs.
+  Because selection takes the highest, write an upper bound to stay close to a version. An OS
+  package's default spec is `*` (§4.2): the release's repositories, not a bosun ceiling, bound
+  what it takes.
+- **Pre-releases (language schemes only):** they are *in* a vers set by plain ordering, but
+  selection never picks one unless some constraint version is itself a pre-release (the SemVer
+  convention, §12 item 3), or the spec is a bare pre-release version. SemVer, PEP 440 and the
+  generic scheme each classify pre-releases by their own ecosystem's rule.
+- **OS versions have no pre-releases (DECIDED).** Debian, RPM and Alpine versions never
+  are: apt, dnf and apk install whatever the configured repositories carry, and repository
+  configuration (suites, pin priority, enabled repos, branches) is how a distro keeps
+  experimental builds away. A `~` or `_rc` only orders the build (`1.0~rc1 < 1.0`); bosun
+  does not skip it, so `*` selects what the repositories make newest, stable updates
+  (`3.0.22-1~deb12u1`) and backports (`~bpo12+1`) included.
 - Reproducibility comes from the lockfile and `install --frozen` (§7), not from a policy.
 
 **Conformance:** bosun's purl and vers code must pass the official JSON suites from both repos,
@@ -999,6 +1028,18 @@ both (the grammars are small).
     vers type `pypi`).
     RPM (`rpmvercmp`) and Alpine (apk-tools) ordering are bosun's own, tested against each
     tool's reference cases. Reserve the custom regex-chunk path for the long tail.
+  - **Ordering stays bosun's, held to the tools (DECIDED).** `render --target` and claim
+    intersection need it where the tool is absent, so bosun keeps its ports, and the real tier
+    checks them against the tools themselves: every version a Debian 12/13, Fedora 41, Rocky 9
+    or Alpine 3.20/3.23 index offers, sorted by bosun, must be in order by `dpkg
+    --compare-versions`, rpm's `rpm.vercmp` or `apk version -t` pair by adjacent pair (so the
+    tool orders the whole corpus as bosun does), as must each tool's conformance pairs.
+  - **apk ordering follows the host's apk-tools major.** apk-tools 2 (Alpine 3.22 and earlier)
+    and 3 disagree on a few versions: under 2 each leading zero of a `.`-number after the first
+    lowers it (`1.0 > 1.00`), a letter may take a number (`1.0b2`), and `~` is outside the
+    grammar, so what follows it is not ordered (`1.0~ab = 1.0~b`). The apk backend reads the
+    major from `apk --version` when it probes and every Alpine version on the machine follows
+    that major's rules, ordering and validity both; apk-tools 3's apply until one is probed.
   - Go pseudo-versions (`v0.0.0-TIMESTAMP-hash`) validate the model — they order by the embedded
     timestamp chunk, no special-casing.
 
@@ -1193,11 +1234,13 @@ Future driver: CI.
   time. `query_available` reads whatever index is current (`apt-get update`, `dnf makecache`,
   `brew update`, `winget source update`); the user refreshes deliberately. Keeps runs fast and
   predictable and makes "stale index" a visible, user-controlled state rather than hidden cost.
-- **Install scope + PATH — DECIDED: delegate, no validation (for now).** bosun does **not**
-  validate PATH reachability or manage install scope/location itself — it delegates to the
-  installer / package manager's own default placement (`npm -g` prefix, `~/.cargo/bin`, pipx,
-  system prefix, etc.). "installed but not on PATH" is the user's / the manager's concern, not
-  bosun's, at this stage.
+- **Install scope + PATH — DECIDED: delegate placement; warn where bosun picks the bin dir.**
+  bosun does not manage install scope or location itself: it delegates to the installer /
+  package manager's own default placement (`npm -g` prefix, `~/.cargo/bin`, pipx, system
+  prefix, etc.). It checks PATH in two places, as warnings that change nothing: github-release,
+  where bosun is the installer and chose `~/.local/bin`, warns when that dir is not on `PATH`
+  (§12 item 1), and npm warns when the global prefix's bin dir is not on `PATH` (Appendix A).
+  Other backends' "installed but not on PATH" stays the user's or the manager's concern.
 - **State export — DECIDED: in scope.** bosun can seed a manifest from an existing host.
   High-value onboarding. Following the principle below, it reads each package manager's *own*
   record of what the user explicitly installed (e.g. `apt-mark showmanual`,
@@ -1417,8 +1460,9 @@ remote indexes. Traits stay ready; nothing is stubbed.
 - **Unsupported capability degrades** (§5.2): a hold the backend can't do is a warning and is
   skipped; a downgrade it can't do is an error diagnostic for that package, not a failure of
   the whole plan.
-- Holds are change-driven: emitted only when the package changes this run, so a fully-applied
-  manifest plans to nothing.
+- Holds follow the spec (§5.2): a `hold` follows a version change under an exact spec, or pins
+  a package an exact spec newly asks for; an `unhold` releases a hold state records once no
+  spec is exact. A fully-applied manifest plans to nothing.
 - **State is written after every confirmed action**, not only at the end of the run, with the
   lock held throughout; a crash mid-apply never leaves a bosun-installed package unrecorded
   (it would otherwise look `accepted` and never be pruned). The applier depends on a
@@ -1517,7 +1561,7 @@ under a pty on Unix only.
 | M3-3 | github-installer: a release's `.msi` (`msiexec /i … /qn /norestart`) or `.exe` (manifest `silent_args`, required); found in the Uninstall registry keys (`reg query`, three views) by `display_name` (`*` suffix = prefix); uninstall `msiexec /x {ProductCode}` or the entry's quiet/plain uninstaller; msiexec's 3010 (reboot required) is success, reported; system scope, no hold, no downgrade | landed (unit tests); **unverified on a real Windows host**; no fixture scenario (the seam has no registry) |
 | M3-4 | `bosun render args\|env\|json [path]` for this machine, from its lock (missing or stale: an error naming `bosun lock`); variable stems from the logical name or the entry's `var` (manifest key, checked at load), clashes and digit-led stems refused; the build-args driver is `bosun_apply::render` | landed |
 | M3-5 | apt's remote index (§4.7): a release's suites from its mirror over HTTPS (Debian and Ubuntu defaults, as stock images list them), `InRelease` → package index hash chain (by hash), signature not verified (decided: HTTPS and the hash chain; the image's apt verifies at install), cached under the user cache dir (`InRelease` an hour, indexes while their hash holds); `BackendFactory::remote_index` (apt, cargo, github-release, github-deb, github-rpm) | landed; unit tests over trimmed real Debian 12 captures; same candidates as `apt-cache policy` in `debian:12`, `debian:13` and `ubuntu:24.04` |
-| M3-6 | `render args\|env --target <platform>`, `render json --targets a,b`, `--distro <id>[@<release>]`, `--libc <family>[@<version>]`: another machine is resolved fresh through remote indexes with a runner that runs nothing; a backend without one is an error naming it; missing distro or libc facts are warned about. Debian pre-releases are `~` before a pre-release tag (`~deb12u1`, `~bpo`, `~24.04.1` are releases) | landed |
+| M3-6 | `render args\|env --target <platform>`, `render json --targets a,b`, `--distro <id>[@<release>]`, `--libc <family>[@<version>]`: another machine is resolved fresh through remote indexes with a runner that runs nothing; a backend without one is an error naming it; missing distro or libc facts are warned about | landed |
 | M3-7 | npm and uv backends (user scope, platform-independent, no hold): npm registry abbreviated metadata / `npm install -g --prefix` under npm's own global prefix (`npm prefix -g`; warned when not writable or its bin dir is off `PATH`) / `npm ls -g --json`; PyPI JSON API / `uv tool install name==ver` / `uv tool list`; both offer their registry as their remote index (`render --target`); export from each; PEP 440 ordering (`pep440_rs`, vers `pypi`, conformance suites run); `npm` and `pypi` purls must-pass | landed; real tier in `node:22-slim` with uv 0.13.1 (semver 7.6.0 → 7.5.0 → pruned under `~/.npm-global`; the system prefix fails, warned; ruff 0.6.9 → 0.6.8 → pruned) |
 | TV-1 | `Index::select` (the package manager chooses within a `Want`, every claim's vers set; lock preferred while still offered); apt by `apt-cache policy` priorities (`LC_ALL=C`), replacing `madison` | landed; real tier in `debian:13` (a local repo pinned at 100 and at -1); fixtures from `debian:12` + bookworm-backports, pin files, `ubuntu:24.04` phased updates |
 | TV-2 | dnf by repository priority: `repoquery` with `%{repoid}`, priorities from `dnf --dump-repo-config='*'` (dnf5) or the dnf Python API (dnf4) | landed; real tier in `fedora:41` (fedora at priority 1: wget2 2.1.0, then 2.2.0 for `>=2.2`) and `rockylinux:9` (the 9.5 vault at priority 1: unzip 6.0-58.el9_5, then 6.0-60.el9_8) |
@@ -1532,6 +1576,11 @@ under a pty on Unix only.
 | M2-15 | apk backend: `apk policy` index, installs pinned in the world file, `pkg:apk` identity with no `distro`; Alpine ordering (apk-tools 3) | landed; real tier in Alpine 3.20/3.21/3.23 (`just acceptance-real-musl`) |
 | M2-16 | `bosun export`: per backend, what the user installed by hand (apt manual minus base priorities, `cargo install --list`, apk world, bosun-installed releases), merged into the manifest, then `lock` | landed |
 | M2-17 | acceptance seam: absent backends, github-release planning into `~/.local/bin`, the confirmation prompt under a pty; a backend whose program is missing is "not present" | landed |
+| V-1 | OS versions have no pre-releases: Debian, RPM and Alpine `is_prerelease` is false (the tagged-`~` rule is gone); SemVer, PEP 440 and generic keep their own (§5.6) | landed |
+| V-2 | `add` / `export` write `*` for apt, dnf and apk (the `>=U\|<U'~` and `<U'_alpha` ceilings are gone); cargo/npm caret, PyPI `>=X`; github-deb/github-rpm (SemVer tags) caret | landed |
+| V-3 | hold only exact specs: `Installer::unhold`; state records `held` (absent: installed reads held); the plan unholds bosun's hold once no spec is exact (before any version change) and holds a package an exact spec newly pins; apk installs `pkg=ver` then the bare name, so a range leaves the world unpinned | landed; real tier: apt hold → `*` → unheld → `apt-get --only-upgrade` → bosun leaves 2.0-1 (Debian 12/13); dnf `*` unlocked → exact locked → range unlocked (Rocky 9, Fedora 41); apk world unpinned → pinned → unpinned (Alpine 3.20, 3.23) |
+| V-4 | machine architecture from `uname -m` through the runner (Linux/macOS) or `PROCESSOR_ARCHITEW6432` / `PROCESSOR_ARCHITECTURE` (Windows), not bosun's build target (§5.5) | landed; unit tests on `x86_64`, `aarch64`, `arm64`, `armv7l`, `i686` |
+| V-5 | apk ordering and validity by the probed apk-tools major (2 vs 3); real-tier ordering oracle: each index's versions sorted by bosun, every adjacent pair confirmed by `dpkg --compare-versions` / `rpm.vercmp` / `apk version -t`, plus conformance pairs | landed; 0 disagreements: Debian 13 23,276 pairs, Debian 12 21,410, Fedora 41 22,394, Rocky 9 2,800, Alpine 3.20 (apk-tools 2.14.4) 4,921, Alpine 3.23 (3.0.8) 5,282 |
 
 **First real-host smoke run (2026-10-14, release build, Debian 13, read-only `--plan` and
 `lock` in a scratch dir).** `backends` found apt 3.0.3, cargo 1.96.1 and github-release; jq
@@ -1587,7 +1636,8 @@ Command-level reference for the five researched backends. (apt, dnf, apk, uv, np
   (+`--allow-change-held-packages` if held). Deps are NOT auto-pinned.
 - Pin: apt preferences (`/etc/apt/preferences.d/`, Pin/Pin-Priority; `>=1000` forces downgrade,
   `<0` prevents); `apt-mark hold/unhold/showhold` (freezes currently-installed; prefer for
-  "hold"); dpkg `--set-selections`.
+  "hold"); dpkg `--set-selections`. bosun holds only an exact spec (§5.2) and releases its hold
+  with `apt-mark unhold`, which exits 0 on an unheld package.
 - Hard limit: the version must still be in a configured repo (archives keep ~latest only →
   snapshot.debian.org / PPA / local `.deb`).
 
@@ -1658,6 +1708,7 @@ bookworm-backports and pin files, apt 2.6, and `ubuntu:24.04`, apt 2.8.3):
   `dnf-command(versionlock)`, checked with `rpm -q --whatprovides`; it is not in the
   `rockylinux:9` image). Without it the backend reports holds unsupported, so plans warn
   `backend cannot hold` and install unheld. `add` on a locked package is a no-op, exit 0.
+  bosun locks only an exact spec (§5.2) and releases its lock with `dnf versionlock delete`.
 - A lock excludes every other build: `install`/`downgrade` of another version fails while it
   is held (`matches only packages excluded by versionlock` / `All matches were filtered out by
   exclude filtering`). So install, downgrade and remove each start with `dnf versionlock delete
@@ -1669,7 +1720,7 @@ bookworm-backports and pin files, apt 2.6, and `ubuntu:24.04`, apt 2.8.3):
 
 ### apk (Alpine; built and checked 2026-10-16 on Alpine 3.20, 3.21 and 3.23)
 - Two majors in use: apk-tools 2.14 (Alpine ≤ 3.22) and 3.0 (3.23); every command below
-  behaves alike on both. `apk --version` prints `apk-tools 2.14.4, compiled for x86_64.`.
+  behaves alike on both, and their version rules differ (Versions, below). `apk --version` prints `apk-tools 2.14.4, compiled for x86_64.`.
 - Discover: `apk policy <pkg>` lists each version (indented two spaces) and where it comes
   from (four): `lib/apk/db/installed`, a repository URL, or `@tag URL` for a tagged
   repository. An unknown name exits 0 with nothing. A repository carries **one version per
@@ -1680,10 +1731,13 @@ bookworm-backports and pin files, apt 2.6, and `ubuntu:24.04`, apt 2.8.3):
   did not find (1 for one absent package).
 - Install exact / up / down: `apk add <pkg>=<version>`; apk moves to whatever the world asks
   for, so a downgrade is the same command, reaching only versions a repository still has.
+  bosun follows it with `apk add <pkg>`, which rewrites the world line unpinned and, without
+  `--upgrade`, keeps the version installed (checked on 3.20 and 3.23: `nano=7.2-r1` from a
+  second branch, then `apk add nano`, stays at 7.2-r1 until `apk upgrade` takes 8.0-r0).
   `--no-interactive` (both majors) keeps an `/etc/apk/interactive` from prompting.
 - Pin: `apk add <pkg>=<version>` writes `<pkg>=<version>` to `/etc/apk/world`, and no
-  `apk upgrade` moves it until the world changes: that is the hold, so bosun's hold adds no
-  step. Other world forms: `<pkg>` (unpinned), `<pkg>>=1.7`, `<pkg>~1.7` (fuzzy), `<pkg>@tag`,
+  `apk upgrade` moves it until the world changes: that is the hold, which bosun writes only
+  for an exact spec (§5.2). Other world forms: `<pkg>` (unpinned), `<pkg>>=1.7`, `<pkg>~1.7` (fuzzy), `<pkg>@tag`,
   `!<pkg>` (conflict), `cmd:`/`so:` virtuals. `apk add <pkg>` re-adds it unpinned.
 - Remove: `apk del <pkg>` removes the package and its world line, pin included.
 - What the user asked for (export): the world file, less the image's base (`alpine-baselayout`,
@@ -1691,9 +1745,12 @@ bookworm-backports and pin files, apt 2.6, and `ubuntu:24.04`, apt 2.8.3):
   `alpine-base` on a disk install), conflicts, virtuals and tagged entries.
 - Versions: `digit{.digit}…{letter}{_suffix{#}}…{~hash}{-r#}`, ordered by apk-tools'
   `version.c` (vers type `apk`): suffixes `_alpha < _beta < _pre < _rc < (none) < _cvs < _svn
-  < _git < _hg < _p`; a `.`-number with a leading zero compares as a string; a `~hash` (apk-tools
-  3; 2.14 does not order by it) sits between the suffixes and the `-r` revision. bosun
-  follows apk-tools 3 and rejects what it rejects (`1.0-1`, `1.0bc`); checked against `apk version -t` on 3,000 pairs.
+  < _git < _hg < _p`. apk-tools 3: a `.`-number with a leading zero compares as a string, and a
+  `~hash` sits between the suffixes and the `-r` revision. apk-tools 2.14: each leading zero
+  after the first lowers a `.`-number (`1.0 > 1.00`), a letter may take a number (`1.0b2`), a
+  number of 18 or more digits is invalid, and `~` is not in the grammar (`1.0~ab` is invalid,
+  and compares equal to `1.0~b`). bosun follows the probed major in ordering and validity
+  (§6); checked against `apk version -t` on each index's versions under both.
 - Identity: `pkg:apk/<ID>/<name>?arch=<x86_64|aarch64>`, no release qualifier (§5.4).
 - Repositories need their signing key in `/etc/apk/keys` as well as a URL, so bosun
   configures none; `ensure_source` adds no step.
