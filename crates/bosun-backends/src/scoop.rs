@@ -195,6 +195,11 @@ impl Installer for ScoopBackend {
         Ok(vec![step(&["hold", app_name(&id)])])
     }
 
+    fn unhold(&self, pkg: &Ref) -> Result<Steps, PortError> {
+        let id = pkg.purl.native_id();
+        Ok(vec![step(&["unhold", app_name(&id)])])
+    }
+
     fn downgrade(&self, _pkg: &Ref, version: &Version) -> Result<Steps, PortError> {
         Err(PortError::Backend {
             detail: format!(
@@ -322,6 +327,7 @@ fd   10.2.0  main   2026-09-30 10:00:00 Held package
             b.hold(&fd, &v("10.2.0")).unwrap(),
             vec![scoop(&["hold", "fd"])]
         );
+        assert_eq!(b.unhold(&fd).unwrap(), vec![scoop(&["unhold", "fd"])]);
         assert_eq!(b.uninstall(&fd).unwrap(), vec![scoop(&["uninstall", "fd"])]);
         assert!(b.downgrade(&fd, &v("9.0.0")).is_err());
         let extras = Source {

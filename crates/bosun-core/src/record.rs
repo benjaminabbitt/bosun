@@ -78,6 +78,9 @@ pub struct StateLeaf {
     pub origin: Origin,
     /// Every manifest that claims this package, with the spec it asked for.
     pub claimed_by: Vec<Claim>,
+    /// Whether bosun holds it at `installed` (`apt-mark hold`, a versionlock,
+    /// an apk world pin), which it does only for an exact spec.
+    pub held: bool,
 }
 
 /// A lockfile package: package-level [`Spec`] plus a [`LockLeaf`] per target.
@@ -164,6 +167,7 @@ mod tests {
                     placement: placement(),
                     installed: ver("1.7.1-3ubuntu0.1", Scheme::Debian),
                     origin: Origin::Installed,
+                    held: true,
                     claimed_by: vec![Claim {
                         manifest: PathBuf::from("/w/verprop/bosun.yaml"),
                         spec: ">=1.7.1|<1.7.2~".into(),

@@ -48,7 +48,7 @@ Feature: dnf installs and holds RPM packages on Fedora and the RHEL family
     And it says "Added jq *"
     And the lock pins jq 1.7.1-8.fc41
 
-  Scenario: an absent package is planned to install and then hold
+  Scenario: an absent package under an exact spec is planned to install and then hold
     Given a Fedora 41 amd64 machine, not elevated
     And dnf 5.2.17.0 is available
     And dnf publishes jq 1.7.1-8.fc41
@@ -57,14 +57,13 @@ Feature: dnf installs and holds RPM packages on Fedora and the RHEL family
       version: 2
       packages:
         - name: jq
-          spec: ">=1.6"
+          spec: "1.7.1-8.fc41"
           install:
             linux:fedora: {backend: dnf}
       """
     When I run `bosun --format json install . --plan`
     Then it reports changes pending
-    And it says "install"
-    And it says "hold"
+    And the plan's actions are "install jq", "hold jq"
 
   Scenario: on Rocky a linux:rhel block applies; install, then prune
     Given a Rocky 9.8 amd64 machine, elevated

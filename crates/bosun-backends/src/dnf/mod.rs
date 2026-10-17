@@ -8,8 +8,9 @@
 //! hold is `dnf versionlock`: built into dnf5, a plugin for dnf4
 //! (`python3-dnf-plugin-versionlock`, providing `dnf-command(versionlock)`).
 //! Without the plugin the backend reports holds unsupported, so a plan warns
-//! instead of failing at the hold step. A lock blocks any other version of
-//! the package, so every version change and removal releases it first.
+//! instead of failing at the hold step. bosun locks only what an exact spec
+//! pins; a lock blocks any other version of the package, so every version
+//! change and removal releases it first.
 
 use std::sync::{Arc, OnceLock};
 
@@ -401,6 +402,10 @@ impl Installer for DnfBackend {
         } else {
             Ok(Vec::new())
         }
+    }
+
+    fn unhold(&self, pkg: &Ref) -> Result<Steps, PortError> {
+        Ok(self.unlock(pkg))
     }
 
     fn downgrade(&self, pkg: &Ref, version: &Version) -> Result<Steps, PortError> {
@@ -1050,6 +1055,15 @@ mod tests {
             .hold(&reff("jq"), &rpm("1.7.1-8.fc41"))
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn unhold_deletes_the_versionlock_when_there_is_one() {
+        assert_eq!(
+            idle(true).unhold(&reff("jq")).unwrap(),
+            vec![run_step(&["dnf", "versionlock", "delete", "jq"])]
+        );
+        assert!(idle(false).unhold(&reff("jq")).unwrap().is_empty());
     }
 
     #[test]

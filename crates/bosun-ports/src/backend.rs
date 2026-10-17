@@ -85,16 +85,20 @@ pub trait Installer {
     fn scope(&self) -> Scope;
     /// Steps to ensure a source (PPA/tap/bucket/registry) is present (§9).
     fn ensure_source(&self, source: &Source) -> Result<Steps, PortError>;
-    /// Steps to install exactly `version` of `pkg`. The version that actually
-    /// landed is read back with `verify_installed` after the steps run
-    /// (Appendix B #229/#130).
+    /// Steps to install exactly `version` of `pkg`, leaving it unheld. The
+    /// version that actually landed is read back with `verify_installed` after
+    /// the steps run (Appendix B #229/#130).
     fn install_exact(&self, pkg: &Ref, version: &Version) -> Result<Steps, PortError>;
     /// Whether `pkg` is installed and, when readable, its version (§5.1). A
     /// direct read, by package id through the manager, never by binary name
     /// (§5.4). No sentinel version — see [`Installed`].
     fn verify_installed(&self, pkg: &Ref) -> Result<Installed, PortError>;
-    /// Steps to durably hold `pkg` at `version` (`apt-mark hold`, …).
+    /// Steps to durably hold `pkg` at `version` (`apt-mark hold`, …). bosun
+    /// holds only a package whose spec is exact (§5.2).
     fn hold(&self, pkg: &Ref, version: &Version) -> Result<Steps, PortError>;
+    /// Steps to release the hold [`hold`](Installer::hold) put on `pkg`, so
+    /// its package manager may move it again (`apt-mark unhold`, …).
+    fn unhold(&self, pkg: &Ref) -> Result<Steps, PortError>;
     /// Steps to move `pkg` down to `version` (explicit; some backends refuse).
     fn downgrade(&self, pkg: &Ref, version: &Version) -> Result<Steps, PortError>;
     /// Steps to uninstall `pkg`. Only ever called for the managed set (§9).

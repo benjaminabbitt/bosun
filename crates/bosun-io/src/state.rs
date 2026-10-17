@@ -40,6 +40,10 @@ struct LeafEntry {
     purl: String,
     installed: String,
     origin: String,
+    /// Absent in state written before bosun recorded its holds, when it held
+    /// every package it installed.
+    #[serde(default)]
+    held: Option<bool>,
     claimed_by: Vec<ClaimEntry>,
 }
 
@@ -86,6 +90,7 @@ impl StateDoc {
                                 purl: leaf.placement.purl.to_string(),
                                 installed: leaf.installed.as_str().to_string(),
                                 origin: origin_str(leaf.origin).to_string(),
+                                held: Some(leaf.held),
                                 claimed_by: leaf
                                     .claimed_by
                                     .iter()
@@ -144,13 +149,15 @@ fn leaf(e: LeafEntry, scheme: Scheme) -> Result<StateLeaf, IoError> {
     let installed = Version::parse(&e.installed, scheme).map_err(|err| IoError::Convert {
         detail: format!("version {:?}: {err}", e.installed),
     })?;
+    let origin = parse_origin(&e.origin)?;
     Ok(StateLeaf {
         placement: Placement {
             backend: BackendId::new(e.backend),
             purl,
         },
         installed,
-        origin: parse_origin(&e.origin)?,
+        origin,
+        held: e.held.unwrap_or(origin == Origin::Installed),
         claimed_by: e
             .claimed_by
             .into_iter()
@@ -384,6 +391,7 @@ mod tests {
                         },
                         installed: Version::parse("1.7.1-3ubuntu0.1", Scheme::Debian).unwrap(),
                         origin: Origin::Installed,
+                        held: true,
                         claimed_by: vec![Claim {
                             manifest: PathBuf::from("/w/verprop/bosun.yaml"),
                             spec: "vers:deb/>=1.7.1|<1.7.2~".into(),
@@ -406,6 +414,7 @@ mod tests {
           "purl": "pkg:deb/ubuntu/jq?arch=amd64",
           "installed": "1.7.1-3ubuntu0.1",
           "origin": "installed",
+          "held": true,
           "claimedBy": [
             {
               "manifest": "/w/verprop/bosun.yaml",
@@ -438,6 +447,30 @@ mod tests {
             back.packages[0].targets.values().next().unwrap().origin,
             Origin::Accepted
         );
+    }
+
+    #[test]
+    fn roundtrips_an_unheld_package() {
+        let mut doc = sample();
+        doc.packages[0].targets.values_mut().next().unwrap().held = false;
+        let back = from_json(&to_json(&doc), Path::new("state.json"), &schemes()).unwrap();
+        assert_eq!(back, doc);
+    }
+
+    #[test]
+    fn state_without_holds_recorded_reads_installed_packages_as_held() {
+        // bosun once held everything it installed and recorded no hold, so a
+        // package it installed is read as held, one it accepted as not.
+        let leaf = |origin: &str| {
+            let text = format!(
+                r#"{{"stateVersion":1,"packages":[{{"name":"jq","targets":{{"linux/amd64":{{
+                "backend":"apt","purl":"pkg:deb/debian/jq?arch=amd64","installed":"1.7.1-3","origin":"{origin}","claimedBy":[]}}}}}}]}}"#
+            );
+            let doc = from_json(&text, Path::new("state.json"), &schemes()).unwrap();
+            doc.packages[0].targets.values().next().unwrap().held
+        };
+        assert!(leaf("installed"));
+        assert!(!leaf("accepted"));
     }
 
     #[test]

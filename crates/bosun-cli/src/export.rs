@@ -406,6 +406,7 @@ mod tests {
                     installed: sem("0.8.1"),
                     origin: Origin::Installed,
                     claimed_by: Vec::new(),
+                    held: false,
                 },
             )]),
         }

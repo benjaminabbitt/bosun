@@ -74,13 +74,12 @@ Feature: github-release on Windows
       version: 2
       packages:
         - name: fd
-          spec: ">=10.0.0|<11.0.0"
+          spec: "10.2.0"
           install:
             windows: {backend: winget, package: sharkdp.fd}
       """
     When I run `bosun --format json install . --plan`
-    Then it says "install"
-    And it says "hold"
+    Then the plan's actions are "install fd", "hold fd"
     When I run `bosun install . --yes`
     Then it succeeds
     And bosun has recorded fd 10.2.0

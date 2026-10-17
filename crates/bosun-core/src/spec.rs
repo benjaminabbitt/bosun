@@ -114,6 +114,13 @@ impl Spec {
         &self.range
     }
 
+    /// Whether the spec names one exact version (a bare version, §5.6): the
+    /// only spec bosun holds a package at. A range or `*` lets the package
+    /// manager move it between runs.
+    pub fn is_exact(&self) -> bool {
+        matches!(self.range.constraints(), [c] if c.op == VersOp::Eq)
+    }
+
     /// Select the highest available version in the set (§5.6), skipping
     /// pre-releases unless the spec names one. Errors when nothing is in the
     /// set, naming the spec and what was available.
@@ -287,6 +294,16 @@ mod tests {
                 .as_str(),
             "1.8.0_rc1-r0"
         );
+    }
+
+    #[test]
+    fn only_a_bare_version_is_exact() {
+        for exact in ["1.7.1-3", "vers:deb/1.7.1-3", "14.1.1"] {
+            assert!(Spec::new(exact, "deb").unwrap().is_exact(), "{exact}");
+        }
+        for ranged in ["*", ">=1.7.1|<1.7.2~", ">=1.0", "1.0|2.0", "!=1.0"] {
+            assert!(!Spec::new(ranged, "deb").unwrap().is_exact(), "{ranged}");
+        }
     }
 
     #[test]

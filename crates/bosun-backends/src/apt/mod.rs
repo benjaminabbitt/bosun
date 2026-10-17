@@ -6,10 +6,11 @@
 //! Non-interactive per Appendix B: `-y` plus `DEBIAN_FRONTEND=noninteractive`.
 //! A downgrade passes `--allow-downgrades` only on the explicit downgrade path.
 //!
-//! bosun holds what it installs (`apt-mark hold`), and apt refuses to change a
-//! held package under `-y` ("Held packages were changed and -y was used
-//! without --allow-change-held-packages"), so every version change and
-//! removal releases the hold first; `unhold` of an unheld package exits 0.
+//! bosun holds a package an exact spec pins (`apt-mark hold`), and apt
+//! refuses to change a held package under `-y` ("Held packages were changed
+//! and -y was used without --allow-change-held-packages"), so every version
+//! change and removal releases the hold first, leaving the package unheld;
+//! `unhold` of an unheld package exits 0.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -383,6 +384,10 @@ impl Installer for AptBackend {
         }])
     }
 
+    fn unhold(&self, pkg: &Ref) -> Result<Steps, PortError> {
+        Ok(vec![unhold(pkg)])
+    }
+
     fn downgrade(&self, pkg: &Ref, version: &Version) -> Result<Steps, PortError> {
         Ok(vec![
             unhold(pkg),
@@ -480,6 +485,10 @@ mod tests {
         assert_eq!(
             b.hold(&reff("jq"), &deb("1.7.1-3")).unwrap(),
             vec![run_step(&["apt-mark", "hold", "jq"])]
+        );
+        assert_eq!(
+            b.unhold(&reff("jq")).unwrap(),
+            vec![run_step(&["apt-mark", "unhold", "jq"])]
         );
         assert_eq!(
             b.downgrade(&reff("jq"), &deb("1.7.1-3")).unwrap(),

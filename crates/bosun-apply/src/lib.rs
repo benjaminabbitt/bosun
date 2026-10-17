@@ -6,11 +6,12 @@
 //! A [`Plan`] is a value: the same thing `--format json` prints and apply
 //! executes. It carries ordered [`Action`]s — each with its scope, backend,
 //! identity, from→to versions, the claims that drove it, and **its [`Steps`]**
-//! (the exact commands) — plus [`Diagnostic`]s. Ordering is fixed (installs,
-//! upgrades, downgrades, then holds) so a renamed package's old version is gone
-//! before the new one lands; removals live only in the uninstall and prune
-//! plans (§4.8). [`Plan::exit_code`] mirrors `terraform plan -detailed-exitcode`
-//! (0 no changes, 2 changes pending, 1 error).
+//! (the exact commands) — plus [`Diagnostic`]s. Ordering is fixed (unholds,
+//! installs, upgrades, downgrades, then holds) so a renamed package's old
+//! version is gone before the new one lands; removals live only in the
+//! uninstall and prune plans (§4.8). [`Plan::exit_code`] mirrors
+//! `terraform plan -detailed-exitcode` (0 no changes, 2 changes pending, 1
+//! error).
 //!
 //! The plan serialises for `--format json`; it holds domain types for apply to
 //! execute, and the JSON view lives here (bosun-io owns lock/state wire format,
@@ -19,6 +20,7 @@
 
 mod applier;
 mod errmsg;
+mod logmsg;
 pub mod render;
 mod view;
 
@@ -33,6 +35,7 @@ use bosun_core::{BackendId, Checksum, Claim, HoldSupport, Origin, Purl, Ref, Sco
 use bosun_ports::error::PortError;
 use bosun_ports::step::{Step, Steps};
 use bosun_ports::{Installer, Machine, Privilege};
+use tracing::info;
 
 /// What an action does (§4.8). M1 covers these; `migrate`, `adopt` and
 /// `ensure-source` are out of M1 scope.
@@ -49,6 +52,9 @@ pub enum ActionKind {
     Accept,
     /// Durably pin an installed package at its version (`apt-mark hold`).
     Hold,
+    /// Release the hold bosun put on a package whose spec is no longer
+    /// exact, so its package manager may update it (`apt-mark unhold`).
+    Unhold,
     /// Uninstall a package bosun installed, now unclaimed (uninstall/prune).
     Remove,
     /// Drop a manifest's claim on a package that stays installed (another
@@ -71,6 +77,7 @@ impl ActionKind {
                 | ActionKind::Upgrade
                 | ActionKind::Downgrade
                 | ActionKind::Hold
+                | ActionKind::Unhold
                 | ActionKind::Remove
         )
     }
@@ -83,6 +90,7 @@ impl ActionKind {
             ActionKind::Downgrade => "downgrade",
             ActionKind::Accept => "accept",
             ActionKind::Hold => "hold",
+            ActionKind::Unhold => "unhold",
             ActionKind::Remove => "remove",
             ActionKind::DropClaim => "drop-claim",
             ActionKind::Claim => "claim",
@@ -105,7 +113,8 @@ pub struct Action {
     pub backend: BackendId,
     /// The package's canonical unversioned identity (§5.6).
     pub purl: Purl,
-    /// The version before (`None` for a fresh install or a hold).
+    /// The version before (`None` for a fresh install or a hold; the
+    /// installed version for an unhold).
     pub from: Option<Version>,
     /// The version after (`None` for a removal or a dropped claim).
     pub to: Option<Version>,
@@ -285,8 +294,9 @@ impl std::fmt::Display for Diagnostic {
 /// A whole plan (§4.8): the ordered actions and the diagnostics.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Plan {
-    /// Actions in apply order (installs, upgrades, downgrades, accepts, holds;
-    /// or removals and dropped claims for uninstall/prune).
+    /// Actions in apply order (unholds, installs, upgrades, downgrades,
+    /// accepts, claims, holds; or removals and dropped claims for
+    /// uninstall/prune).
     pub actions: Vec<Action>,
     /// Diagnostics; any [`Severity::Error`] blocks apply.
     pub diagnostics: Vec<Diagnostic>,
@@ -333,6 +343,8 @@ pub enum Current {
         /// The claims bosun state records on it; empty when state doesn't
         /// record it (found present on the machine).
         claimed_by: Vec<Claim>,
+        /// Whether bosun state records holding it.
+        held: bool,
     },
 }
 
@@ -375,6 +387,15 @@ fn same_claims(recorded: &[Claim], wanted: &[Claim]) -> bool {
     asks(recorded) == asks(wanted)
 }
 
+/// Whether some claim asks for one exact version (§5.2): the only spec bosun
+/// holds a package at. Under ranges and `*` the package manager may update
+/// it between runs.
+fn wants_exact(claims: &[Claim], vers_type: &str) -> bool {
+    claims
+        .iter()
+        .any(|c| Spec::new(&c.spec, vers_type).is_ok_and(|spec| spec.is_exact()))
+}
+
 /// Does `version` satisfy every claim's vers set?
 fn satisfies_all(version: &Version, claims: &[Claim], vers_type: &str) -> bool {
     claims
@@ -383,16 +404,20 @@ fn satisfies_all(version: &Version, claims: &[Claim], vers_type: &str) -> bool {
 }
 
 /// Build the install plan (§4.8): compare each managed package's resolved
-/// version to its current state, emitting `install`/`upgrade`/`downgrade`
-/// (each followed by a `hold` on a hold-capable backend), or `accept` for a
-/// present-and-satisfying accepted package. `carried` are resolution's own
-/// diagnostics (not-applicable, missing-backend, unsatisfiable, empty
-/// intersection); the builder adds `accepted-unsatisfied`. Actions come out in
-/// fixed order: installs, upgrades, downgrades, accepts, then holds.
+/// version to its current state, emitting `install`/`upgrade`/`downgrade`, or
+/// `accept` for a present-and-satisfying accepted package. A package bosun
+/// installed is held on a hold-capable backend exactly when a claim's spec is
+/// exact (§5.2): a `hold` follows a version change under an exact spec or
+/// pins one it newly asks for, and an `unhold` releases a hold state records
+/// once no spec is exact. `carried` are resolution's own diagnostics
+/// (not-applicable, missing-backend, unsatisfiable, empty intersection); the
+/// builder adds `accepted-unsatisfied`. Actions come out in fixed order:
+/// unholds, installs, upgrades, downgrades, accepts, claims, then holds.
 pub fn build_install_plan(
     managed: &[Managed<'_>],
     carried: Vec<Diagnostic>,
 ) -> Result<Plan, PortError> {
+    let mut unholds = Vec::new();
     let mut installs = Vec::new();
     let mut upgrades = Vec::new();
     let mut downgrades = Vec::new();
@@ -404,6 +429,20 @@ pub fn build_install_plan(
     for m in managed {
         let scope = m.installer.scope();
         let pkg = Ref::new(m.purl.clone());
+        let caps = m.installer.capabilities();
+        let holds_here = caps.hold == HoldSupport::Supported;
+        let exact = wants_exact(&m.claims, &m.vers_type);
+        let hold_action = |steps: Steps| Action {
+            kind: ActionKind::Hold,
+            name: m.name.clone(),
+            scope,
+            backend: m.backend.clone(),
+            purl: m.purl.clone(),
+            from: None,
+            to: Some(m.resolved.clone()),
+            claims: m.claims.clone(),
+            steps,
+        };
 
         // Decide the changing action, if any. `accept` and the unsatisfied
         // warning are terminal (no version moves, so no follow-up hold).
@@ -413,6 +452,7 @@ pub fn build_install_plan(
                 version,
                 origin: Origin::Installed,
                 claimed_by,
+                held,
             } => {
                 let change = match version {
                     Some(v) => match v.cmp(&m.resolved) {
@@ -439,6 +479,25 @@ pub fn build_install_plan(
                         claims: m.claims.clone(),
                         steps: Vec::new(),
                     });
+                }
+                // A hold bosun put on is released once no spec is exact, before
+                // any version change; one an exact spec now asks for is added.
+                if holds_here && *held && !exact {
+                    info!(message = logmsg::RELEASING_HOLD, package = %m.name);
+                    unholds.push(Action {
+                        kind: ActionKind::Unhold,
+                        name: m.name.clone(),
+                        scope,
+                        backend: m.backend.clone(),
+                        purl: m.purl.clone(),
+                        from: version.clone(),
+                        to: None,
+                        claims: m.claims.clone(),
+                        steps: m.installer.unhold(&pkg)?,
+                    });
+                }
+                if change.is_none() && holds_here && exact && !*held {
+                    holds.push(hold_action(m.installer.hold(&pkg, &m.resolved)?));
                 }
                 change
             }
@@ -478,7 +537,6 @@ pub fn build_install_plan(
         };
 
         let Some((kind, from)) = change else { continue };
-        let caps = m.installer.capabilities();
 
         // A needed downgrade the backend can't do is an error for this package,
         // not a whole-plan failure (§5.2): skip it and record the diagnostic.
@@ -521,30 +579,26 @@ pub fn build_install_plan(
             ActionKind::Downgrade => downgrades.push(action),
             _ => unreachable!("change is only install/upgrade/downgrade"),
         }
-        // Pin the version we chose (§5.2). A backend that cannot hold but
-        // would benefit from one degrades to a warning; one that does not need
-        // a hold (it owns the binary or re-asserts each run) stays silent.
-        match caps.hold {
-            HoldSupport::Supported => holds.push(Action {
-                kind: ActionKind::Hold,
-                name: m.name.clone(),
-                scope,
-                backend: m.backend.clone(),
-                purl: m.purl.clone(),
-                from: None,
-                to: Some(m.resolved.clone()),
-                claims: m.claims.clone(),
-                steps: m.installer.hold(&pkg, &m.resolved)?,
-            }),
-            HoldSupport::Unsupported => diagnostics.push(Diagnostic::UnsupportedHold {
-                name: m.name.clone(),
-                backend: m.backend.clone(),
-            }),
-            HoldSupport::NotNeeded => {}
+        // An exact spec pins the version we chose (§5.2); the install left it
+        // unheld. A backend that cannot hold but would benefit from one
+        // degrades to a warning; one that does not need a hold (it owns the
+        // binary or re-asserts each run) stays silent.
+        if exact {
+            match caps.hold {
+                HoldSupport::Supported => {
+                    holds.push(hold_action(m.installer.hold(&pkg, &m.resolved)?))
+                }
+                HoldSupport::Unsupported => diagnostics.push(Diagnostic::UnsupportedHold {
+                    name: m.name.clone(),
+                    backend: m.backend.clone(),
+                }),
+                HoldSupport::NotNeeded => {}
+            }
         }
     }
 
-    let mut actions = installs;
+    let mut actions = unholds;
+    actions.append(&mut installs);
     actions.append(&mut upgrades);
     actions.append(&mut downgrades);
     actions.append(&mut accepts);

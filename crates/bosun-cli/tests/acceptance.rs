@@ -783,15 +783,17 @@ fn installing_fails(world: &mut BosunWorld, pkg: String) {
 
 /// Seed bosun's own record of a package: `installed` (bosun put it there) or
 /// `accepted` (found present and adopted), claimed by this project's manifest
-/// or by another project's.
+/// or by another project's. The record says nothing of a hold, as state
+/// written before bosun recorded its holds did, unless it says `unheld`.
 #[given(
-    regex = r#"^bosun (installed|accepted) (\S+) (\S+) for (this|another) project wanting "(.+)"$"#
+    regex = r#"^bosun (installed|accepted) (\S+) (\S+)( unheld)? for (this|another) project wanting "(.+)"$"#
 )]
 fn bosun_recorded(
     world: &mut BosunWorld,
     origin: String,
     pkg: String,
     version: String,
+    unheld: String,
     whose: String,
     spec: String,
 ) {
@@ -816,18 +818,17 @@ fn bosun_recorded(
     };
     let target = format!("{}/{}", m.os, m.arch);
     let claim = json!({"manifest": manifest, "spec": format!("vers:{}/{spec}", b.meta.vers_type)});
-    let entry = json!({
-        "name": pkg,
-        "targets": {
-            &target: {
-                "backend": b.id,
-                "purl": purl,
-                "installed": version,
-                "origin": origin,
-                "claimedBy": [],
-            }
-        }
+    let mut leaf = json!({
+        "backend": b.id,
+        "purl": purl,
+        "installed": version,
+        "origin": origin,
+        "claimedBy": [],
     });
+    if !unheld.is_empty() {
+        leaf["held"] = json!(false);
+    }
+    let entry = json!({"name": pkg, "targets": {&target: leaf}});
     let scope = b.meta.scope.to_string();
     let packages = world.seeded.entry(scope.clone()).or_default();
     // A package seeded again gains a claim, as state records one package per
@@ -1039,6 +1040,48 @@ fn has_recorded(world: &mut BosunWorld, pkg: String, version: String) {
     });
     let state = world.state_text();
     assert!(found, "want {pkg} {version} in state:\n{state}");
+}
+
+#[then(regex = r"^bosun records (\S+) as (held|not held)$")]
+fn records_held(world: &mut BosunWorld, pkg: String, held: String) {
+    let want = held == "held";
+    let found = world.state_docs().iter().any(|doc| {
+        doc["packages"].as_array().into_iter().flatten().any(|p| {
+            p["name"] == pkg.as_str()
+                && p["targets"]
+                    .as_object()
+                    .into_iter()
+                    .flat_map(|t| t.values())
+                    .any(|leaf| leaf["held"] == want)
+        })
+    });
+    let state = world.state_text();
+    assert!(found, "want {pkg} {held} in state:\n{state}");
+}
+
+/// The JSON plan's actions, each as `<action> <name>`, in order.
+#[then(regex = r"^the plan's actions are (.*)$")]
+fn plan_actions(world: &mut BosunWorld, want: String) {
+    let plan: Value = serde_json::from_str(&world.stdout)
+        .unwrap_or_else(|e| panic!("{e}; stdout:\n{}", world.stdout));
+    let got: Vec<String> = plan["actions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|a| {
+            format!(
+                "\"{} {}\"",
+                a["action"].as_str().unwrap_or_default(),
+                a["name"].as_str().unwrap_or_default()
+            )
+        })
+        .collect();
+    let got = if got.is_empty() {
+        "none".to_string()
+    } else {
+        got.join(", ")
+    };
+    assert_eq!(got, want, "stdout:\n{}", world.stdout);
 }
 
 #[then(regex = r"^bosun has recorded nothing about (\S+)$")]

@@ -70,6 +70,9 @@ impl Installer for FakeInstaller {
     fn hold(&self, pkg: &Ref, version: &Version) -> Result<Steps, PortError> {
         Ok(self.run("hold", pkg, Some(version)))
     }
+    fn unhold(&self, pkg: &Ref) -> Result<Steps, PortError> {
+        Ok(self.run("unhold", pkg, None))
+    }
     fn downgrade(&self, pkg: &Ref, version: &Version) -> Result<Steps, PortError> {
         if self.downgradable {
             Ok(self.run("downgrade", pkg, Some(version)))
@@ -163,6 +166,9 @@ impl Installer for FetchInstaller {
     fn hold(&self, _pkg: &Ref, _version: &Version) -> Result<Steps, PortError> {
         Ok(Vec::new())
     }
+    fn unhold(&self, _pkg: &Ref) -> Result<Steps, PortError> {
+        Ok(Vec::new())
+    }
     fn downgrade(&self, pkg: &Ref, version: &Version) -> Result<Steps, PortError> {
         self.install_exact(pkg, version)
     }
@@ -243,8 +249,15 @@ fn install_plan_upgrades_when_installed_is_lower() {
         version: Some(deb("1.7.0-1")),
         origin: Origin::Installed,
         claimed_by: vec![],
+        held: false,
     };
-    let m = managed("jq", "1.7.1-3", current, &apt, vec![]);
+    let m = managed(
+        "jq",
+        "1.7.1-3",
+        current,
+        &apt,
+        vec![claim("/w/a", "1.7.1-3")],
+    );
     let plan = build_install_plan(&[m], vec![]).unwrap();
 
     assert_eq!(kinds(&plan), vec![ActionKind::Upgrade, ActionKind::Hold]);
@@ -259,8 +272,15 @@ fn install_plan_downgrades_when_installed_is_higher() {
         version: Some(deb("1.8.0-1")),
         origin: Origin::Installed,
         claimed_by: vec![],
+        held: false,
     };
-    let m = managed("jq", "1.7.1-3", current, &apt, vec![]);
+    let m = managed(
+        "jq",
+        "1.7.1-3",
+        current,
+        &apt,
+        vec![claim("/w/a", "1.7.1-3")],
+    );
     let plan = build_install_plan(&[m], vec![]).unwrap();
 
     assert_eq!(kinds(&plan), vec![ActionKind::Downgrade, ActionKind::Hold]);
@@ -278,6 +298,7 @@ fn install_plan_does_nothing_when_already_at_the_resolved_version() {
         version: Some(deb("1.7.1-3")),
         origin: Origin::Installed,
         claimed_by: vec![],
+        held: false,
     };
     let m = managed("jq", "1.7.1-3", current, &apt, vec![]);
     let plan = build_install_plan(&[m], vec![]).unwrap();
@@ -301,6 +322,7 @@ fn install_plan_records_a_new_claim_on_a_package_already_at_the_resolved_version
         version: Some(deb("1.7.1-3")),
         origin: Origin::Installed,
         claimed_by: vec![claim_by("/w/b", ">=1.7", "ann")],
+        held: false,
     };
     let claims = vec![claim_by("/w/b", ">=1.7", "ann"), claim("/w/a", ">=1.6")];
     let m = managed("jq", "1.7.1-3", current, &apt, claims.clone());
@@ -320,6 +342,7 @@ fn install_plan_records_a_changed_spec_on_a_package_already_at_the_resolved_vers
         version: Some(deb("1.7.1-3")),
         origin: Origin::Installed,
         claimed_by: vec![claim("/w/a", ">=1.6")],
+        held: false,
     };
     let m = managed("jq", "1.7.1-3", current, &apt, vec![claim("/w/a", ">=1.7")]);
     let plan = build_install_plan(&[m], vec![]).unwrap();
@@ -334,6 +357,7 @@ fn install_plan_records_a_new_claim_when_the_installed_version_is_unknown() {
         version: None,
         origin: Origin::Installed,
         claimed_by: vec![],
+        held: false,
     };
     let m = managed("jq", "1.7.1-3", current, &apt, vec![claim("/w/a", ">=1.6")]);
     let plan = build_install_plan(&[m], vec![]).unwrap();
@@ -350,6 +374,7 @@ fn install_plan_does_nothing_when_its_claim_is_already_recorded() {
         version: Some(deb("1.7.1-3")),
         origin: Origin::Installed,
         claimed_by: vec![claim_by("/w/a", ">=1.6", "ben"), claim("/w/b", ">=1.7")],
+        held: false,
     };
     let claims = vec![claim("/w/b", ">=1.7"), claim("/w/a", ">=1.6")];
     let m = managed("jq", "1.7.1-3", current, &apt, claims);
@@ -365,6 +390,7 @@ fn install_plan_accepts_a_present_satisfying_accepted_package() {
         version: Some(deb("2.43.0")),
         origin: Origin::Accepted,
         claimed_by: vec![],
+        held: false,
     };
     let m = managed(
         "git",
@@ -395,6 +421,7 @@ fn install_plan_warns_when_an_accepted_package_no_longer_satisfies() {
         version: Some(deb("2.39.0")),
         origin: Origin::Accepted,
         claimed_by: vec![],
+        held: false,
     };
     let m = managed(
         "git",
@@ -462,7 +489,13 @@ fn a_carried_error_diagnostic_blocks_apply() {
 #[test]
 fn install_plan_orders_installs_then_upgrades_then_holds() {
     let apt = apt();
-    let install = managed("a", "1.0-1", Current::Absent, &apt, vec![]);
+    let install = managed(
+        "a",
+        "1.0-1",
+        Current::Absent,
+        &apt,
+        vec![claim("/w/a", "1.0-1")],
+    );
     let upgrade = managed(
         "b",
         "2.0-1",
@@ -470,9 +503,10 @@ fn install_plan_orders_installs_then_upgrades_then_holds() {
             version: Some(deb("1.0-1")),
             origin: Origin::Installed,
             claimed_by: vec![],
+            held: false,
         },
         &apt,
-        vec![],
+        vec![claim("/w/a", "2.0-1")],
     );
     let plan = build_install_plan(&[install, upgrade], vec![]).unwrap();
 
@@ -502,7 +536,7 @@ fn an_unsupported_hold_warns_and_skips_the_hold() {
         backend: BackendId::new("brew"),
         resolved: Version::parse("14.1.1", Scheme::Semver).unwrap(),
         vers_type: "semver".to_string(),
-        claims: vec![],
+        claims: vec![claim("/w/a", "14.1.1")],
         current: Current::Absent,
         installer: &brew,
         checksum: None,
@@ -539,6 +573,193 @@ fn a_not_needed_hold_is_silent() {
     assert!(plan.diagnostics.is_empty(), "not-needed hold is silent");
 }
 
+// --- holds: only an exact spec is held (§5.2) --------------------------------
+
+fn installed_at(raw: &str, held: bool, claimed_by: Vec<Claim>) -> Current {
+    Current::Present {
+        version: Some(deb(raw)),
+        origin: Origin::Installed,
+        claimed_by,
+        held,
+    }
+}
+
+fn argv0(action: &Action) -> &str {
+    match &action.steps[0] {
+        Step::Run { argv, .. } => &argv[0],
+        other => panic!("not a run: {other:?}"),
+    }
+}
+
+#[test]
+fn a_ranged_or_star_spec_installs_unheld() {
+    let apt = apt();
+    for spec in ["*", ">=1.6", ">=1.7.1|<1.7.2~"] {
+        let m = managed(
+            "jq",
+            "1.7.1-3",
+            Current::Absent,
+            &apt,
+            vec![claim("/w/a", spec)],
+        );
+        let plan = build_install_plan(&[m], vec![]).unwrap();
+        assert_eq!(kinds(&plan), vec![ActionKind::Install], "{spec}");
+        assert!(plan.diagnostics.is_empty(), "{spec}");
+    }
+}
+
+#[test]
+fn any_exact_claim_holds_the_package() {
+    let apt = apt();
+    let claims = vec![claim("/w/a", ">=1.6"), claim("/w/b", "1.7.1-3")];
+    let m = managed("jq", "1.7.1-3", Current::Absent, &apt, claims);
+    let plan = build_install_plan(&[m], vec![]).unwrap();
+    assert_eq!(kinds(&plan), vec![ActionKind::Install, ActionKind::Hold]);
+}
+
+#[test]
+fn a_ranged_spec_on_a_backend_that_cannot_hold_warns_nothing() {
+    let brew = FakeInstaller {
+        scope: Scope::System,
+        hold: HoldSupport::Unsupported,
+        downgradable: true,
+        verify: Installed::Absent,
+    };
+    let m = managed(
+        "jq",
+        "1.7.1-3",
+        Current::Absent,
+        &brew,
+        vec![claim("/w/a", "*")],
+    );
+    let plan = build_install_plan(&[m], vec![]).unwrap();
+    assert_eq!(kinds(&plan), vec![ActionKind::Install]);
+    assert!(plan.diagnostics.is_empty());
+}
+
+#[test]
+fn a_held_package_whose_spec_is_no_longer_exact_is_unheld() {
+    // bosun held it under an exact spec, or under a range before it held only
+    // exact specs; now the spec is a range, so the distro's updates may flow.
+    let apt = apt();
+    let claims = vec![claim("/w/a", ">=1.6")];
+    let current = installed_at("1.7.1-3", true, claims.clone());
+    let plan =
+        build_install_plan(&[managed("jq", "1.7.1-3", current, &apt, claims)], vec![]).unwrap();
+
+    assert_eq!(kinds(&plan), vec![ActionKind::Unhold]);
+    let unhold = &plan.actions[0];
+    assert_eq!(argv0(unhold), "unhold");
+    assert_eq!(unhold.from.as_ref().unwrap().as_str(), "1.7.1-3");
+    assert_eq!(unhold.to, None);
+    assert!(unhold.needs_elevation());
+    assert_eq!(plan.exit_code(), 2);
+}
+
+#[test]
+fn a_held_package_moving_under_a_ranged_spec_is_unheld_before_it_moves() {
+    let apt = apt();
+    let claims = vec![claim("/w/a", "*")];
+    let current = installed_at("1.7.0-1", true, claims.clone());
+    let plan =
+        build_install_plan(&[managed("jq", "1.7.1-3", current, &apt, claims)], vec![]).unwrap();
+    assert_eq!(kinds(&plan), vec![ActionKind::Unhold, ActionKind::Upgrade]);
+}
+
+#[test]
+fn unholds_come_before_every_install() {
+    let apt = apt();
+    let fresh = managed(
+        "a",
+        "1.0-1",
+        Current::Absent,
+        &apt,
+        vec![claim("/w/a", "*")],
+    );
+    let claims = vec![claim("/w/a", "*")];
+    let held = managed(
+        "b",
+        "1.0-1",
+        installed_at("1.0-1", true, claims.clone()),
+        &apt,
+        claims,
+    );
+    let plan = build_install_plan(&[fresh, held], vec![]).unwrap();
+    assert_eq!(kinds(&plan), vec![ActionKind::Unhold, ActionKind::Install]);
+}
+
+#[test]
+fn an_unheld_package_whose_spec_is_now_exact_is_held() {
+    let apt = apt();
+    let current = installed_at("1.7.1-3", false, vec![claim("/w/a", ">=1.6")]);
+    let claims = vec![claim("/w/a", "1.7.1-3")];
+    let plan =
+        build_install_plan(&[managed("jq", "1.7.1-3", current, &apt, claims)], vec![]).unwrap();
+    assert_eq!(kinds(&plan), vec![ActionKind::Claim, ActionKind::Hold]);
+    assert_eq!(argv0(&plan.actions[1]), "hold");
+}
+
+#[test]
+fn a_package_held_as_its_spec_asks_needs_nothing() {
+    let apt = apt();
+    let exact = vec![claim("/w/a", "1.7.1-3")];
+    let held = installed_at("1.7.1-3", true, exact.clone());
+    let ranged = vec![claim("/w/a", "*")];
+    let free = installed_at("1.7.1-3", false, ranged.clone());
+    let plan = build_install_plan(
+        &[
+            managed("a", "1.7.1-3", held, &apt, exact),
+            managed("b", "1.7.1-3", free, &apt, ranged),
+        ],
+        vec![],
+    )
+    .unwrap();
+    assert!(plan.actions.is_empty(), "{:?}", kinds(&plan));
+}
+
+#[test]
+fn a_backend_without_holds_never_unholds() {
+    for hold in [HoldSupport::Unsupported, HoldSupport::NotNeeded] {
+        let backend = FakeInstaller {
+            scope: Scope::System,
+            hold,
+            downgradable: true,
+            verify: Installed::Absent,
+        };
+        let claims = vec![claim("/w/a", "*")];
+        let current = installed_at("1.7.1-3", true, claims.clone());
+        let plan = build_install_plan(
+            &[managed("jq", "1.7.1-3", current, &backend, claims)],
+            vec![],
+        )
+        .unwrap();
+        assert!(plan.actions.is_empty(), "{hold:?}");
+    }
+}
+
+#[test]
+fn an_accepted_package_is_never_held_or_unheld() {
+    let apt = apt();
+    let current = Current::Present {
+        version: Some(deb("1.7.1-3")),
+        origin: Origin::Accepted,
+        claimed_by: vec![],
+        held: true,
+    };
+    let plan = build_install_plan(
+        &[managed(
+            "jq",
+            "1.7.1-3",
+            current,
+            &apt,
+            vec![claim("/w/a", "1.7.1-3")],
+        )],
+        vec![],
+    )
+    .unwrap();
+    assert_eq!(kinds(&plan), vec![ActionKind::Accept]);
+}
+
 #[test]
 fn an_unsupported_downgrade_is_an_error_that_skips_the_action() {
     // A backend that can't downgrade, asked to move a package down.
@@ -559,6 +780,7 @@ fn an_unsupported_downgrade_is_an_error_that_skips_the_action() {
             version: Some(Version::parse("2.0.0", Scheme::Semver).unwrap()),
             origin: Origin::Installed,
             claimed_by: vec![],
+            held: false,
         },
         installer: &frozen,
         checksum: None,
@@ -718,6 +940,7 @@ fn an_accept_only_plan_needs_no_elevation() {
         version: Some(deb("2.43.0")),
         origin: Origin::Accepted,
         claimed_by: vec![],
+        held: false,
     };
     let m = managed(
         "git",
@@ -744,6 +967,7 @@ fn leaf(name: &str, installed: &str, origin: Origin, claims: Vec<Claim>) -> Stat
         installed: deb(installed),
         origin,
         claimed_by: claims,
+        held: false,
     }
 }
 
@@ -1292,7 +1516,7 @@ fn apply_isolates_a_failed_backend_and_continues_others() {
         backend: BackendId::new("apt"),
         resolved: deb("1.0.0"),
         vers_type: "deb".to_string(),
-        claims: vec![],
+        claims: vec![claim("/w/a", "1.0.0")],
         current: Current::Absent,
         installer: &apt,
         checksum: None,
@@ -1342,6 +1566,7 @@ fn apply_accept_records_a_claim_without_running_steps() {
         version: Some(deb("2.43.0")),
         origin: Origin::Accepted,
         claimed_by: vec![],
+        held: false,
     };
     let plan = build_install_plan(
         &[managed(
@@ -1395,9 +1620,112 @@ fn prestate(name: &str, installed: &str, origin: Origin, claims: Vec<Claim>) -> 
                     installed: deb(installed),
                     origin,
                     claimed_by: claims,
+                    held: false,
                 },
             )]),
         }],
+    }
+}
+
+fn held_prestate(name: &str, installed: &str, held: bool, claims: Vec<Claim>) -> StateDocument {
+    let mut doc = prestate(name, installed, Origin::Installed, claims);
+    doc.packages[0].targets.get_mut(&AMD64).unwrap().held = held;
+    doc
+}
+
+fn apply_system(
+    plan: &Plan,
+    apt: &FakeInstaller,
+    store: &FakeStateStore,
+) -> (ApplyReport, Vec<Vec<String>>) {
+    let insts: BTreeMap<BackendId, &dyn Installer> =
+        BTreeMap::from([(BackendId::new("apt"), apt as &dyn Installer)]);
+    let exec = FakeStepRunner::ok();
+    let applier = HostApplier::new(Scope::System, AMD64, None, &exec, &insts, store);
+    let report = applier.apply(plan).unwrap();
+    (report, exec.ran())
+}
+
+#[test]
+fn apply_records_a_hold_and_an_install_left_unheld() {
+    let apt = verifying(Scope::System, true, true, present("1.7.1-3"));
+    for (spec, held) in [("1.7.1-3", true), (">=1.6", false)] {
+        let m = managed(
+            "jq",
+            "1.7.1-3",
+            Current::Absent,
+            &apt,
+            vec![claim("/w/a", spec)],
+        );
+        let plan = build_install_plan(&[m], vec![]).unwrap();
+        let store = FakeStateStore::empty();
+        apply_system(&plan, &apt, &store);
+        assert_eq!(
+            store.snapshot().packages[0].targets[&AMD64].held,
+            held,
+            "{spec}"
+        );
+    }
+}
+
+#[test]
+fn apply_unhold_runs_its_steps_and_records_the_package_unheld() {
+    let apt = verifying(Scope::System, true, true, present("1.7.1-3"));
+    let claims = vec![claim("/w/a", "*")];
+    let store = FakeStateStore::with(held_prestate("jq", "1.7.1-3", true, claims.clone()));
+    let current = installed_at("1.7.1-3", true, claims.clone());
+    let plan =
+        build_install_plan(&[managed("jq", "1.7.1-3", current, &apt, claims)], vec![]).unwrap();
+
+    let (report, ran) = apply_system(&plan, &apt, &store);
+
+    assert_eq!(
+        results(&report),
+        vec![(ActionKind::Unhold, ApplyResult::Applied)]
+    );
+    assert_eq!(ran, vec![vec!["unhold".to_string(), "jq".to_string()]]);
+    let leaf = &store.snapshot().packages[0].targets[&AMD64];
+    assert!(!leaf.held);
+    assert_eq!(leaf.installed.as_str(), "1.7.1-3");
+}
+
+#[test]
+fn apply_hold_records_an_installed_package_held() {
+    let apt = verifying(Scope::System, true, true, present("1.7.1-3"));
+    let claims = vec![claim("/w/a", "1.7.1-3")];
+    let store = FakeStateStore::with(held_prestate("jq", "1.7.1-3", false, claims.clone()));
+    let current = installed_at("1.7.1-3", false, claims.clone());
+    let plan =
+        build_install_plan(&[managed("jq", "1.7.1-3", current, &apt, claims)], vec![]).unwrap();
+
+    let (report, _) = apply_system(&plan, &apt, &store);
+
+    assert_eq!(
+        results(&report),
+        vec![(ActionKind::Hold, ApplyResult::Applied)]
+    );
+    assert!(store.snapshot().packages[0].targets[&AMD64].held);
+}
+
+#[test]
+fn a_hold_on_a_package_state_does_not_record_fails() {
+    let apt = verifying(Scope::System, true, true, present("1.7.1-3"));
+    let claims = vec![claim("/w/a", "1.7.1-3")];
+    let current = installed_at("1.7.1-3", false, claims.clone());
+    let plan =
+        build_install_plan(&[managed("jq", "1.7.1-3", current, &apt, claims)], vec![]).unwrap();
+    let store = FakeStateStore::empty();
+
+    let (report, _) = apply_system(&plan, &apt, &store);
+
+    match &report.outcomes[0].result {
+        ApplyResult::Failed { error } => {
+            assert!(
+                error.contains("jq: hold on a package state does not record"),
+                "{error}"
+            )
+        }
+        other => panic!("expected a failure, got {other:?}"),
     }
 }
 
@@ -1441,6 +1769,7 @@ fn apply_claim_records_the_claims_and_keeps_version_and_origin() {
         version: Some(deb("1.7.1-3")),
         origin: Origin::Installed,
         claimed_by: vec![claim_by("/w/b", ">=1.7", "ann")],
+        held: false,
     };
     let claims = vec![claim_by("/w/b", ">=1.7", "ann"), claim("/w/a", ">=1.6")];
     let plan =

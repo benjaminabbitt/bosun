@@ -470,6 +470,9 @@ impl Installer for UvBackend {
     fn hold(&self, _pkg: &Ref, _version: &Version) -> Result<Steps, PortError> {
         Ok(vec![]) // no durable hold; bosun re-asserts the exact version each run
     }
+    fn unhold(&self, _pkg: &Ref) -> Result<Steps, PortError> {
+        Ok(Vec::new())
+    }
 
     fn downgrade(&self, pkg: &Ref, version: &Version) -> Result<Steps, PortError> {
         // `uv tool install name==lower` replaces the installed version.

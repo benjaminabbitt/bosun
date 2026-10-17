@@ -346,6 +346,13 @@ impl Installer for GithubPackageBackend {
         })
     }
 
+    fn unhold(&self, pkg: &Ref) -> Result<Steps, PortError> {
+        Ok(match self.kind {
+            PackageKind::Deb => vec![self.run(&["apt-mark", "unhold", &Self::package_name(pkg)])],
+            PackageKind::Rpm => vec![],
+        })
+    }
+
     fn downgrade(&self, pkg: &Ref, version: &Version) -> Result<Steps, PortError> {
         self.fetch_and(pkg, version, true)
     }
@@ -505,6 +512,10 @@ mod tests {
         assert_eq!(
             b.hold(&p, &v("0.26.1")).unwrap(),
             vec![sys(&["apt-mark", "hold", "bat"], NONINTERACTIVE)]
+        );
+        assert_eq!(
+            b.unhold(&p).unwrap(),
+            vec![sys(&["apt-mark", "unhold", "bat"], NONINTERACTIVE)]
         );
         assert_eq!(
             b.uninstall(&p).unwrap(),

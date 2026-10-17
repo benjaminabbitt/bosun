@@ -1235,6 +1235,7 @@ fn current_for(
             version: Some(leaf.installed.clone()),
             origin: leaf.origin,
             claimed_by: leaf.claimed_by.clone(),
+            held: leaf.held,
         });
     }
     match installer
@@ -1245,6 +1246,7 @@ fn current_for(
             version,
             origin: Origin::Accepted,
             claimed_by: Vec::new(),
+            held: false,
         }),
         Installed::Absent => Ok(Current::Absent),
     }

@@ -7,7 +7,7 @@ Feature: github-deb and github-rpm install the OS package a release attaches
   release that publishes no checksum is refused unless the entry says
   `unverified: allow`.
 
-  Scenario: bat's .deb is installed through apt, held, and removed
+  Scenario: bat's .deb is installed through apt, unheld under a range, and removed
     Given a Debian trixie amd64 machine, elevated
     And bosun installs release .deb packages
     And sharkdp/bat v0.26.1 publishes bat_0.26.1_amd64.deb holding just the binary
@@ -30,7 +30,7 @@ Feature: github-deb and github-rpm install the OS package a release attaches
     Then it reports changes pending
     And it says "apt-get"
     And it says "bat_0.26.1_amd64.deb"
-    And it says "hold"
+    And the plan's actions are "install bat"
     When I run `bosun install . --yes`
     Then it succeeds
     And bosun has recorded bat 0.26.1
@@ -40,7 +40,7 @@ Feature: github-deb and github-rpm install the OS package a release attaches
     Then it succeeds
     And bosun has recorded nothing about bat
 
-  Scenario: an .rpm is installed through dnf under its own package name
+  Scenario: an .rpm is installed through dnf under its own package name, and an exact spec warns it cannot be held
     Given a Linux amd64 machine, elevated
     And bosun installs release .rpm packages
     And sharkdp/bat v0.26.1 publishes bat-0.26.1-1.x86_64.rpm holding just the binary
@@ -49,7 +49,7 @@ Feature: github-deb and github-rpm install the OS package a release attaches
       version: 2
       packages:
         - name: bat
-          spec: ">=0.26.0|<0.27.0"
+          spec: "0.26.1"
           install:
             linux:
               backends:

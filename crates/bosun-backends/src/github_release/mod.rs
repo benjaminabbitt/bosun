@@ -651,6 +651,9 @@ impl Installer for GithubReleaseBackend {
     fn hold(&self, _pkg: &Ref, _version: &Version) -> Result<Steps, PortError> {
         Ok(vec![])
     }
+    fn unhold(&self, _pkg: &Ref) -> Result<Steps, PortError> {
+        Ok(Vec::new())
+    }
 
     fn downgrade(&self, pkg: &Ref, version: &Version) -> Result<Steps, PortError> {
         self.install_exact(pkg, version)

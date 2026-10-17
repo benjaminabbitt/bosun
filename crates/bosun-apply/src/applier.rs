@@ -138,10 +138,11 @@ impl<'a, S: StateStore> HostApplier<'a, S> {
                 self.record(doc, action, version, Origin::Installed);
                 Ok(())
             }
-            ActionKind::Hold => {
-                // The held package was recorded by its install this run; a hold
-                // pins the version, it does not change what is recorded.
+            ActionKind::Hold | ActionKind::Unhold => {
+                // The package is recorded, by its install this run or an
+                // earlier one; the hold changes only whether it is pinned.
                 self.executor.execute(&action.steps)?;
+                self.leaf(doc, action)?.held = action.kind == ActionKind::Hold;
                 Ok(())
             }
             ActionKind::Accept => {
@@ -161,21 +162,30 @@ impl<'a, S: StateStore> HostApplier<'a, S> {
                 Ok(())
             }
             ActionKind::Claim => {
-                let leaf = doc
-                    .packages
-                    .iter_mut()
-                    .find(|p| p.name == action.name)
-                    .and_then(|p| p.targets.get_mut(&self.target))
-                    .ok_or_else(|| PortError::Backend {
-                        detail: format!(
-                            "{}: claim on a package state does not record",
-                            action.name
-                        ),
-                    })?;
-                leaf.claimed_by = self.stamp(&action.claims);
+                self.leaf(doc, action)?.claimed_by = self.stamp(&action.claims);
                 Ok(())
             }
         }
+    }
+
+    /// The state leaf `action` changes at this machine's target, which state
+    /// must already record.
+    fn leaf<'d>(
+        &self,
+        doc: &'d mut StateDocument,
+        action: &Action,
+    ) -> Result<&'d mut StateLeaf, PortError> {
+        doc.packages
+            .iter_mut()
+            .find(|p| p.name == action.name)
+            .and_then(|p| p.targets.get_mut(&self.target))
+            .ok_or_else(|| PortError::Backend {
+                detail: format!(
+                    "{}: {} on a package state does not record",
+                    action.name,
+                    action.kind.label()
+                ),
+            })
     }
 
     /// Upsert the package's leaf at this machine's target with a confirmed
@@ -190,6 +200,7 @@ impl<'a, S: StateStore> HostApplier<'a, S> {
             installed: version,
             origin,
             claimed_by: self.stamp(&action.claims),
+            held: false,
         };
         match doc.packages.iter_mut().find(|p| p.name == action.name) {
             Some(p) => {

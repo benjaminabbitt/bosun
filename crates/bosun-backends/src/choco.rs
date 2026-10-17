@@ -197,6 +197,11 @@ impl Installer for ChocoBackend {
         ])])
     }
 
+    fn unhold(&self, pkg: &Ref) -> Result<Steps, PortError> {
+        let id = pkg.purl.native_id();
+        Ok(vec![step(&["pin", "remove", &format!("--name={id}")])])
+    }
+
     fn downgrade(&self, pkg: &Ref, version: &Version) -> Result<Steps, PortError> {
         let id = pkg.purl.native_id();
         Ok(vec![step(&[
@@ -341,6 +346,10 @@ mod tests {
         assert_eq!(
             b.hold(&jq, &v("1.8.1")).unwrap(),
             vec![choco(&["pin", "add", "--name=jq", "--version=1.8.1"])]
+        );
+        assert_eq!(
+            b.unhold(&jq).unwrap(),
+            vec![choco(&["pin", "remove", "--name=jq"])]
         );
         assert_eq!(
             b.downgrade(&jq, &v("1.7.1")).unwrap(),

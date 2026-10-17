@@ -6,8 +6,9 @@ Feature: real backends against a disposable container
   serves Debian, Fedora, RHEL-family and Alpine containers, and any of them
   with Node or uv.
 
+  # Only an exact spec is held; under a range apt's own updates reach it.
   @apt-get
-  Scenario: apt installs and holds a package, then prune removes and unholds it
+  Scenario: apt installs a package under a range unheld, then prune removes it
     Given the apt index is refreshed
     And the system state is clean
     And the manifest:
@@ -23,12 +24,56 @@ Feature: real backends against a disposable container
     When I run `bosun install . --yes --scope system`
     Then it succeeds
     And dpkg reports hello installed
-    And apt-mark reports hello held
+    And apt-mark reports hello not held
     When the manifest is deleted
     And I run `bosun prune --yes --scope system`
     Then it succeeds
     And dpkg reports hello not installed
     And apt-mark reports hello not held
+
+  # A package bosun held under an exact spec is released once the spec is a
+  # range, and apt may then move it; bosun leaves that version be.
+  @apt-get
+  Scenario: apt releases bosun's hold when the spec becomes a range, and apt may update it
+    Given the system state is clean
+    And a local apt repository offers bosun-probe 1.0-1 and 2.0-1
+    And the manifest:
+      """
+      version: 2
+      packages:
+        - name: bosun-probe
+          spec: "1.0-1"
+          install:
+            linux:debian: {backend: apt}
+      """
+    When I run `bosun install . --yes --scope system`
+    Then it succeeds
+    And dpkg reports bosun-probe at 1.0-1
+    And apt-mark reports bosun-probe held
+    When the manifest becomes:
+      """
+      version: 2
+      packages:
+        - name: bosun-probe
+          spec: "*"
+          install:
+            linux:debian: {backend: apt}
+      """
+    And I run `bosun install . --yes --scope system`
+    Then it succeeds
+    And it reports "unhold"
+    And dpkg reports bosun-probe at 1.0-1
+    And apt-mark reports bosun-probe not held
+    When apt upgrades bosun-probe
+    Then dpkg reports bosun-probe at 2.0-1
+    When I run `bosun install . --yes --scope system`
+    Then it succeeds
+    And dpkg reports bosun-probe at 2.0-1
+    And apt-mark reports bosun-probe not held
+    When the manifest is deleted
+    And I run `bosun prune --yes --scope system`
+    Then it succeeds
+    And dpkg reports bosun-probe not installed
 
   # apt refuses to change a held package under -y, so bosun releases its own
   # hold before it moves the package to another version.
@@ -221,7 +266,7 @@ Feature: real backends against a disposable container
     And apt-mark reports bat not held
 
   @dnf
-  Scenario: dnf installs and versionlocks a package, then prune removes and unlocks it
+  Scenario: dnf versionlocks a package only while its spec is exact, then prune removes it
     Given the dnf index is refreshed
     And dnf has a versionlock command
     And the system state is clean and dnf has no tree
@@ -230,14 +275,32 @@ Feature: real backends against a disposable container
       version: 2
       packages:
         - name: tree
-          spec: ">=1.0"
+          spec: "*"
           install:
-            linux:fedora: {backend: dnf}
+            linux: {backend: dnf}
       """
     When I run `bosun install . --yes --scope system`
     Then it succeeds
     And rpm reports tree installed
+    And dnf reports tree not locked
+    When the manifest pins tree through dnf to the version installed
+    And I run `bosun install . --yes --scope system`
+    Then it succeeds
     And dnf reports tree locked
+    When the manifest becomes:
+      """
+      version: 2
+      packages:
+        - name: tree
+          spec: ">=1.0"
+          install:
+            linux: {backend: dnf}
+      """
+    And I run `bosun install . --yes --scope system`
+    Then it succeeds
+    And it reports "unhold"
+    And rpm reports tree installed
+    And dnf reports tree not locked
     When the manifest is deleted
     And I run `bosun prune --yes --scope system`
     Then it succeeds
@@ -318,19 +381,11 @@ Feature: real backends against a disposable container
     And rpm reports unzip not installed
 
   @dnf-3
-  Scenario: dnf4 without the versionlock plugin installs unheld and says so
+  Scenario: dnf4 without the versionlock plugin installs an exact spec unheld and says so
     Given the dnf index is refreshed
     And dnf has no versionlock command
     And the system state is clean and dnf has no tree
-    And the manifest:
-      """
-      version: 2
-      packages:
-        - name: tree
-          spec: ">=1.0"
-          install:
-            linux:fedora: {backend: dnf}
-      """
+    And the manifest pins tree through dnf to the newest version dnf offers
     When I run `bosun --format json install . --plan --scope system`
     Then it reports changes pending
     And it says "unsupported-hold"
@@ -366,7 +421,7 @@ Feature: real backends against a disposable container
     And the bin dir has no temp files
 
   @apk
-  Scenario: apk installs a package pinned in the world, then prune deletes it
+  Scenario: apk pins a package in the world only while its spec is exact, then prune deletes it
     Given the apk index is refreshed
     And the system state is clean of tree installed through apk
     And the manifest:
@@ -381,7 +436,25 @@ Feature: real backends against a disposable container
     When I run `bosun install . --yes --scope system`
     Then it succeeds
     And apk reports tree installed
+    And the apk world names tree unpinned
+    When the manifest pins tree through apk to the version installed
+    And I run `bosun install . --yes --scope system`
+    Then it succeeds
     And the apk world pins tree to its installed version
+    When the manifest becomes:
+      """
+      version: 2
+      packages:
+        - name: tree
+          spec: "*"
+          install:
+            linux:alpine: {backend: apk}
+      """
+    And I run `bosun install . --yes --scope system`
+    Then it succeeds
+    And it reports "unhold"
+    And apk reports tree installed
+    And the apk world names tree unpinned
     When the manifest is deleted
     And I run `bosun prune --yes --scope system`
     Then it succeeds

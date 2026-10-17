@@ -9,7 +9,9 @@
 //! version only a tagged repository (`@edge`) carries is left out, since
 //! installing it needs the tag. `apk add pkg=ver` records the constraint in
 //! `/etc/apk/world`, and that constraint is the hold: no upgrade moves the
-//! package off it until the world says otherwise, so a hold adds no step.
+//! package off it until the world says otherwise. So an install lands the
+//! version with `pkg=ver` and then re-adds the bare name, which leaves the
+//! version installed and the world unpinned; a hold pins it again.
 
 use std::sync::Arc;
 
@@ -112,6 +114,11 @@ fn apk_step(args: &[&str]) -> Steps {
         scope: Scope::System,
         ok_exits: Vec::new(),
     }]
+}
+
+/// `<pkg>=<version>`: how apk asks for, and the world pins, one version.
+fn pinned(pkg: &Ref, version: &Version) -> String {
+    format!("{}={}", pkg.purl.native_id(), version.as_str())
 }
 
 /// Run `program args`, its stdout when it exits 0.
@@ -278,8 +285,11 @@ impl Installer for ApkBackend {
     }
 
     fn install_exact(&self, pkg: &Ref, version: &Version) -> Result<Steps, PortError> {
-        let pinned = format!("{}={}", pkg.purl.native_id(), version.as_str());
-        Ok(apk_step(&["add", "--no-interactive", &pinned]))
+        // `pkg=ver` lands that version and pins it in the world; the bare
+        // name then leaves it there unpinned.
+        let mut steps = apk_step(&["add", "--no-interactive", &pinned(pkg, version)]);
+        steps.extend(self.unhold(pkg)?);
+        Ok(steps)
     }
 
     fn verify_installed(&self, pkg: &Ref) -> Result<Installed, PortError> {
@@ -306,9 +316,23 @@ impl Installer for ApkBackend {
             })
     }
 
-    fn hold(&self, _pkg: &Ref, _version: &Version) -> Result<Steps, PortError> {
-        // The install's `pkg=ver` in the world file is the hold.
-        Ok(vec![])
+    fn hold(&self, pkg: &Ref, version: &Version) -> Result<Steps, PortError> {
+        // `pkg=ver` in the world file is the hold.
+        Ok(apk_step(&[
+            "add",
+            "--no-interactive",
+            &pinned(pkg, version),
+        ]))
+    }
+
+    fn unhold(&self, pkg: &Ref) -> Result<Steps, PortError> {
+        // Re-adding the bare name rewrites its world line unpinned; without
+        // `--upgrade` apk keeps the version installed.
+        Ok(apk_step(&[
+            "add",
+            "--no-interactive",
+            &pkg.purl.native_id(),
+        ]))
     }
 
     fn downgrade(&self, pkg: &Ref, version: &Version) -> Result<Steps, PortError> {
@@ -521,9 +545,14 @@ mod tests {
     }
 
     #[test]
-    fn install_and_downgrade_pin_the_version_in_the_world() {
+    fn install_and_downgrade_land_the_version_and_leave_the_world_unpinned() {
+        // `jq=ver` installs that version; the bare name then rewrites the
+        // world line unpinned, and apk keeps the version it has.
         let b = backend(Arc::new(FakeCommandRunner::new()));
-        let want = vec![run_step(&["apk", "add", "--no-interactive", "jq=1.7.1-r0"])];
+        let want = vec![
+            run_step(&["apk", "add", "--no-interactive", "jq=1.7.1-r0"]),
+            run_step(&["apk", "add", "--no-interactive", "jq"]),
+        ];
         assert_eq!(
             b.install_exact(&reff("jq"), &apk("1.7.1-r0")).unwrap(),
             want
@@ -534,7 +563,14 @@ mod tests {
     #[test]
     fn the_world_pin_is_the_hold() {
         let b = backend(Arc::new(FakeCommandRunner::new()));
-        assert_eq!(b.hold(&reff("jq"), &apk("1.7.1-r0")).unwrap(), vec![]);
+        assert_eq!(
+            b.hold(&reff("jq"), &apk("1.7.1-r0")).unwrap(),
+            vec![run_step(&["apk", "add", "--no-interactive", "jq=1.7.1-r0"])]
+        );
+        assert_eq!(
+            b.unhold(&reff("jq")).unwrap(),
+            vec![run_step(&["apk", "add", "--no-interactive", "jq"])]
+        );
         let caps = b.capabilities();
         assert!(caps.supports_exact_version && caps.supports_downgrade);
         assert_eq!(caps.hold, HoldSupport::Supported);

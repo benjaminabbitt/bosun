@@ -13,12 +13,64 @@ Feature: accept, hold and privilege at system scope (apt)
             linux:debian: {backend: apt}
       """
 
-  Scenario: an absent apt package is planned to install and then hold
+  # Only an exact spec is held: under a range or `*` the distro's security
+  # and stable updates reach the package between bosun runs.
+  Scenario: an absent apt package under a range is planned to install, unheld
     Given a Debian trixie amd64 machine, not elevated
     When I run `bosun --format json install . --plan`
     Then it reports changes pending
-    And it says "install"
-    And it says "hold"
+    And the plan's actions are "install jq"
+
+  Scenario: an absent apt package under an exact spec is planned to install and then hold
+    Given a Debian trixie amd64 machine, not elevated
+    And the manifest:
+      """
+      version: 2
+      packages:
+        - name: jq
+          spec: "1.7.1-6+deb13u2"
+          install:
+            linux:debian: {backend: apt}
+      """
+    When I run `bosun --format json install . --plan`
+    Then it reports changes pending
+    And the plan's actions are "install jq", "hold jq"
+
+  # State from before bosun held only exact specs records no hold: bosun held
+  # everything it installed then, so it releases what a range no longer pins.
+  Scenario: a package bosun held is unheld once its spec is a range
+    Given a Debian trixie amd64 machine, elevated
+    And jq 1.7.1-6+deb13u2 is installed outside bosun
+    And bosun installed jq 1.7.1-6+deb13u2 for this project wanting ">=1.6"
+    When I run `bosun --format json install . --plan`
+    Then it reports changes pending
+    And the plan's actions are "unhold jq"
+    When I run `bosun install . --yes`
+    Then it succeeds
+    And bosun records jq as not held
+    When I run `bosun --format json install . --plan`
+    Then it succeeds
+    And the plan's actions are none
+
+  Scenario: an unheld package is held once its spec is exact
+    Given a Debian trixie amd64 machine, elevated
+    And jq 1.7.1-6+deb13u2 is installed outside bosun
+    And bosun installed jq 1.7.1-6+deb13u2 unheld for this project wanting ">=1.6"
+    And the manifest:
+      """
+      version: 2
+      packages:
+        - name: jq
+          spec: "1.7.1-6+deb13u2"
+          install:
+            linux:debian: {backend: apt}
+      """
+    When I run `bosun --format json install . --plan`
+    Then it reports changes pending
+    And the plan's actions are "claim jq", "hold jq"
+    When I run `bosun install . --yes`
+    Then it succeeds
+    And bosun records jq as held
 
   Scenario: a package present outside bosun is accepted, never installed or held
     Given a Debian trixie amd64 machine, not elevated

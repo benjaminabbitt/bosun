@@ -191,6 +191,9 @@ mod tests {
         fn hold(&self, _: &Ref, _: &Version) -> Result<Steps, PortError> {
             Ok(vec![])
         }
+        fn unhold(&self, _pkg: &Ref) -> Result<Steps, PortError> {
+            Ok(Vec::new())
+        }
         fn downgrade(&self, _: &Ref, _: &Version) -> Result<Steps, PortError> {
             Ok(vec![])
         }

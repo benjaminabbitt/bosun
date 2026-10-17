@@ -7,7 +7,8 @@ Feature: apk installs Alpine packages at system scope
   apt and dnf, installs such a build when its branch carries it. The package is
   identified as `pkg:apk/<ID>/<name>?arch=<apk arch>`, with no release in it:
   Alpine has no release selectors, so its entries use `linux:alpine`. An
-  install pins the version in apk's world file, which is also the hold.
+  exact spec pins the version in apk's world file, which is the hold; under a
+  range the world names the package unpinned.
 
   Background:
     Given an Alpine 3.20.3 amd64 machine, not elevated
@@ -29,21 +30,20 @@ Feature: apk installs Alpine packages at system scope
     And the lock pins jq 1.8.0_rc1-r0
     And the lock identifies jq as pkg:apk/alpine/jq?arch=x86_64
 
-  Scenario: an absent package is planned to install, then hold
+  Scenario: an absent package under an exact spec is planned to install, then hold
     Given apk publishes jq 1.7.1-r0
     And the manifest:
       """
       version: 2
       packages:
         - name: jq
-          spec: ">=1.7"
+          spec: "1.7.1-r0"
           install:
             linux:alpine: {backend: apk}
       """
     When I run `bosun --format json install . --plan`
     Then it reports changes pending
-    And it says "install"
-    And it says "hold"
+    And the plan's actions are "install jq", "hold jq"
 
   Scenario: elevated, the install applies and bosun records it
     Given an Alpine 3.20.3 amd64 machine, elevated

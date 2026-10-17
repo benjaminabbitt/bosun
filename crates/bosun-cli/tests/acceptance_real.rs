@@ -161,6 +161,11 @@ fn world_pins(_w: &mut RealWorld, pkg: String) {
     assert_eq!(world_entries(&pkg), vec![format!("{pkg}={version}")]);
 }
 
+#[then(expr = "the apk world names {word} unpinned")]
+fn world_unpinned(_w: &mut RealWorld, pkg: String) {
+    assert_eq!(world_entries(&pkg), vec![pkg.clone()]);
+}
+
 #[then(expr = "the apk world does not name {word}")]
 fn world_lacks(_w: &mut RealWorld, pkg: String) {
     assert_eq!(world_entries(&pkg), Vec::<String>::new());
@@ -257,6 +262,81 @@ fn remove_local_repo() {
             let _ = fs::remove_file(entry.path());
         }
     }
+}
+
+/// The version of `pkg` the package manager reports installed, as bosun reads
+/// it: dpkg's `Version`, rpm's `[epoch:]version-release`, apk's
+/// `<name>-<version>` less the name.
+fn installed_version(backend: &str, pkg: &str) -> String {
+    let (code, out) = match backend {
+        "apt" => run("dpkg-query", &["-W", "-f=${Version}", pkg]),
+        "dnf" => run(
+            "rpm",
+            &[
+                "-q",
+                "--queryformat",
+                "%|EPOCH?{%{EPOCH}:}:{}|%{VERSION}-%{RELEASE}",
+                pkg,
+            ],
+        ),
+        "apk" => run("apk", &["info", "-e", "-v", pkg]),
+        other => panic!("no installed-version query for {other}"),
+    };
+    assert_eq!(code, 0, "{backend}: {pkg} not installed: {out}");
+    let out = out.trim();
+    match backend {
+        "apk" => out
+            .strip_prefix(&format!("{pkg}-"))
+            .unwrap_or_else(|| panic!("apk info: {out}"))
+            .to_string(),
+        _ => out.to_string(),
+    }
+}
+
+/// The manifest asks for exactly the version of `pkg` installed now.
+#[when(regex = r"^the manifest pins (\S+) through (\S+) to the version installed$")]
+fn manifest_pins_installed(w: &mut RealWorld, pkg: String, backend: String) {
+    let version = installed_version(&backend, &pkg);
+    write_pinned_manifest(w, &pkg, &backend, &version);
+}
+
+/// A manifest asking for exactly `version` of `pkg` through `backend`.
+fn write_pinned_manifest(w: &mut RealWorld, pkg: &str, backend: &str, version: &str) {
+    let manifest = format!(
+        "version: 2\npackages:\n  - name: {pkg}\n    spec: \"{version}\"\n    install:\n      linux: {{backend: {backend}}}\n"
+    );
+    fs::write(w.home().join("bosun.yaml"), manifest).unwrap();
+}
+
+/// The manifest asks for exactly the newest version of `pkg` dnf offers, as
+/// `[epoch:]version-release`.
+#[given(regex = r"^the manifest pins (\S+) through dnf to the newest version dnf offers$")]
+fn manifest_pins_newest_dnf(w: &mut RealWorld, pkg: String) {
+    let (code, out) = run(
+        "dnf",
+        &[
+            "repoquery",
+            "--available",
+            "--latest-limit=1",
+            "--queryformat",
+            "%{epoch}:%{version}-%{release}\\n",
+            &pkg,
+        ],
+    );
+    assert_eq!(code, 0, "dnf repoquery {pkg}: {out}");
+    let evr = out
+        .lines()
+        .map(str::trim)
+        .find(|l| l.contains('-'))
+        .unwrap_or_else(|| panic!("dnf repoquery {pkg}: {out}"));
+    let version = evr.strip_prefix("0:").unwrap_or(evr);
+    write_pinned_manifest(w, &pkg, "dnf", version);
+}
+
+#[when(expr = "apt upgrades {word}")]
+fn apt_upgrades(_w: &mut RealWorld, pkg: String) {
+    let (code, out) = run("apt-get", &["install", "--only-upgrade", "-y", &pkg]);
+    assert_eq!(code, 0, "apt-get install --only-upgrade {pkg}: {out}");
 }
 
 #[given("the manifest:")]

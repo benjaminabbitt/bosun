@@ -381,6 +381,9 @@ impl Installer for FixtureInstaller {
     fn hold(&self, pkg: &Ref, version: &Version) -> Result<Steps, PortError> {
         Ok(self.step("hold", pkg, Some(version)))
     }
+    fn unhold(&self, pkg: &Ref) -> Result<Steps, PortError> {
+        Ok(self.step("unhold", pkg, None))
+    }
     fn downgrade(&self, pkg: &Ref, version: &Version) -> Result<Steps, PortError> {
         if self.supports_downgrade {
             Ok(self.step("downgrade", pkg, Some(version)))

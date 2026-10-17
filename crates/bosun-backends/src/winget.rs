@@ -237,6 +237,11 @@ impl Installer for WingetBackend {
         ])])
     }
 
+    fn unhold(&self, pkg: &Ref) -> Result<Steps, PortError> {
+        let id = pkg.purl.native_id();
+        Ok(vec![step(&["pin", "remove", "--id", &id, "--exact"])])
+    }
+
     fn downgrade(&self, pkg: &Ref, version: &Version) -> Result<Steps, PortError> {
         let id = pkg.purl.native_id();
         Ok(vec![step(&[
@@ -442,6 +447,10 @@ Visual Studio Code  Microsoft.VisualStudioCode 1.105.0 winget
                 "10.2.0",
                 "--force"
             ])]
+        );
+        assert_eq!(
+            b.unhold(&fd).unwrap(),
+            vec![winget(&["pin", "remove", "--id", "sharkdp.fd", "--exact"])]
         );
         assert_eq!(
             b.downgrade(&fd, &v("9.0.0")).unwrap(),
