@@ -1157,3 +1157,60 @@ fn apt_cache_failing_is_an_error() {
     let err = query_err(&idx, JQ);
     assert!(err.contains("apt-cache"), "{err}");
 }
+
+// ---- which sources -----------------------------------------------------------
+
+#[test]
+fn a_stock_images_sources_are_read_only_without_the_targets_own() {
+    let dir = tempfile::tempdir().unwrap();
+    let stock = index(&Arc::new(bookworm_mirror()), dir.path());
+    let log = logged(|| {
+        versions(&stock, JQ);
+    });
+    assert!(log.contains(logmsg::APT_STOCK_SOURCES), "{log}");
+
+    let r = root_with(
+        "a.list",
+        "deb https://deb.debian.org/debian bookworm main\n",
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let own = rooted(&Arc::new(bookworm_mirror()), dir.path(), r.path());
+    let log = logged(|| {
+        versions(&own, JQ);
+    });
+    assert!(!log.contains(logmsg::APT_STOCK_SOURCES), "{log}");
+}
+
+#[test]
+fn the_targets_pins_are_warned_of_when_bosun_reads_the_mirrors_itself() {
+    let r = root_with(
+        "a.list",
+        "deb https://deb.debian.org/debian bookworm main\n",
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let idx = rooted(&Arc::new(bookworm_mirror()), dir.path(), r.path());
+    let log = logged(|| {
+        versions(&idx, JQ);
+    });
+    assert!(!log.contains(logmsg::APT_PINS_IGNORED), "{log}");
+
+    for pins in ["etc/apt/preferences", "etc/apt/preferences.d/x"] {
+        let r = root_with(
+            "a.list",
+            "deb https://deb.debian.org/debian bookworm main\n",
+        );
+        let file = r.path().join(pins);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(
+            &file,
+            "Package: jq\nPin: version 1.6*\nPin-Priority: 1001\n",
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let idx = rooted(&Arc::new(bookworm_mirror()), dir.path(), r.path());
+        let log = logged(|| {
+            versions(&idx, JQ);
+        });
+        assert!(log.contains(logmsg::APT_PINS_IGNORED), "{pins}: {log}");
+    }
+}

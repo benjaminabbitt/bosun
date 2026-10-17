@@ -419,6 +419,14 @@ enum Chosen<'a> {
     Stock(Sources),
 }
 
+/// Whether the root at `path` pins packages: an `etc/apt/preferences`, or
+/// any file in `etc/apt/preferences.d`.
+fn has_pins(path: &Path) -> bool {
+    let apt = path.join("etc/apt");
+    apt.join("preferences").is_file()
+        || fs::read_dir(apt.join("preferences.d")).is_ok_and(|mut d| d.next().is_some())
+}
+
 /// `sources` as source list entries.
 fn entries_of(sources: &Sources) -> Vec<SourceEntry> {
     sources
@@ -479,11 +487,14 @@ impl RemoteAptIndex {
                 }
                 Ok(Chosen::Root(&root.path, entries))
             }
-            _ => default_sources(distro, codename, arch)
-                .map(Chosen::Stock)
-                .ok_or_else(|| PortError::Backend {
-                    detail: format!("{}: {distro}", errmsg::APT_NO_MIRROR),
-                }),
+            _ => {
+                let sources =
+                    default_sources(distro, codename, arch).ok_or_else(|| PortError::Backend {
+                        detail: format!("{}: {distro}", errmsg::APT_NO_MIRROR),
+                    })?;
+                info!(message = logmsg::APT_STOCK_SOURCES, distro = %distro, release = %codename);
+                Ok(Chosen::Stock(sources))
+            }
         }
     }
 
@@ -795,7 +806,12 @@ impl Index for RemoteAptIndex {
             None => {
                 let (distro, codename, arch) = &key;
                 let sources = match self.chosen(distro, codename, *arch)? {
-                    Chosen::Root(_, entries) => sources_from(&entries, *arch),
+                    Chosen::Root(path, entries) => {
+                        if has_pins(path) {
+                            warn!(message = logmsg::APT_PINS_IGNORED, root = %path.display());
+                        }
+                        sources_from(&entries, *arch)
+                    }
                     Chosen::Stock(sources) => sources,
                 };
                 let read = Rc::new(self.read_release(&sources, *arch)?);

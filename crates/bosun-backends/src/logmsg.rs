@@ -159,3 +159,13 @@ pub const APT_SCRATCH_STALE: &str =
 /// apt's remote index resolves through this machine's apt, in a scratch root.
 pub const APT_THROUGH_LOCAL_APT: &str =
     "resolving the target's apt packages with this machine's apt, in a scratch root";
+
+/// No target root names the release's sources (no `--image` / `--rootfs`,
+/// or another release than the root's): a stock image's are read.
+pub const APT_STOCK_SOURCES: &str =
+    "no target image gives this release's apt sources; reading the ones a stock image lists";
+
+/// The target pins packages, which only apt applies; without apt here,
+/// bosun's reading of the mirrors does not.
+pub const APT_PINS_IGNORED: &str =
+    "the target pins apt packages (preferences), which are applied only when apt-get is on this machine";
