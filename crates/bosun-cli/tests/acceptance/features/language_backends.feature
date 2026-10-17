@@ -32,7 +32,7 @@ Feature: npm and uv install language tools at user scope
     And the lock pins cowsay 1.6.0
     And the lock identifies cowsay as pkg:npm/cowsay
 
-  Scenario: add writes a uv entry whose range follows the release numbers
+  Scenario: add writes a uv entry with the lower bound uv add writes
     Given uv publishes ruff 0.6.8, 0.6.9 and 0.7.0rc1
     And the manifest:
       """
@@ -46,7 +46,7 @@ Feature: npm and uv install language tools at user scope
       version: 2
       packages:
         - name: ruff
-          spec: ">=0.6.9|<0.7.0"
+          spec: ">=0.6.9"
           install: {backend: uv}
       """
     And the lock pins ruff 0.6.9
@@ -126,7 +126,7 @@ Feature: npm and uv install language tools at user scope
           spec: ">=1.6.0|<2.0.0"
           install: {backend: npm}
         - name: ruff
-          spec: ">=0.6.9|<0.7.0"
+          spec: ">=0.6.9"
           install: {backend: uv}
       """
     And the lock pins cowsay 1.6.0

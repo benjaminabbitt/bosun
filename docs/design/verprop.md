@@ -104,7 +104,7 @@ real to check later):
 
 | command | does |
 |---|---|
-| `add <name> --backend … [--package] [--spec] [--on <selector>] [--opt k=v]` / `remove <name> [--plan] [--yes]` | edit one manifest entry, keeping every other byte, then run `lock` on the edited manifest. Both refuse a manifest older than the current version (run `migrate`). `add` writes under `any` when every backend is platform-independent, else this machine's OS, unless `--on` says; it checks the entry first (backend options, then a resolve on this machine) and writes nothing on error; without `--spec` it writes the range from the newest version up to the next breaking one (`>=2.0.2\|<3.0.0`, below 1.0 the next minor, apt: any revision of the upstream version); it never installs. `remove` first releases the package (drops this manifest's claim, uninstalls only if bosun installed it and no other manifest claims it, behind the usual confirm), then edits and locks |
+| `add <name> --backend … [--package] [--spec] [--on <selector>] [--opt k=v]` / `remove <name> [--plan] [--yes]` | edit one manifest entry, keeping every other byte, then run `lock` on the edited manifest. Both refuse a manifest older than the current version (run `migrate`). `add` writes under `any` when every backend is platform-independent, else this machine's OS, unless `--on` says; it checks the entry first (backend options, then a resolve on this machine) and writes nothing on error; without `--spec` it writes the range from the newest version up to the next breaking one (`>=2.0.2\|<3.0.0`, below 1.0 the next minor, apt: any revision of the upstream version, PyPI: `>=X` as `uv add` writes); it never installs. `remove` first releases the package (drops this manifest's claim, uninstalls only if bosun installed it and no other manifest claims it, behind the usual confirm), then edits and locks |
 | `refresh` | explicit index refresh, per backend |
 | `install [path] [--plan] [--scope system\|user] [--yes]` | plan → privilege check → confirm → apply: resolve each entry against this machine's lock (its pins that still fit, the newest in spec for the rest), install, record in the machine state, then write the lock (only after a successful apply; never with `--plan`) (§4.8, §5.5, §7). **Never uninstalls** (except the old name in a `formerly` migration, §5.4) |
 | `uninstall [path] [--plan] [--scope system\|user] [--yes]` | the inverse of `install` for one manifest: drop all of its claims, then uninstall each package bosun installed that no other manifest still claims; same plan → confirm → apply flow (§9) |
@@ -1635,8 +1635,9 @@ Command-level reference for the five researched backends. (apt, dnf, apk, uv, np
     `[required: file:///…]` and is left out.
   - Versions: PEP 440, ordered by `pep440_rs` (`1.0.dev1 < 1.0a1 < 1.0rc1 < 1.0 < 1.0+local <
     1.0.post1`, `1.0 == 1.0.0`, epochs first). Alpha, beta, rc and dev releases are
-    pre-releases; post-releases are not. `bosun add` writes the caret range over the release
-    numbers (`0.6.9` → `>=0.6.9|<0.7.0`, `3.2.3` → `>=3.2.3|<4.0.0`).
+    pre-releases; post-releases are not. `bosun add` and `export` write the lower bound `uv add`
+    writes (`0.6.9` → `>=0.6.9`): the epoch kept, a local label dropped (`2.1.0+cpu` →
+    `>=2.1.0`).
 
 ### npm (Node)
 - Manifest: bare `"1.2.3"` = exact; `^`/`~`/x-ranges otherwise (default save = `^`). Force exact:

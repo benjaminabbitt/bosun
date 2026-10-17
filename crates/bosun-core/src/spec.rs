@@ -147,6 +147,8 @@ impl Spec {
 /// - Debian and RPM: any revision (release) of the same upstream version,
 ///   `>=U|<U'~` where `U'` bumps the last number of `U`'s leading numeric
 ///   part (`1.7.1-3` → `>=1.7.1|<1.7.2~`); an epoch is kept on both bounds.
+/// - PEP 440: `>=V`, the lower bound `uv add` writes; the epoch is kept and a
+///   local label dropped.
 /// - Otherwise, or when the version has no numeric part to bump: the exact
 ///   version.
 pub fn default_spec(latest: &Version) -> String {
@@ -175,29 +177,10 @@ pub fn default_spec(latest: &Version) -> String {
     }
 }
 
-/// The caret range for a PEP 440 version (see [`default_spec`]).
+/// `>=V` for a PEP 440 version, as `uv add` writes it (see [`default_spec`]).
 fn pep440_default(raw: &str) -> Option<String> {
     let v: pep440_rs::Version = raw.parse().ok()?;
-    let release = v.release();
-    let bump = release
-        .iter()
-        .position(|n| *n != 0)
-        .unwrap_or(release.len() - 1);
-    let ceiling: Vec<String> = release
-        .iter()
-        .enumerate()
-        .map(|(i, n)| match i.cmp(&bump) {
-            std::cmp::Ordering::Less => n.to_string(),
-            std::cmp::Ordering::Equal => (n + 1).to_string(),
-            std::cmp::Ordering::Greater => "0".to_string(),
-        })
-        .collect();
-    let epoch = match v.epoch() {
-        0 => String::new(),
-        e => format!("{e}!"),
-    };
-    let floor = v.clone().without_local();
-    Some(format!(">={floor}|<{epoch}{}", ceiling.join(".")))
+    Some(format!(">={}", v.without_local()))
 }
 
 /// `>=U|<U'~` for a Debian or RPM version (see [`default_spec`]), or `None`
@@ -425,18 +408,15 @@ mod tests {
     }
 
     #[test]
-    fn default_spec_for_pep440_is_the_caret_range_over_the_release() {
+    fn default_spec_for_pep440_is_the_lower_bound_uv_add_writes() {
         let p = |raw| default_of(raw, Scheme::Pep440);
-        assert_eq!(p("3.2.3"), ">=3.2.3|<4.0.0");
-        assert_eq!(p("0.6.9"), ">=0.6.9|<0.7.0");
-        assert_eq!(p("0.0.3"), ">=0.0.3|<0.0.4");
-        assert_eq!(p("2024.10"), ">=2024.10|<2025.0");
-        assert_eq!(p("5"), ">=5|<6");
-        assert_eq!(p("0.0"), ">=0.0|<0.1");
-        assert_eq!(p("1!2.0"), ">=1!2.0|<1!3.0");
-        assert_eq!(p("24.1a1"), ">=24.1a1|<25.0");
-        assert_eq!(p("1.0.post2"), ">=1.0.post2|<2.0");
-        assert_eq!(p("2.1.0+cpu"), ">=2.1.0|<3.0.0");
+        assert_eq!(p("3.2.3"), ">=3.2.3");
+        assert_eq!(p("0.6.9"), ">=0.6.9");
+        assert_eq!(p("2024.10"), ">=2024.10");
+        assert_eq!(p("1!2.0"), ">=1!2.0");
+        assert_eq!(p("24.1a1"), ">=24.1a1");
+        assert_eq!(p("1.0.post2"), ">=1.0.post2");
+        assert_eq!(p("2.1.0+cpu"), ">=2.1.0");
     }
 
     #[test]
