@@ -12,7 +12,7 @@ use bosun_io::{check_options, load_manifest, lock, manifest_hash};
 use bosun_ports::Installer;
 use bosun_resolve::{resolve, resolve_with_lock, NotApplicable, Outcome, Resolution};
 use serde::Serialize;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::env::Env;
 use crate::error::CliError;
@@ -726,9 +726,44 @@ pub(crate) enum Release {
 pub(crate) struct PendingLock {
     path: PathBuf,
     doc: LockDocument,
+    /// The lock this one replaces, if any.
+    previous: Option<LockDocument>,
+    /// The install scope of each package `install` planned for; one it left
+    /// out (its state unreadable) has none.
+    scopes: BTreeMap<String, Scope>,
 }
 
 impl PendingLock {
+    /// Keep the previous lock's entry (or no entry) for each package this
+    /// install did not apply: one in a scope `requested` leaves out, one whose
+    /// state the run left out, or one with a record `plan` defers to the next
+    /// elevated run (§4.5, §5.5).
+    pub(crate) fn only_applied(&mut self, requested: Option<Scope>, plan: &Plan) {
+        let deferred: BTreeSet<String> = plan.deferred().into_iter().map(|o| o.name).collect();
+        let applied = |name: &str| {
+            !deferred.contains(name)
+                && self
+                    .scopes
+                    .get(name)
+                    .is_some_and(|s| requested.is_none_or(|r| r == *s))
+        };
+        let mut packages = Vec::new();
+        for pkg in std::mem::take(&mut self.doc.packages) {
+            if applied(&pkg.name) {
+                packages.push(pkg);
+                continue;
+            }
+            debug!(message = crate::logmsg::LOCK_KEPT, package = %pkg.name);
+            let before = self
+                .previous
+                .iter()
+                .flat_map(|l| &l.packages)
+                .find(|p| p.name == pkg.name);
+            packages.extend(before.cloned());
+        }
+        self.doc.packages = packages;
+    }
+
     /// Pin each `(name, target, version)` the install ends the package at
     /// where that is not the lock's pin (the package manager moved it, or
     /// every claim's intersection chose another), so the lock follows what is
@@ -828,6 +863,8 @@ pub(crate) fn relock(
         PendingLock {
             path: lock_path,
             doc,
+            previous: previous.clone(),
+            scopes: BTreeMap::new(),
         }
     });
     Ok(Relocked {
@@ -1068,6 +1105,7 @@ pub fn install_plan(
         let mut pending = relocked.pending;
         if let Some(pending) = &mut pending {
             pending.follow(&resolved.followed);
+            pending.scopes = resolved.scopes;
         }
         (resolved.managed, resolved.carried, pending)
     };
@@ -1148,6 +1186,7 @@ fn managed_from_resolution<'a>(
     let mut managed = Vec::new();
     let mut carried = Vec::new();
     let mut followed = Vec::new();
+    let mut scopes = BTreeMap::new();
     for entry in &resolution.outcomes {
         match &entry.outcome {
             Outcome::Resolved {
@@ -1215,6 +1254,7 @@ fn managed_from_resolution<'a>(
                 let checksum = (resolved == leaf.resolved)
                     .then(|| leaf.checksum.clone())
                     .flatten();
+                scopes.insert(entry.name.clone(), installer.scope());
                 managed.push(Managed {
                     name: entry.name.clone(),
                     purl,
@@ -1241,17 +1281,20 @@ fn managed_from_resolution<'a>(
         managed,
         carried,
         followed,
+        scopes,
     })
 }
 
 /// What [`managed_from_resolution`] decided: the packages to plan for, the
 /// diagnostics resolution carried, and each package whose end version follows
 /// the package manager's move or every claim's choice rather than the lock,
-/// by name and target.
+/// by name and target, and the scope of each package planned for.
 struct Resolved<'a> {
     managed: Vec<Managed<'a>>,
     carried: Vec<Diagnostic>,
     followed: Vec<(String, Target, Version)>,
+    /// Each planned package's install scope.
+    scopes: BTreeMap<String, Scope>,
 }
 
 fn managed_from_lock<'a>(
@@ -1874,5 +1917,120 @@ mod tests {
             follow(&at("2.0-1"), Some("1.1-1"), "<2.0", "1.1-1"),
             "1.1-1"
         );
+    }
+
+    fn locked(pins: &[(&str, &str)]) -> LockDocument {
+        let pin = |(name, version): &(&str, &str)| {
+            let leaf = LockLeaf {
+                placement: bosun_core::record::Placement {
+                    backend: BackendId::new("apt"),
+                    purl: format!("pkg:deb/debian/{name}").parse().unwrap(),
+                },
+                spec: None,
+                resolved: deb(version),
+                index_snapshot: None,
+                checksum: None,
+            };
+            Package {
+                name: name.to_string(),
+                meta: Spec::new("*", "deb").unwrap(),
+                targets: BTreeMap::from([(Target::Any, leaf)]),
+            }
+        };
+        LockDocument {
+            lockfile_version: bosun_resolve::LOCKFILE_VERSION,
+            manifest: "/w/bosun.yaml".to_string(),
+            manifest_hash: "sha256:0".to_string(),
+            packages: pins.iter().map(pin).collect(),
+        }
+    }
+
+    fn pins(doc: &LockDocument) -> Vec<(String, String)> {
+        doc.packages
+            .iter()
+            .map(|p| {
+                let leaf = p.targets.values().next().unwrap();
+                (p.name.clone(), leaf.resolved.as_str().to_string())
+            })
+            .collect()
+    }
+
+    fn owned(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(n, v)| (n.to_string(), v.to_string()))
+            .collect()
+    }
+
+    /// A pending lock moving jq (system), rg (user) and fd (left out: no
+    /// scope) to 2.0-1, from a previous lock pinning jq and fd at 1.0-1.
+    fn pending() -> PendingLock {
+        PendingLock {
+            path: PathBuf::from("/l.json"),
+            doc: locked(&[("jq", "2.0-1"), ("rg", "2.0-1"), ("fd", "2.0-1")]),
+            previous: Some(locked(&[("jq", "1.0-1"), ("fd", "1.0-1")])),
+            scopes: BTreeMap::from([
+                ("jq".to_string(), Scope::System),
+                ("rg".to_string(), Scope::User),
+            ]),
+        }
+    }
+
+    fn empty_plan() -> Plan {
+        Plan {
+            actions: Vec::new(),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_lock_takes_every_applied_scope_and_keeps_what_was_left_out() {
+        let mut lock = pending();
+        lock.only_applied(None, &empty_plan());
+        assert_eq!(
+            pins(&lock.doc),
+            owned(&[("jq", "2.0-1"), ("rg", "2.0-1"), ("fd", "1.0-1")])
+        );
+    }
+
+    #[test]
+    fn a_scope_the_install_was_narrowed_away_from_keeps_its_pins_or_none() {
+        let mut user = pending();
+        user.only_applied(Some(Scope::User), &empty_plan());
+        assert_eq!(
+            pins(&user.doc),
+            owned(&[("jq", "1.0-1"), ("rg", "2.0-1"), ("fd", "1.0-1")])
+        );
+        let mut system = pending();
+        system.only_applied(Some(Scope::System), &empty_plan());
+        assert_eq!(
+            pins(&system.doc),
+            owned(&[("jq", "2.0-1"), ("fd", "1.0-1")])
+        );
+    }
+
+    #[test]
+    fn a_deferred_record_keeps_its_pin() {
+        let plan = Plan {
+            actions: Vec::new(),
+            diagnostics: vec![Diagnostic::Deferred {
+                name: "jq".to_string(),
+                action: bosun_apply::ActionKind::Accept,
+            }],
+        };
+        let mut lock = pending();
+        lock.only_applied(None, &plan);
+        assert_eq!(
+            pins(&lock.doc),
+            owned(&[("jq", "1.0-1"), ("rg", "2.0-1"), ("fd", "1.0-1")])
+        );
+    }
+
+    #[test]
+    fn with_no_previous_lock_what_was_left_out_is_absent() {
+        let mut lock = pending();
+        lock.previous = None;
+        lock.only_applied(Some(Scope::User), &empty_plan());
+        assert_eq!(pins(&lock.doc), owned(&[("rg", "2.0-1")]));
     }
 }

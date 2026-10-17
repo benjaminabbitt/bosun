@@ -58,3 +58,8 @@ pub const MANIFEST_UNCHECKED: &str =
 /// reads Ubuntu `noble`), so it matches nothing.
 pub const OWN_CODENAME_SELECTOR: &str =
     "a release selector names the distro's own codename, which is not its release; it matches nothing, name the release instead";
+
+/// `install` left a package's scope out of its apply (`--scope`, a record
+/// deferred without elevation, or state this user may not read), so its lock
+/// entry stays as it was.
+pub const LOCK_KEPT: &str = "this run did not apply the package's scope; its lock entry is kept";

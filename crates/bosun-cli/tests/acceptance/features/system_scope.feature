@@ -227,3 +227,69 @@ Feature: accept, hold and privilege at system scope (apt)
     And it does not say "--scope"
     And the manifest is unchanged
     And the system state is unchanged
+
+  # The lock follows what a run applied: a scope it left out keeps its pins.
+  Scenario: install --scope user leaves the system package's lock entry as it was
+    Given a Debian trixie amd64 machine, not elevated
+    And cargo 1.76.0 is available
+    And cargo publishes ripgrep 14.1.1
+    And apt publishes jq 1.7.1-6+deb13u1
+    And the manifest:
+      """
+      version: 2
+      packages:
+        - name: jq
+          spec: ">=1.6"
+          install:
+            linux:debian: {backend: apt}
+        - name: ripgrep
+          spec: "*"
+          install:
+            linux: {backend: cargo}
+      """
+    When I run `bosun lock .`
+    Then the lock pins jq 1.7.1-6+deb13u1
+    When apt publishes jq 1.7.1-6+deb13u1 and 1.7.1-6+deb13u2
+    And cargo publishes ripgrep 14.1.1, 14.2.0
+    And the manifest is replaced by:
+      """
+      version: 2
+      packages:
+        - name: jq
+          spec: ">=1.7.1-6+deb13u2"
+          install:
+            linux:debian: {backend: apt}
+        - name: ripgrep
+          spec: ">=14.2.0"
+          install:
+            linux: {backend: cargo}
+      """
+    And I run `bosun install . --scope user --yes`
+    Then it succeeds
+    And bosun has recorded ripgrep 14.2.0
+    And the lock pins ripgrep 14.2.0
+    And the lock pins jq 1.7.1-6+deb13u1
+
+  Scenario: a system record left to the next elevated run leaves the lock without it
+    Given a Debian trixie amd64 machine, not elevated
+    And cargo 1.76.0 is available
+    And cargo publishes ripgrep 14.1.1
+    And jq 1.7.1-6+deb13u2 is installed outside bosun
+    And the manifest:
+      """
+      version: 2
+      packages:
+        - name: jq
+          spec: ">=1.6"
+          install:
+            linux:debian: {backend: apt}
+        - name: ripgrep
+          spec: "*"
+          install:
+            linux: {backend: cargo}
+      """
+    When I run `bosun --format text install . --yes`
+    Then it succeeds
+    And it says "accept     jq               recorded on the next elevated run"
+    And the lock pins ripgrep 14.1.1
+    And the lock does not mention jq

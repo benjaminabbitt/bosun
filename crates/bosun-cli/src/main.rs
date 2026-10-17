@@ -175,11 +175,13 @@ fn dispatch(cli: &Cli, format: Format) -> Result<i32, CliError> {
             if m.plan_only {
                 return emit(&built, format, &mut out);
             }
+            let requested = m.scope;
             match apply_mutation(&env, m, &built, format, &mut out)? {
                 Applied::Stopped(code) => Ok(code),
                 Applied::Done(report) => {
                     // The lock follows what was installed, and only then.
-                    if let Some(pending) = pending {
+                    if let Some(mut pending) = pending {
+                        pending.only_applied(requested, &built);
                         pending.write()?;
                     }
                     render(&report, format, &mut out).map_err(io_err)?;
