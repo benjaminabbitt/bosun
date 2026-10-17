@@ -359,8 +359,9 @@ fn left(f: &Found, reason: String) -> LeftOut {
     }
 }
 
-/// The entry for `f`, as `add` writes one: the range from its installed
-/// version to the next breaking one, under `selector`.
+/// The entry for `f`, as `add` writes one: the default spec for its
+/// installed version (an OS package's `*`, a language package's range up to
+/// the next breaking version), under `selector`.
 fn entry(f: &Found, selector: bosun_core::platform::Selector) -> ManifestEntry {
     ManifestEntry {
         name: f.name.clone(),

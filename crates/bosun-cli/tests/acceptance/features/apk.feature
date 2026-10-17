@@ -106,7 +106,7 @@ Feature: apk installs Alpine packages at system scope
       version: 2
       packages:
         - name: jq
-          spec: ">=1.7.1|<1.7.2_alpha"
+          spec: "*"
           install:
             linux: {backend: apk}
       """

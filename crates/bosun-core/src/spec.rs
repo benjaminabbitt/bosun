@@ -142,13 +142,12 @@ impl Spec {
 /// - SemVer: the caret range, `>=X.Y.Z|<(X+1).0.0`; below 1.0 the next minor
 ///   (`0.9.1` → `<0.10.0`) and below 0.1 the next patch is the bound.
 ///   Build metadata is dropped; a pre-release stays as the lower bound.
-/// - Debian and RPM: any revision (release) of the same upstream version,
-///   `>=U|<U'~` where `U'` bumps the last number of `U`'s leading numeric
-///   part (`1.7.1-3` → `>=1.7.1|<1.7.2~`); an epoch is kept on both bounds.
+/// - Debian, RPM and Alpine: `*`, whatever the release's repositories carry.
+///   The distro's stable-update policy is the compatibility promise, and the
+///   release selector already scopes the entry.
 /// - PEP 440: `>=V`, the lower bound `uv add` writes; the epoch is kept and a
 ///   local label dropped.
-/// - Otherwise, or when the version has no numeric part to bump: the exact
-///   version.
+/// - Otherwise, or when a SemVer version does not parse: the exact version.
 pub fn default_spec(latest: &Version) -> String {
     let exact = latest.as_str().to_string();
     match latest.scheme() {
@@ -168,8 +167,7 @@ pub fn default_spec(latest: &Version) -> String {
             }
             Err(_) => exact,
         },
-        Scheme::Debian | Scheme::Rpm => epoch_release_default(latest.as_str()).unwrap_or(exact),
-        Scheme::Alpine => alpine_default(latest.as_str()).unwrap_or(exact),
+        Scheme::Debian | Scheme::Rpm | Scheme::Alpine => "*".to_string(),
         Scheme::Pep440 => pep440_default(latest.as_str()).unwrap_or(exact),
         Scheme::Generic => exact,
     }
@@ -179,41 +177,6 @@ pub fn default_spec(latest: &Version) -> String {
 fn pep440_default(raw: &str) -> Option<String> {
     let v: pep440_rs::Version = raw.parse().ok()?;
     Some(format!(">={}", v.without_local()))
-}
-
-/// `>=U|<U'~` for a Debian or RPM version (see [`default_spec`]), or `None`
-/// when its upstream part does not start with a number.
-fn epoch_release_default(raw: &str) -> Option<String> {
-    let (epoch, rest) = match raw.split_once(':') {
-        Some((e, r)) => (format!("{e}:"), r),
-        None => (String::new(), raw),
-    };
-    let upstream = rest.rsplit_once('-').map_or(rest, |(u, _)| u);
-    let next = bump_leading_number(upstream)?;
-    Some(format!(">={epoch}{upstream}|<{epoch}{next}~"))
-}
-
-/// `>=U|<U'_alpha` for an Alpine version (see [`default_spec`]), or `None`
-/// when it does not start with a number.
-fn alpine_default(raw: &str) -> Option<String> {
-    let upstream = raw.rsplit_once("-r").map_or(raw, |(u, _)| u);
-    let next = bump_leading_number(upstream)?;
-    Some(format!(">={upstream}|<{next}_alpha"))
-}
-
-/// The leading dotted number of `upstream` with its last component bumped
-/// (`1.7.1+x` → `1.7.2`), or `None` when it does not start with a number.
-fn bump_leading_number(upstream: &str) -> Option<String> {
-    let numeric_len = upstream
-        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
-        .unwrap_or(upstream.len());
-    let numeric = upstream[..numeric_len].trim_end_matches('.');
-    let (head, last) = match numeric.rsplit_once('.') {
-        Some((h, l)) => (format!("{h}."), l),
-        None => (String::new(), numeric),
-    };
-    let bumped = last.parse::<u64>().ok()? + 1;
-    Some(format!("{head}{bumped}"))
 }
 
 /// A manifest entry's resolvable intent: a logical name (§5.4) and its spec.
@@ -402,30 +365,23 @@ mod tests {
     }
 
     #[test]
-    fn default_spec_for_debian_is_any_revision_of_the_upstream_version() {
-        assert_eq!(default_of("1.7.1-3", Scheme::Debian), ">=1.7.1|<1.7.2~");
-        assert_eq!(
-            default_of("1.7.1-3+deb13u1", Scheme::Debian),
-            ">=1.7.1|<1.7.2~"
-        );
-        assert_eq!(default_of("1.40.0-1", Scheme::Debian), ">=1.40.0|<1.40.1~");
-        assert_eq!(default_of("1:2.3-4", Scheme::Debian), ">=1:2.3|<1:2.4~");
-        assert_eq!(
-            default_of("9.0.0~rc1-1", Scheme::Debian),
-            ">=9.0.0~rc1|<9.0.1~"
-        );
-        assert_eq!(default_of("2.3", Scheme::Debian), ">=2.3|<2.4~");
-    }
-
-    #[test]
-    fn default_spec_for_rpm_is_any_release_of_the_version() {
-        assert_eq!(default_of("1.7.1-8.fc41", Scheme::Rpm), ">=1.7.1|<1.7.2~");
-        assert_eq!(
-            default_of("2:4.15.1-12.fc41", Scheme::Rpm),
-            ">=2:4.15.1|<2:4.15.2~"
-        );
-        assert_eq!(default_of("2026e-1.el9_8", Scheme::Rpm), ">=2026e|<2027~");
-        assert_eq!(default_of("beta-1", Scheme::Rpm), "beta-1");
+    fn default_spec_for_an_os_package_follows_the_release() {
+        // The distro's stable-update policy is the compatibility promise:
+        // `*` takes whatever the release's repositories carry.
+        for (raw, scheme) in [
+            ("1.7.1-3", Scheme::Debian),
+            ("1:2.3-4", Scheme::Debian),
+            ("3.0.17-1~deb12u1", Scheme::Debian),
+            ("beta-1", Scheme::Debian),
+            ("1.7.1-8.fc41", Scheme::Rpm),
+            ("2:4.15.1-12.fc41", Scheme::Rpm),
+            ("2026e-1.el9_8", Scheme::Rpm),
+            ("1.7.1-r3", Scheme::Alpine),
+            ("1.8.0_rc1-r0", Scheme::Alpine),
+            ("20260909-r0", Scheme::Alpine),
+        ] {
+            assert_eq!(default_of(raw, scheme), "*", "{raw}");
+        }
     }
 
     #[test]
@@ -451,30 +407,6 @@ mod tests {
     }
 
     #[test]
-    fn default_spec_for_alpine_is_any_revision_of_the_upstream_version() {
-        assert_eq!(
-            default_of("1.7.1-r3", Scheme::Alpine),
-            ">=1.7.1|<1.7.2_alpha"
-        );
-        assert_eq!(
-            default_of("1.40.0", Scheme::Alpine),
-            ">=1.40.0|<1.40.1_alpha"
-        );
-        assert_eq!(
-            default_of("2.4_p1-r1", Scheme::Alpine),
-            ">=2.4_p1|<2.5_alpha"
-        );
-        assert_eq!(
-            default_of("20260909-r0", Scheme::Alpine),
-            ">=20260909|<20260910_alpha"
-        );
-        assert_eq!(
-            default_of("1.8.0_rc1-r0", Scheme::Alpine),
-            ">=1.8.0_rc1|<1.8.1_alpha"
-        );
-    }
-
-    #[test]
     fn a_bad_apk_constraint_is_named_as_apk() {
         match Spec::new(">=1.0-1", "apk").unwrap_err() {
             SpecError::BadVersion { scheme, .. } => assert_eq!(scheme, "apk"),
@@ -483,8 +415,7 @@ mod tests {
     }
 
     #[test]
-    fn default_spec_is_the_exact_version_when_no_range_fits() {
-        assert_eq!(default_of("beta-1", Scheme::Debian), "beta-1");
+    fn default_spec_for_generic_is_the_exact_version() {
         assert_eq!(default_of("2024.10.1", Scheme::Generic), "2024.10.1");
     }
 

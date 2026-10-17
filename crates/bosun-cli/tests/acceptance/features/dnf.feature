@@ -34,7 +34,7 @@ Feature: dnf installs and holds RPM packages on Fedora and the RHEL family
     Then it succeeds
     And the lock pins jq 1:1.7~rc1-1.fc41
 
-  Scenario: bosun add writes a range over any release of the newest version
+  Scenario: bosun add follows the release's repositories, locking the newest version
     Given a Fedora 41 amd64 machine, not elevated
     And dnf 5.2.17.0 is available
     And dnf publishes jq 1.7.1-8.fc41
@@ -45,7 +45,7 @@ Feature: dnf installs and holds RPM packages on Fedora and the RHEL family
       """
     When I run `bosun --format text add jq --backend dnf`
     Then it succeeds
-    And it says "Added jq >=1.7.1|<1.7.2~"
+    And it says "Added jq *"
     And the lock pins jq 1.7.1-8.fc41
 
   Scenario: an absent package is planned to install and then hold

@@ -33,7 +33,7 @@ Feature: bosun export seeds a manifest from what this machine has installed by h
       version: 2
       packages:
         - name: jq
-          spec: ">=1.7.1|<1.7.2~"
+          spec: "*"
           install:
             linux: {backend: apt}
         - name: ripgrep
