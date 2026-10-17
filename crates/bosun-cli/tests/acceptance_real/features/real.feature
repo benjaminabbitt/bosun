@@ -730,6 +730,29 @@ Feature: real backends against a disposable container
     Then it succeeds
     And the binary ruff does not exist
 
+  # `uv tool install` reads no project configuration, so neither does the
+  # resolution: a uv.toml where bosun runs, naming an index that cannot be
+  # reached, changes nothing.
+  @uv @useradd @runuser
+  Scenario: uv resolves with the configuration uv tool install reads, not the project's
+    Given the manifest:
+      """
+      version: 2
+      packages:
+        - name: ruff
+          spec: ">=0.6.0|<0.7.0"
+          install: {backend: uv}
+      """
+    And the project has a uv.toml naming an index that cannot be reached
+    And a non-root user owns the project
+    When the non-root user runs `bosun install . --yes`
+    Then it succeeds
+    And uv lists ruff 0.6.9
+    When the manifest is deleted
+    And the non-root user runs `bosun prune --yes`
+    Then it succeeds
+    And the binary ruff does not exist
+
   # uv resolves the spec itself, for the interpreter its tools use: under
   # Python 3.9 black's newest release that still supports it, 25.11.0, though
   # 26.x is published.

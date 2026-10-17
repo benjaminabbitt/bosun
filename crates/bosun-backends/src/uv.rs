@@ -16,8 +16,16 @@
 //! taken. The remote index, with no uv to ask, takes the newest version in
 //! the range.
 //!
+//! `uv tool install` reads no project configuration: neither a `uv.toml` or
+//! `pyproject.toml` `[tool.uv]` in the directory it runs in or above, nor a
+//! `.python-version`, nor `UV_PROJECT`'s. `uv pip compile` and `uv python
+//! find` read all of them, so both run with `--directory` and `--project` at
+//! the filesystem root, where only the configuration `uv tool install` reads
+//! applies.
+//!
 //! The index is uv's to know: it reads its own configuration
-//! (`UV_DEFAULT_INDEX`, `UV_INDEX_URL`, `uv.toml`) when it resolves, and
+//! (`UV_DEFAULT_INDEX`, `UV_INDEX_URL`, the user's and the system's
+//! `uv.toml`) when it resolves, and
 //! when nothing in the spec resolves, its explanation is logged rather than
 //! a listing bosun would fetch from PyPI. Only the remote index reads PyPI
 //! itself.
@@ -129,6 +137,11 @@ struct UvBackend {
     python: Arc<OnceLock<Option<String>>>,
 }
 
+/// Where resolution runs uv from (`--directory` and `--project`): the
+/// filesystem root, so it reads no project configuration, as `uv tool
+/// install` reads none.
+const NEUTRAL_DIR: &str = "/";
+
 /// What `uv pip compile` prints when no version satisfies the requirement.
 const NO_SOLUTION: &str = "No solution found";
 
@@ -138,9 +151,10 @@ impl UvBackend {
     fn python(&self) -> Option<&str> {
         self.python
             .get_or_init(|| {
-                let out = self
-                    .runner
-                    .run(&Command::new("uv", argv(&["python", "find", "--system"])));
+                let out = self.runner.run(&Command::new(
+                    "uv",
+                    neutral(&["python", "find", "--system"]),
+                ));
                 match out {
                     Ok(out) if out.success() => {
                         let found = out.stdout_utf8().trim().to_string();
@@ -159,7 +173,7 @@ impl UvBackend {
     /// The version uv resolves `requirement` to, or uv's explanation of
     /// why nothing satisfies it.
     fn resolve(&self, requirement: &str) -> Result<Result<Version, String>, PortError> {
-        let mut args = argv(&[
+        let mut args = neutral(&[
             "pip",
             "compile",
             "-",
@@ -256,6 +270,13 @@ impl UvBackend {
             available: vec![chosen],
         })
     }
+}
+
+/// `uv <parts>` run from [`NEUTRAL_DIR`].
+fn neutral(parts: &[&str]) -> Vec<String> {
+    let mut args = argv(&["--directory", NEUTRAL_DIR, "--project", NEUTRAL_DIR]);
+    args.extend(argv(parts));
+    args
 }
 
 fn argv(parts: &[&str]) -> Vec<String> {
@@ -575,11 +596,29 @@ mod tests {
         assert_eq!(got.chosen, Some(pep("3.2.4")));
         let calls = fake.calls();
         assert_eq!(calls[0].program, "uv");
-        assert_eq!(calls[0].args, vec!["python", "find", "--system"]);
+        // Both from the filesystem root, so neither reads the configuration
+        // or `.python-version` of the directory bosun runs in, which `uv tool
+        // install` ignores.
+        assert_eq!(
+            calls[0].args,
+            vec![
+                "--directory",
+                NEUTRAL_DIR,
+                "--project",
+                NEUTRAL_DIR,
+                "python",
+                "find",
+                "--system"
+            ]
+        );
         assert_eq!(calls[1].program, "uv");
         assert_eq!(
             calls[1].args,
             vec![
+                "--directory",
+                NEUTRAL_DIR,
+                "--project",
+                NEUTRAL_DIR,
                 "pip",
                 "compile",
                 "-",

@@ -1041,7 +1041,9 @@ ranking of its own that could drift from the installer's (`Index::select`):
   pack --dry-run --json name@<range>`: the `latest` dist-tag when it satisfies, then
   non-deprecated, then engine-compatible versions), uv with `uv pip compile` for the
   interpreter its tools use (requires-python, yanked releases (PEP 592), wheels, its own
-  index). bosun checks the answer is in the set and records it.
+  index), with only the configuration `uv tool install` reads (run from the filesystem root:
+  no project's `uv.toml`, `[tool.uv]` or `.python-version`). bosun checks the answer is in
+  the set and records it.
 - **Everything else** (cargo, apk, the github backends, the Windows backends) and every
   remote index (`render --target`, no package manager to ask) takes the **highest available
   version in the set**.
@@ -1658,6 +1660,7 @@ under a pty on Unix only.
 | V-5 | apk ordering and validity by the probed apk-tools major (2 vs 3); real-tier ordering oracle: each index's versions sorted by bosun, every adjacent pair confirmed by `dpkg --compare-versions` / `rpm.vercmp` / `apk version -t`, plus conformance pairs | landed; 0 disagreements: Debian 13 23,276 pairs, Debian 12 21,410, Fedora 41 22,394, Rocky 9 2,800, Alpine 3.20 (apk-tools 2.14.4) 4,921, Alpine 3.23 (3.0.8) 5,282 |
 | TV-6 | system state without elevation: `read` takes its shared lock through the lock file opened read-only; state the user may not read (`PortError::StateDenied`) is left out of a run without elevation, its packages skipped, warned once, never locked or written; elevated runs fail on it as before | landed; real tier in `debian:13`: elevated install, then a non-root `prune` / `status` read it; with the state 0600 a non-root `prune` warns and leaves it untouched |
 | TV-7 | dnf never goes back past the installed build: `select` asks `rpm -q`, ranks builds behind it last, and keeps it, admitted, when no repository offers it | landed; real tier in `fedora:41` (wget2 2.2.0 kept with fedora's 2.1.0 at priority 1 after `upgrade`) and `rockylinux:9` (unzip 6.0-60.el9_8 kept over the 9.5 vault's 6.0-58.el9_5 at priority 1); red without the installed build: a downgrade was planned |
+| TV-8 | uv resolves with the configuration `uv tool install` reads: `uv python find` and `uv pip compile` run as `uv --directory / --project /`, so a project's `uv.toml`, `[tool.uv]`, `.python-version` or `UV_PROJECT` where bosun runs is not read | landed; real tier in `python:3.12-slim` with uv 0.13.1: a `uv.toml` in the project naming an unreachable index, ruff `>=0.6.0\|<0.7.0` → 0.6.9; red without it (`Connection refused`) |
 
 **First real-host smoke run (2026-10-14, release build, Debian 13, read-only `--plan` and
 `lock` in a scratch dir).** `backends` found apt 3.0.3, cargo 1.96.1 and github-release; jq
@@ -1862,6 +1865,16 @@ bookworm-backports and pin files, apt 2.6, and `ubuntu:24.04`, apt 2.8.3):
     misses (black: 24.8.0 for 3.8, 25.11.0 for 3.9, 26.10.1 for 3.10). uv reads its own index
     configuration (`UV_DEFAULT_INDEX`, `UV_INDEX_URL`, `uv.toml`); bosun reads none and
     fetches nothing from PyPI on this machine.
+  - Configuration (checked 2026-10-17, uv 0.13.1 in `python:3.12-slim`): `uv tool install`
+    reads the user's (`~/.config/uv/uv.toml`) and the system's (`/etc/uv/uv.toml`)
+    configuration and the environment, but no project's: a `uv.toml` or `pyproject.toml`
+    `[tool.uv]` naming an unreachable index in the directory it runs in (or above it), a
+    `.python-version` naming an absent interpreter, or `UV_PROJECT` naming such a project
+    changes nothing. `uv pip compile` and `uv python find` read all three, and fail on each.
+    `--no-config` would drop the user's and the system's configuration too, so bosun runs both
+    as `uv --directory / --project / …`: from the filesystem root only a `/uv.toml` or
+    `/pyproject.toml` is a project's, which `uv tool install` run from `/` would also ignore,
+    the one place they can still disagree.
   - Discover (remote index): PyPI's JSON API, `https://pypi.org/pypi/<name>/json`, `releases`
     (version → its files); a release with no files, or with every file yanked, is left out,
     as is a version outside PEP 440. An unknown project is a 404. The highest version in the

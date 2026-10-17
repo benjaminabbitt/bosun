@@ -379,6 +379,17 @@ fn delete_manifest(w: &mut RealWorld) {
     fs::remove_file(p.join("bosun.yaml")).unwrap();
 }
 
+/// A `uv.toml` in the project directory, where bosun runs, sending uv to an
+/// index that refuses every connection.
+#[given("the project has a uv.toml naming an index that cannot be reached")]
+fn project_uv_toml(w: &mut RealWorld) {
+    fs::write(
+        w.home().join("uv.toml"),
+        "index-url = \"http://127.0.0.1:9/simple\"\n",
+    )
+    .unwrap();
+}
+
 #[given("a non-root user owns the project")]
 fn make_user(w: &mut RealWorld) {
     let home = w.home();
@@ -420,6 +431,7 @@ fn i_run_as_user(w: &mut RealWorld, cmdline: String) {
         });
     }
     let out = Command::new("runuser")
+        .current_dir(&home)
         .args(&args)
         .output()
         .expect("runuser");
