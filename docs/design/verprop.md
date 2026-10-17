@@ -482,6 +482,13 @@ namespace is the distro, its `distro` qualifier the codename, its `arch` the arc
   `InRelease` lists, so a new index is downloaded only when the release changes. When the mirror
   can't be reached, the `InRelease` fetched before is used, with a warning. `Index::refresh`
   fetches every `InRelease` again.
+- **Scratch roots are pruned by age (DECIDED, built):** a root's digest changes with its sources,
+  pins and keys, so old ones pile up (validating M3-8 alone left 1.5 GB). Each root stamps its
+  last successful `apt-get update` (`updated`) and each use (`used`); once a run, when the
+  remote index first reads through apt (whether or not apt is here), every root neither updated
+  nor used for 30 days (`SCRATCH_MAX_AGE`) is removed, judged by its directory's time when it
+  has no stamp. A root that cannot be removed is warned about and left. A root removed and then
+  needed is written again and its lists fetched afresh.
 - **Checked** against `apt-cache policy` after `apt-get update` in `debian:12`, `debian:13` and
   `ubuntu:24.04` containers (2026-10-16): 14, 15 and 14 packages, every candidate the same.
   Rendered from each image with `--image` through apt (2026-10-17), 30 packages each in
@@ -1691,6 +1698,7 @@ under a pty on Unix only.
 | TV-8 | uv resolves with the configuration `uv tool install` reads: `uv python find` and `uv pip compile` run as `uv --directory / --project /`, so a project's `uv.toml`, `[tool.uv]`, `.python-version` or `UV_PROJECT` where bosun runs is not read | landed; real tier in `python:3.12-slim` with uv 0.13.1: a `uv.toml` in the project naming an unreachable index, ruff `>=0.6.0\|<0.7.0` → 0.6.9; red without it (`Connection refused`) |
 | TV-9 | state follows the package manager: planning and `status` take each recorded package's version from `verify_installed`; the applier records it at the start of every state transaction; a move within the spec ends there (the lock follows), never back; a move outside it is warned and planned as any | landed; real tier in `debian:13`: bosun-probe 1.0-1 under `*`, `apt-get --only-upgrade install` → 2.0-1, `status` shows `2.0-1 (up to date)`, `install --plan` plans nothing |
 | TV-10 | a deb release is the codename apt reads: `UBUNTU_CODENAME`, else `DEBIAN_CODENAME`, else `VERSION_CODENAME` (`Distro::base_codename`); `linux:linuxmint@wilma` names nothing, `@noble` matches Mint 22 | landed; os-release of LMDE 6, elementary OS 7, Debian 13, Kali captured from images; Mint 22, Pop!_OS 24.04, elementary OS 8 from known contents (no faithful image) |
+| TV-11 | apt scratch roots pruned by age: `used` stamped on each write, `updated` on each successful update; `prune_scratch` removes roots idle for `SCRATCH_MAX_AGE` (30 days) once a run, when the remote index first reads through apt | landed (unit tests with file times set back) |
 
 **First real-host smoke run (2026-10-14, release build, Debian 13, read-only `--plan` and
 `lock` in a scratch dir).** `backends` found apt 3.0.3, cargo 1.96.1 and github-release; jq

@@ -173,3 +173,10 @@ pub const APT_PINS_IGNORED: &str =
 /// dnf keeps the installed build: `dnf install` never goes back past it, and
 /// no repository offers a newer one it would take.
 pub const DNF_INSTALLED_KEPT: &str = "dnf keeps the installed build within the spec";
+
+/// A scratch root neither updated nor used for 30 days was removed.
+pub const APT_SCRATCH_PRUNED: &str = "removed an apt scratch root unused for 30 days";
+
+/// A scratch root due for removal could not be removed; it is left.
+pub const APT_SCRATCH_PRUNE_FAILED: &str =
+    "could not remove an apt scratch root unused for 30 days";

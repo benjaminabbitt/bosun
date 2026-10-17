@@ -19,16 +19,22 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use bosun_core::Arch;
 use bosun_ports::{Command, CommandRunner, PortError};
 use sha2::{Digest, Sha256};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use super::policy::{self, Policy};
 use super::remote::{https, RELEASE_TTL};
 use super::sources::SourceEntry;
 use crate::{errmsg, logmsg};
+
+/// The stamp a scratch root's last successful `apt-get update` writes.
+const UPDATED: &str = "updated";
+/// The stamp each use of a scratch root writes.
+const USED: &str = "used";
 
 /// One release's sources in a scratch root, ready for `apt-get update`.
 #[derive(Debug, PartialEq, Eq)]
@@ -268,6 +274,7 @@ impl Scratch {
         ] {
             fs::create_dir_all(dir.join(d)).map_err(|e| io_err(&dir, e))?;
         }
+        write(&dir.join(USED), b"")?;
         Ok(Scratch { dir })
     }
 
@@ -287,7 +294,7 @@ impl Scratch {
     }
 
     fn stamp(&self) -> PathBuf {
-        self.dir.join("updated")
+        self.dir.join(UPDATED)
     }
 
     /// `apt-get update` in the scratch root, unless it ran within
@@ -331,6 +338,52 @@ impl Scratch {
         }
         policy::parse(&out.stdout_utf8())
     }
+}
+
+/// How long a scratch root may go unused and un-updated before
+/// [`prune_scratch`] removes it.
+pub const SCRATCH_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+/// When the scratch root at `dir` was last updated or used: the later of its
+/// update and use stamps, its directory's time when it has neither.
+fn last_active(dir: &Path) -> Option<SystemTime> {
+    let modified = |p: PathBuf| fs::metadata(p).and_then(|m| m.modified()).ok();
+    [UPDATED, USED]
+        .into_iter()
+        .filter_map(|stamp| modified(dir.join(stamp)))
+        .max()
+        .or_else(|| modified(dir.to_path_buf()))
+}
+
+/// Remove the scratch roots under `cache` neither updated nor used within
+/// `max_age` of `now`, and give their directories, sorted. One that cannot be
+/// removed is warned about and left.
+pub fn prune_scratch(cache: &Path, now: SystemTime, max_age: Duration) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = fs::read_dir(cache.join("scratch"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    roots.sort();
+    let mut removed = Vec::new();
+    for dir in roots {
+        let idle = last_active(&dir).and_then(|t| now.duration_since(t).ok());
+        if idle.is_none_or(|idle| idle <= max_age) {
+            continue;
+        }
+        match fs::remove_dir_all(&dir) {
+            Ok(()) => {
+                info!(message = logmsg::APT_SCRATCH_PRUNED, dir = %dir.display());
+                removed.push(dir);
+            }
+            Err(e) => {
+                warn!(message = logmsg::APT_SCRATCH_PRUNE_FAILED, dir = %dir.display(), error = %e)
+            }
+        }
+    }
+    removed
 }
 
 #[cfg(test)]

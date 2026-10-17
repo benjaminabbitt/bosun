@@ -421,3 +421,87 @@ fn keyrings_are_paths_and_the_rest_fingerprints() {
     );
     assert_eq!(keyrings("\n-----BEGIN PGP PUBLIC KEY BLOCK-----\nx"), None);
 }
+
+const DAY: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// A scratch root named `name` under `cache`, its update stamp and use stamp
+/// last written `updated` and `used` days before `now` (absent when `None`).
+fn aged_root(
+    cache: &Path,
+    name: &str,
+    now: SystemTime,
+    updated: Option<u64>,
+    used: Option<u64>,
+) -> PathBuf {
+    let dir = cache.join("scratch").join(name);
+    fs::create_dir_all(dir.join("var/lib/apt/lists")).unwrap();
+    fs::write(dir.join("var/lib/apt/lists/x_Packages"), "Package: x\n").unwrap();
+    for (stamp, days) in [("updated", updated), ("used", used)] {
+        if let Some(days) = days {
+            let f = fs::File::create(dir.join(stamp)).unwrap();
+            f.set_modified(now - DAY * days as u32).unwrap();
+        }
+    }
+    dir
+}
+
+#[test]
+fn roots_unused_and_not_updated_for_thirty_days_are_removed() {
+    let cache = tempfile::tempdir().unwrap();
+    let now = SystemTime::now();
+    let old = aged_root(cache.path(), "old", now, Some(40), Some(31));
+    let updated = aged_root(cache.path(), "updated", now, Some(2), Some(60));
+    let used = aged_root(cache.path(), "used", now, Some(90), Some(29));
+    let never_updated = aged_root(cache.path(), "never-updated", now, None, Some(45));
+    let removed = prune_scratch(cache.path(), now, SCRATCH_MAX_AGE);
+    assert_eq!(removed, vec![never_updated.clone(), old.clone()]);
+    assert!(!old.exists() && !never_updated.exists());
+    assert!(updated.exists() && used.exists());
+}
+
+#[test]
+fn a_root_with_no_stamp_is_judged_by_its_directory() {
+    let cache = tempfile::tempdir().unwrap();
+    let now = SystemTime::now();
+    let fresh = aged_root(cache.path(), "fresh", now, None, None);
+    assert!(prune_scratch(cache.path(), now, SCRATCH_MAX_AGE).is_empty());
+    assert!(fresh.exists());
+    let later = now + DAY * 31;
+    assert_eq!(
+        prune_scratch(cache.path(), later, SCRATCH_MAX_AGE),
+        vec![fresh.clone()]
+    );
+    assert!(!fresh.exists());
+}
+
+#[test]
+fn pruning_a_cache_with_no_scratch_roots_removes_nothing() {
+    let cache = tempfile::tempdir().unwrap();
+    assert!(prune_scratch(cache.path(), SystemTime::now(), SCRATCH_MAX_AGE).is_empty());
+    // A stray file beside the roots is not a root.
+    fs::create_dir_all(cache.path().join("scratch")).unwrap();
+    let stray = cache.path().join("scratch/notes");
+    let f = fs::File::create(&stray).unwrap();
+    f.set_modified(SystemTime::now() - DAY * 90).unwrap();
+    assert!(prune_scratch(cache.path(), SystemTime::now(), SCRATCH_MAX_AGE).is_empty());
+    assert!(stray.exists());
+}
+
+#[test]
+fn writing_a_root_stamps_its_use() {
+    let cache = tempfile::tempdir().unwrap();
+    let plan = plan(None, &parse_deb822(DEBIAN), Arch::Amd64);
+    let s = Scratch::write(cache.path(), &plan).unwrap();
+    let used = s.dir().join("used");
+    let f = fs::File::options().write(true).open(&used).unwrap();
+    f.set_modified(SystemTime::now() - DAY * 40).unwrap();
+    drop(f);
+    Scratch::write(cache.path(), &plan).unwrap();
+    assert!(prune_scratch(cache.path(), SystemTime::now(), SCRATCH_MAX_AGE).is_empty());
+    assert!(s.dir().exists());
+}
+
+#[test]
+fn thirty_days_is_the_age_limit() {
+    assert_eq!(SCRATCH_MAX_AGE, DAY * 30);
+}

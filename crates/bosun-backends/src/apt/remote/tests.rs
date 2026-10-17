@@ -1241,3 +1241,40 @@ fn the_targets_pins_are_warned_of_when_bosun_reads_the_mirrors_itself() {
         assert!(log.contains(logmsg::APT_PINS_IGNORED), "{pins}: {log}");
     }
 }
+
+#[test]
+fn reading_through_apt_removes_scratch_roots_idle_for_thirty_days() {
+    let dir = tempfile::tempdir().unwrap();
+    let idle = dir.path().join("scratch/idle");
+    fs::create_dir_all(&idle).unwrap();
+    let month_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(31 * 86_400);
+    for stamp in ["updated", "used"] {
+        fs::File::create(idle.join(stamp))
+            .unwrap()
+            .set_modified(month_ago)
+            .unwrap();
+    }
+    let runner = apt(&[(0, ""), (0, JQ_POLICY)]);
+    let idx = with_apt(
+        index(&Arc::new(FakeHttpFetcher::new()), dir.path()),
+        &runner,
+    );
+    assert!(chosen(&idx, JQ, "vers:deb/*").is_some());
+    assert!(!idle.exists());
+    // The root just used stays.
+    assert_eq!(fs::read_dir(dir.path().join("scratch")).unwrap().count(), 1);
+}
+
+#[test]
+fn idle_scratch_roots_go_even_where_apt_is_not_here() {
+    let dir = tempfile::tempdir().unwrap();
+    let idle = dir.path().join("scratch/idle");
+    fs::create_dir_all(&idle).unwrap();
+    fs::File::create(idle.join("used"))
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(31 * 86_400))
+        .unwrap();
+    let idx = index(&Arc::new(bookworm_mirror()), dir.path());
+    assert_eq!(versions(&idx, JQ).len(), 2);
+    assert!(!idle.exists());
+}

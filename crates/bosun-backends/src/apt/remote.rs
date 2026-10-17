@@ -394,6 +394,8 @@ pub struct RemoteAptIndex {
     scratches: RefCell<BTreeMap<ReleaseKey, Option<Rc<Scratch>>>>,
     /// Set by `refresh`: fetch every `InRelease` again, however fresh.
     refetch: Cell<bool>,
+    /// Whether this run has removed the idle scratch roots yet.
+    pruned: Cell<bool>,
 }
 
 /// Where a release's sources come from.
@@ -437,6 +439,7 @@ impl RemoteAptIndex {
             releases: RefCell::new(BTreeMap::new()),
             scratches: RefCell::new(BTreeMap::new()),
             refetch: Cell::new(false),
+            pruned: Cell::new(false),
         }
     }
 
@@ -488,6 +491,11 @@ impl RemoteAptIndex {
     /// it can't read a stock image's sources (a release without an updates
     /// suite), which bosun then reads itself.
     fn through_apt(&self, key: &ReleaseKey, name: &str) -> Result<Option<Policy>, PortError> {
+        // Once a run, apt here or not: scratch roots idle for a month go. One
+        // this run then uses is written again and its lists fetched afresh.
+        if !self.pruned.replace(true) {
+            scratch::prune_scratch(&self.cache, SystemTime::now(), scratch::SCRATCH_MAX_AGE);
+        }
         let Some(runner) = &self.apt else {
             return Ok(None);
         };
