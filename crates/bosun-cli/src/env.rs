@@ -244,7 +244,10 @@ pub fn this_platform() -> Result<(Os, Arch), CliError> {
             let fx = read_fixture(&fixture)?;
             fixture_platform(&fx)
         }
-        None => Ok((host_os(), detect_arch().map_err(env_err)?)),
+        None => Ok((
+            host_os(),
+            detect_arch(&ProcessCommandRunner).map_err(env_err)?,
+        )),
     }
 }
 
@@ -608,11 +611,11 @@ fn host_machine(
 
 fn from_host() -> Result<Env, CliError> {
     let os = host_os();
-    let arch = detect_arch().map_err(env_err)?;
+    let runner: Arc<dyn CommandRunner> = Arc::new(ProcessCommandRunner);
+    let arch = detect_arch(runner.as_ref()).map_err(env_err)?;
     let system = bosun_io::paths::state_path(Scope::System).map_err(env_err)?;
     let user = bosun_io::paths::state_path(Scope::User).map_err(env_err)?;
 
-    let runner: Arc<dyn CommandRunner> = Arc::new(ProcessCommandRunner);
     let (distro, libc) = match os {
         Os::Linux => (
             bosun_host::os_release::detect(),

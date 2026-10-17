@@ -11,16 +11,63 @@ use crate::error::HostError;
 #[cfg(unix)]
 use crate::{libc, os_release};
 
-/// Map the running target's architecture name to an [`Arch`] (§5.5).
-pub fn detect_arch() -> Result<Arch, HostError> {
-    arch_from_str(std::env::consts::ARCH)
+/// The machine's architecture (§5.5), read from the machine rather than from
+/// bosun's own build, which may run translated or emulated (an x86_64 bosun
+/// under Rosetta or qemu on arm64): `uname -m` through `runner` on Linux and
+/// macOS, the processor variables on Windows.
+#[cfg(not(windows))]
+pub fn detect_arch(runner: &dyn CommandRunner) -> Result<Arch, HostError> {
+    uname_arch(runner)
 }
 
-fn arch_from_str(s: &str) -> Result<Arch, HostError> {
-    match s {
-        "x86_64" => Ok(Arch::Amd64),
-        "aarch64" => Ok(Arch::Arm64),
+/// The machine's architecture (§5.5), from the processor variables Windows
+/// sets for every process.
+#[cfg(windows)]
+pub fn detect_arch(_runner: &dyn CommandRunner) -> Result<Arch, HostError> {
+    let var = |name| std::env::var(name).ok();
+    arch_from_windows(
+        var("PROCESSOR_ARCHITEW6432").as_deref(),
+        var("PROCESSOR_ARCHITECTURE").as_deref(),
+    )
+}
+
+/// The machine's architecture by `uname -m`, the native `uname` program
+/// answering for the machine (§5.5).
+pub fn uname_arch(runner: &dyn CommandRunner) -> Result<Arch, HostError> {
+    let unread = |detail: String| HostError::ArchUnread(format!("uname -m: {detail}"));
+    let out = runner
+        .run(&Command::new("uname", ["-m".to_string()]))
+        .map_err(|e| unread(e.to_string()))?;
+    if !out.success() {
+        return Err(unread(String::from_utf8_lossy(&out.stderr).into_owned()));
+    }
+    arch_from_uname(&out.stdout_utf8())
+}
+
+/// The architecture `uname -m` printed: `x86_64` (`amd64` on the BSDs), or
+/// `aarch64` (`arm64` on macOS).
+pub fn arch_from_uname(stdout: &str) -> Result<Arch, HostError> {
+    match stdout.trim() {
+        "x86_64" | "amd64" => Ok(Arch::Amd64),
+        "aarch64" | "arm64" => Ok(Arch::Arm64),
         other => Err(HostError::UnknownArch(other.to_string())),
+    }
+}
+
+/// The architecture Windows' processor variables name: the native one in
+/// `PROCESSOR_ARCHITEW6432`, set only for a 32-bit process under WOW64, else
+/// the process's own in `PROCESSOR_ARCHITECTURE` (`AMD64`, `ARM64`, `x86`).
+pub fn arch_from_windows(
+    wow64_native: Option<&str>,
+    process: Option<&str>,
+) -> Result<Arch, HostError> {
+    match wow64_native.or(process) {
+        Some("AMD64") => Ok(Arch::Amd64),
+        Some("ARM64") => Ok(Arch::Arm64),
+        Some(other) => Err(HostError::UnknownArch(other.to_string())),
+        None => Err(HostError::ArchUnread(
+            "PROCESSOR_ARCHITECTURE is not set".to_string(),
+        )),
     }
 }
 
@@ -63,7 +110,7 @@ impl LinuxMachine {
         user_state: PathBuf,
     ) -> Result<LinuxMachine, HostError> {
         Ok(LinuxMachine::new(
-            detect_arch()?,
+            detect_arch(runner)?,
             os_release::detect(),
             libc::detect(runner),
             system_state,
@@ -296,13 +343,87 @@ impl Machine for FakeMachine {
 mod tests {
     use super::*;
 
+    use bosun_ports::testing::FakeCommandRunner;
+    use bosun_ports::Output;
+
     #[test]
-    fn arch_maps_known_names_and_rejects_others() {
-        assert_eq!(arch_from_str("x86_64").unwrap(), Arch::Amd64);
-        assert_eq!(arch_from_str("aarch64").unwrap(), Arch::Arm64);
+    fn uname_names_map_to_bosuns_architectures() {
+        // `uname -m` on Debian amd64 and arm64, macOS on Apple silicon.
+        assert_eq!(arch_from_uname("x86_64\n").unwrap(), Arch::Amd64);
+        assert_eq!(arch_from_uname("aarch64\n").unwrap(), Arch::Arm64);
+        assert_eq!(arch_from_uname("arm64\n").unwrap(), Arch::Arm64);
+        // 32-bit ARM and x86 are machines bosun has no target for.
+        for other in ["armv7l", "i686"] {
+            assert_eq!(
+                arch_from_uname(&format!("{other}\n")),
+                Err(HostError::UnknownArch(other.to_string()))
+            );
+        }
+        assert_eq!(
+            HostError::UnknownArch("armv7l".into()).to_string(),
+            "unsupported architecture: armv7l"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn the_machine_arch_is_what_uname_says() {
+        let runner = FakeCommandRunner::new().with_stdout("aarch64\n");
+        assert_eq!(detect_arch(&runner).unwrap(), Arch::Arm64);
+    }
+
+    #[test]
+    fn uname_m_is_asked_through_the_runner() {
+        let runner = FakeCommandRunner::new().with_stdout("aarch64\n");
+        assert_eq!(uname_arch(&runner).unwrap(), Arch::Arm64);
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].program, "uname");
+        assert_eq!(calls[0].args, vec!["-m".to_string()]);
+    }
+
+    #[test]
+    fn a_uname_that_fails_or_cannot_run_is_an_error() {
+        let failing = FakeCommandRunner::new().with_output(Output {
+            code: Some(1),
+            stdout: Vec::new(),
+            stderr: b"uname: extra operand".to_vec(),
+        });
         assert!(matches!(
-            arch_from_str("riscv64"),
-            Err(HostError::UnknownArch(a)) if a == "riscv64"
+            uname_arch(&failing),
+            Err(HostError::ArchUnread(_))
+        ));
+        let missing = FakeCommandRunner::new();
+        match uname_arch(&missing) {
+            Err(HostError::ArchUnread(detail)) => assert!(detail.contains("uname"), "{detail}"),
+            other => panic!("expected an unread arch, got {other:?}"),
+        }
+        assert!(HostError::ArchUnread("x".into())
+            .to_string()
+            .starts_with("could not read the machine's architecture: "));
+    }
+
+    #[test]
+    fn windows_names_its_processor_and_wow64_the_native_one() {
+        // A 32-bit process on 64-bit Windows sees x86, and the native
+        // architecture in PROCESSOR_ARCHITEW6432.
+        assert_eq!(
+            arch_from_windows(Some("AMD64"), Some("x86")).unwrap(),
+            Arch::Amd64
+        );
+        assert_eq!(
+            arch_from_windows(Some("ARM64"), Some("x86")).unwrap(),
+            Arch::Arm64
+        );
+        assert_eq!(arch_from_windows(None, Some("AMD64")).unwrap(), Arch::Amd64);
+        assert_eq!(arch_from_windows(None, Some("ARM64")).unwrap(), Arch::Arm64);
+        assert_eq!(
+            arch_from_windows(None, Some("x86")),
+            Err(HostError::UnknownArch("x86".to_string()))
+        );
+        assert!(matches!(
+            arch_from_windows(None, None),
+            Err(HostError::ArchUnread(_))
         ));
     }
 
