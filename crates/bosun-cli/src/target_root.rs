@@ -114,9 +114,10 @@ fn run(runner: &dyn CommandRunner, program: &str, args: &[&str]) -> Result<Strin
 }
 
 /// Copy [`EXPORTED`] out of `image` for `target`'s platform into `into`: a
-/// container is created from it (not started) with the first engine of
-/// [`ENGINES`] present, the paths copied out, and the container removed. A
-/// path the image lacks is left out.
+/// container is created from the local image (never pulled, not started)
+/// with the first engine of [`ENGINES`] present, the paths copied out, and
+/// the container removed. A path the image lacks is left out; an image not
+/// held locally for the platform is an error naming the pull for it.
 pub fn export(
     runner: &dyn CommandRunner,
     image: &str,
@@ -124,12 +125,25 @@ pub fn export(
     into: &Path,
 ) -> Result<(), CliError> {
     let platform = target.to_string();
-    let create = ["create", "--platform", platform.as_str(), image, "true"];
+    let create = [
+        "create",
+        "--pull=never",
+        "--platform",
+        platform.as_str(),
+        image,
+        "true",
+    ];
     let mut found = None;
     for engine in ENGINES {
         match run(runner, engine, &create) {
             Err(PortError::CommandNotFound { .. }) => continue,
-            Err(e) => return Err(engine_err(engine, "create", e)),
+            Err(e) => {
+                return Err(CliError::Resolve(format!(
+                    "{} ({engine} create): {e}; {}: `{engine} pull --platform {platform} {image}`",
+                    errmsg::RENDER_IMAGE,
+                    errmsg::RENDER_PULL_IMAGE
+                )))
+            }
             Ok(out) => {
                 found = Some((*engine, out));
                 break;
@@ -248,7 +262,7 @@ mod tests {
         assert_eq!(
             runner.calls(),
             vec![
-                "podman create --platform linux/arm64 debian:12 true".to_string(),
+                "podman create --pull=never --platform linux/arm64 debian:12 true".to_string(),
                 format!("podman cp abc123:/etc/os-release {d}/etc"),
                 format!("podman cp abc123:/usr/lib/os-release {d}/usr/lib"),
                 format!("podman cp abc123:/etc/apt {d}/etc"),
@@ -295,7 +309,20 @@ mod tests {
             err.contains("podman create") && err.contains("no such path"),
             "{err}"
         );
+        assert!(
+            err.contains("podman pull --platform linux/arm64 nope:1"),
+            "{err}"
+        );
         assert_eq!(runner.calls().len(), 1);
+
+        let runner = Scripted::new(vec![None, Some((1, ""))]);
+        let err = export(&runner, "nope:1", &ARM64, dir.path())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("docker pull --platform linux/arm64 nope:1"),
+            "{err}"
+        );
     }
 
     #[test]

@@ -240,7 +240,8 @@ pub struct RenderTargets {
 pub struct RenderMachine {
     /// The target image (`debian:12`): its os-release gives the distro, and
     /// its apt sources the repositories apt versions come from. Its files are
-    /// copied out with podman or docker; the image is not run.
+    /// copied out with podman or docker from the local image for the target
+    /// platform, never pulled; the image is not run.
     #[arg(long, conflicts_with_all = ["rootfs", "distro"])]
     pub image: Option<String>,
     /// The target's root filesystem, as a directory: read as `--image` reads

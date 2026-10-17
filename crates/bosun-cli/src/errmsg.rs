@@ -35,5 +35,10 @@ pub const RENDER_NO_ENGINE: &str =
 /// `render --image` could not copy the image's files out.
 pub const RENDER_IMAGE: &str = "could not read the target image";
 
+/// `render --image` reads only the local image store; the remedy when the
+/// image isn't there for the target's platform.
+pub const RENDER_PULL_IMAGE: &str =
+    "render reads only a local image for the target's platform; pull it with";
+
 /// `--like` was given something that isn't a distro family id.
 pub const RENDER_BAD_LIKE: &str = "--like takes distro ids, comma-separated (ubuntu,debian)";
