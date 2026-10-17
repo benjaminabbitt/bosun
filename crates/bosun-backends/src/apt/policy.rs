@@ -4,7 +4,8 @@
 //!
 //! apt's candidate is the version of highest priority, the newest among
 //! equals, except that below priority 1000 it never goes back past the
-//! installed version (apt_preferences(5)). So a NotAutomatic suite
+//! installed version (apt_preferences(5)), which stays its candidate even
+//! once no source offers it. So a NotAutomatic suite
 //! (backports, priority 100) loses to the release (500) unless the spec
 //! admits only it, and a pin of 1000 or more may take a package down. A
 //! version of priority 0 or below is never apt's candidate; bosun takes one
@@ -138,15 +139,26 @@ impl Policy {
 
     /// The version apt would install among those `want` admits (module
     /// docs), or the first of `prefer` apt may install and `want` admits.
+    /// The installed version, admitted, is a candidate even when no source
+    /// offers it any more (dpkg's status file gives it priority 100), as it
+    /// stays apt's candidate then.
     pub fn choose(&self, want: &Want, prefer: &[Version]) -> Option<Version> {
         let offered = self.offered();
-        let admissible: Vec<&Version> = want
+        let apt_may = |v: &Version| !self.pinned_away(v) || want.names_exactly(v);
+        let mut admissible: Vec<&Version> = want
             .admissible(&offered)
             .into_iter()
-            .filter(|v| !self.pinned_away(v) || want.names_exactly(v))
+            .filter(|v| apt_may(v))
             .collect();
         if let Some(locked) = prefer.iter().find(|p| admissible.contains(p)) {
             return Some(locked.clone());
+        }
+        if let Some(installed) = self
+            .installed
+            .as_ref()
+            .filter(|i| want.admits(i) && apt_may(i) && !admissible.contains(i))
+        {
+            admissible.push(installed);
         }
         admissible
             .into_iter()
@@ -260,6 +272,54 @@ mod tests {
         .unwrap();
         assert_eq!(p.installed, Some(deb("1.5-1")));
         assert_eq!(p.offered(), vec![deb("1.6-2")]);
+    }
+
+    /// bosun-probe 2.0-1 installed from a repository that has since dropped
+    /// it: dpkg's status file alone lists it (Debian 13, apt 3.0.3).
+    const INSTALLED_IN_NO_REPOSITORY: &str = "bosun-probe:\n  Installed: 2.0-1\n  \
+        Candidate: 2.0-1\n  Version table:\n \
+        *** 2.0-1 100\n        100 /var/lib/dpkg/status\n     \
+        1.0-1 500\n        500 file:/srv/bosun-apt ./ Packages\n";
+
+    #[test]
+    fn an_installed_version_no_repository_offers_stays_apt_s_candidate() {
+        let installed = Some("2.0-1");
+        assert_eq!(
+            choose(INSTALLED_IN_NO_REPOSITORY, &["*"], &[]).as_deref(),
+            installed
+        );
+        // Only a spec that excludes it goes back, as an explicit downgrade.
+        assert_eq!(
+            choose(INSTALLED_IN_NO_REPOSITORY, &["<2.0"], &[]).as_deref(),
+            Some("1.0-1")
+        );
+        // The lock still wins while admitted and offered.
+        assert_eq!(
+            choose(INSTALLED_IN_NO_REPOSITORY, &["*"], &["1.0-1"]).as_deref(),
+            Some("1.0-1")
+        );
+        // It is not offered: nothing installs it.
+        let p = parse(INSTALLED_IN_NO_REPOSITORY).unwrap();
+        assert_eq!(p.offered(), vec![deb("1.0-1")]);
+        assert_eq!(p.passed_over(&want(&["*"]), &deb("2.0-1")), None);
+    }
+
+    #[test]
+    fn a_newer_offered_version_wins_over_an_installed_one_no_repository_offers() {
+        let policy = "x:\n  Version table:\n     3.0-1 500\n        500 http://r ./ Packages\n \
+            *** 2.0-1 100\n        100 /var/lib/dpkg/status\n";
+        assert_eq!(choose(policy, &["*"], &[]).as_deref(), Some("3.0-1"));
+        // A newer one apt would not take over the installed one (priority 1
+        // against dpkg's 100) is not taken either.
+        let not_automatic = policy.replace("3.0-1 500", "3.0-1 1");
+        assert_eq!(
+            choose(&not_automatic, &["*"], &[]).as_deref(),
+            Some("2.0-1")
+        );
+        assert_eq!(
+            choose(&not_automatic, &[">=3"], &[]).as_deref(),
+            Some("3.0-1")
+        );
     }
 
     #[test]

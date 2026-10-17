@@ -170,6 +170,11 @@ pub const APT_STOCK_SOURCES: &str =
 pub const APT_PINS_IGNORED: &str =
     "the target pins apt packages (preferences), which are applied only when apt-get is on this machine";
 
+/// apt keeps the installed version though no source offers it any more: it
+/// stays apt's candidate, which never goes back past it below priority 1000.
+pub const APT_INSTALLED_KEPT: &str =
+    "apt keeps the installed version within the spec; no source offers it";
+
 /// dnf keeps the installed build: `dnf install` never goes back past it, and
 /// no repository offers a newer one it would take.
 pub const DNF_INSTALLED_KEPT: &str = "dnf keeps the installed build within the spec";

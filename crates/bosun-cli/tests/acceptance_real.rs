@@ -252,6 +252,25 @@ fn local_apt_repo(w: &mut RealWorld, pkg: String, old: String, new: String) {
     assert_eq!(code, 0, "apt-get update failed: {out}");
 }
 
+/// Drop `version` of `pkg` from the local apt repository's index and refresh
+/// apt's, so only dpkg's status file still lists it once installed.
+#[given(regex = r"^the local apt repository no longer offers (\S+) (\S+)$")]
+fn local_apt_repo_drops(_w: &mut RealWorld, pkg: String, version: String) {
+    let index = Path::new(LOCAL_REPO).join("Packages");
+    let text = fs::read_to_string(&index).unwrap();
+    let dropped = format!("Package: {pkg}\nVersion: {version}\n");
+    let kept: Vec<&str> = text
+        .split("\n\n")
+        .filter(|stanza| !stanza.trim().is_empty() && !stanza.starts_with(&dropped))
+        .collect();
+    fs::write(&index, format!("{}\n\n", kept.join("\n\n"))).unwrap();
+    let (code, out) = run("apt-get", &["update"]);
+    assert_eq!(code, 0, "apt-get update failed: {out}");
+    let (code, out) = run("apt-cache", &["policy", &pkg]);
+    assert_eq!(code, 0, "apt-cache policy: {out}");
+    eprintln!("{out}");
+}
+
 /// The apt preferences file a scenario pins the local repository's packages
 /// in; it goes with the repository.
 const LOCAL_PIN: &str = "/etc/apt/preferences.d/bosun-probe";

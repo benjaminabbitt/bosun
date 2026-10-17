@@ -1073,7 +1073,8 @@ ranking of its own that could drift from the installer's (`Index::select`):
 
 - **apt** chooses by pin priority, read from `apt-cache policy <pkg>`, as apt chooses its
   candidate: the highest priority, the newest among equals, never behind the installed
-  version below priority 1000. A version at priority 100 (a backports suite) loses to the
+  version below priority 1000. The installed version, when admitted, is a candidate even once
+  no source offers it (dpkg's status file gives it 100), so bosun keeps it as apt does. A version at priority 100 (a backports suite) loses to the
   release's 500 unless the set admits only it. A version at priority 0 or below is never
   apt's candidate; bosun takes it only when the spec names it exactly, as `apt-get install
   pkg=version` installs it despite the pin (and warns). Phased updates do not change the
@@ -1717,6 +1718,7 @@ under a pty on Unix only.
 | TV-12 | `render --image` never changes the local image store: `create --pull=never --platform <target>`; an image missing locally or held for another platform is an error naming `<engine> pull --platform <target> <ref>` | landed; podman 5.4 with amd64-only `debian:12`: `--target linux/arm64` errors with the pull, amd64 renders, the store unchanged; docker 29 refuses a platform mismatch under `--pull=never` the same way |
 | TV-13 | without elevation, system-scope `accept`, `claim` and `drop-claim` are left out of `install`, `uninstall` and `prune` as `deferred` notes (`defer_system_records`), reported by apply, so user-scope actions in the same plan apply; `remove <name>` keeps needing elevation for them | landed; scenarios: a mixed apt/cargo manifest with root's system state installs ripgrep, defers claim jq and accept tree, and leaves the system state unchanged; a non-elevated prune defers its drop-claim |
 | TV-14 | the lock follows what was installed: when every claim's intersection ends a package at a version other than this project's pin, the pending lock pins it and is written after a successful apply | landed; scenario: lock pins ripgrep 14.1.1, another project's `<14.1.0` claim upgrades it to 14.0.3, the lock then pins 14.0.3 and `install --frozen --plan` plans nothing; red before: the lock kept 14.1.1 |
+| TV-15 | apt keeps the installed version no source offers any more: `Policy::choose` admits the installed version (dpkg status, priority 100) as a candidate when the spec admits it, as apt's candidate stays there below priority 1000 | landed; real tier in `debian:13` (apt 3.0.3): bosun-probe 2.0-1 installed, dropped from the local file repository, `upgrade` under `*`, `install` keeps 2.0-1; red without it: a downgrade to 1.0-1 was applied |
 
 **First real-host smoke run (2026-10-14, release build, Debian 13, read-only `--plan` and
 `lock` in a scratch dir).** `backends` found apt 3.0.3, cargo 1.96.1 and github-release; jq
@@ -1789,7 +1791,9 @@ bookworm-backports and pin files, apt 2.6, and `ubuntu:24.04`, apt 2.8.3):
 - Candidate rule, as observed: backports at 100 lose to the release at 500 (`curl
   8.14.1-2+deb13u2~bpo13+1` vs `7.88.1-10+deb12u15`); once a backport is installed it stays
   the candidate over the release's older version (below 1000 apt never goes back past the
-  installed version); a pin of 1001 makes an older version the candidate; a package whose
+  installed version, even once no source offers it: `bosun-probe 2.0-1` dropped from its
+  repository stays the candidate over the 1.0-1 still offered; Debian 13, apt 3.0.3,
+  2026-10-17); a pin of 1001 makes an older version the candidate; a package whose
   versions are all pinned below 0 has `Candidate: (none)`.
 - `apt-get install pkg=version` installs a version pinned at -1 or -10 all the same, so a
   pin does not stop an exact install; bosun takes such a version only when the spec names

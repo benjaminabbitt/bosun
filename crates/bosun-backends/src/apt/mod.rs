@@ -283,6 +283,9 @@ impl Index for AptBackend {
         if let Some(v) = &chosen {
             let priority = policy.priority(v);
             debug!(message = logmsg::APT_CHOSEN, package = %name, version = %v, priority);
+            if policy.installed.as_ref() == Some(v) && !policy.offered().contains(v) {
+                debug!(message = logmsg::APT_INSTALLED_KEPT, package = %name, version = %v);
+            }
             if policy.pinned_away(v) {
                 warn!(message = logmsg::APT_PINNED_AWAY_NAMED, package = %name, version = %v, priority);
             }
