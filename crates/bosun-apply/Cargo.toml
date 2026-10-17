@@ -11,6 +11,7 @@ rust-version.workspace = true
 bosun-core.workspace = true
 bosun-ports.workspace = true
 serde.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

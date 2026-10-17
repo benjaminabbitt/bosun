@@ -176,6 +176,13 @@ pub enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Print the versions a container build installs, for one target
+    /// platform: build args, env lines, or a JSON versions file (§8.3).
+    Render {
+        /// The output style.
+        #[command(subcommand)]
+        style: RenderStyle,
+    },
     /// Drop claims of vanished manifests and uninstall the orphans (§9).
     Prune {
         /// Show the plan and stop.
@@ -188,4 +195,23 @@ pub enum Command {
         #[arg(long)]
         yes: bool,
     },
+}
+
+/// `render`'s output styles (§8.3): subcommands, so they don't collide with
+/// the global `--format`.
+#[derive(Subcommand)]
+pub enum RenderStyle {
+    /// `--build-arg NAME=value` flags, one line, for `docker build`.
+    Args(RenderTarget),
+    /// `NAME=value` lines, for an env file.
+    Env(RenderTarget),
+    /// A JSON versions file shaped like the lock, per target platform.
+    Json(RenderTarget),
+}
+
+/// What `render` renders.
+#[derive(clap::Args)]
+pub struct RenderTarget {
+    /// The manifest directory or file (default: current directory).
+    pub path: Option<PathBuf>,
 }

@@ -82,7 +82,7 @@ fn scalar(s: &str) -> Value {
     Value::scalar(s)
 }
 
-/// The entry as the manifest writes it: `name`, `spec`, `formerly`, then
+/// The entry as the manifest writes it: `name`, `spec`, `formerly`, `var`, then
 /// `install` by selector (a lone `any` block bare); empty fields are left out.
 fn entry_value(entry: &ManifestEntry) -> Value {
     let mut fields = vec![("name".to_string(), scalar(&entry.name))];
@@ -92,6 +92,9 @@ fn entry_value(entry: &ManifestEntry) -> Value {
     if !entry.formerly.is_empty() {
         let names = entry.formerly.iter().map(|n| scalar(n)).collect();
         fields.push(("formerly".to_string(), Value::Seq(names)));
+    }
+    if let Some(var) = &entry.var {
+        fields.push(("var".to_string(), scalar(var)));
     }
     let install = match entry.install.iter().collect::<Vec<_>>().as_slice() {
         [] => None,
@@ -197,6 +200,7 @@ packages:
             name: name.to_string(),
             spec: Some(">=2.0.2|<3.0.0".to_string()),
             formerly: Vec::new(),
+            var: None,
             install: BTreeMap::from([(
                 selector,
                 InstallBlock {
@@ -257,6 +261,32 @@ packages:
         assert_eq!(
             &out[MANIFEST.len()..],
             "  - name: fd\n    spec: \">=2.0.2|<3.0.0\"\n    install:\n      linux:debian: {backend: apt, package: fd-find}\n"
+        );
+        assert_eq!(
+            load_manifest(&out, path()).unwrap().packages.last(),
+            Some(&fd)
+        );
+    }
+
+    #[test]
+    fn an_entrys_var_is_written_after_formerly() {
+        let mut fd = entry(
+            "fd",
+            "linux".parse().unwrap(),
+            Backends::from([("apt".to_string(), options(&[("package", "fd-find")]))]),
+        );
+        fd.formerly = vec!["fdfind".to_string()];
+        fd.var = Some("FD".to_string());
+        let out = add_entry(MANIFEST, path(), &fd).unwrap();
+        assert_eq!(
+            &out[MANIFEST.len()..],
+            "  - name: fd
+    spec: \">=2.0.2|<3.0.0\"
+    formerly: [fdfind]
+    var: FD
+    install:
+      linux: {backend: apt, package: fd-find}
+"
         );
         assert_eq!(
             load_manifest(&out, path()).unwrap().packages.last(),

@@ -1332,6 +1332,43 @@ fn lock_checksum(world: &mut BosunWorld, checksum: String) {
     );
 }
 
+// ---- render -----------------------------------------------------------------
+
+#[then("it prints:")]
+fn prints(world: &mut BosunWorld, step: &Step) {
+    let want = docstring(step);
+    assert_eq!(
+        world.stdout.trim_end(),
+        want.trim_end(),
+        "stderr:\n{}",
+        world.stderr
+    );
+}
+
+/// The versions file `render json` prints: lock-shaped, each package's
+/// rendered value per target platform.
+#[then(regex = r"^the versions file gives (\S+) (\S+) as (\S+) from (\S+) for (\S+)$")]
+fn versions_file_gives(
+    world: &mut BosunWorld,
+    name: String,
+    version: String,
+    package: String,
+    backend: String,
+    target: String,
+) {
+    let doc: Value = serde_json::from_str(&world.stdout).expect("render json prints JSON");
+    let entry = doc["packages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|p| p["name"] == name.as_str())
+        .unwrap_or_else(|| panic!("no {name} in:\n{}", world.stdout));
+    let leaf = &entry["targets"][target.as_str()];
+    assert_eq!(leaf["version"], version.as_str(), "{}", world.stdout);
+    assert_eq!(leaf["package"], package.as_str(), "{}", world.stdout);
+    assert_eq!(leaf["backend"], backend.as_str(), "{}", world.stdout);
+}
+
 fn main() {
     // An undefined step skips its scenario; that must fail the suite, not pass it.
     // Scenarios tagged @pty drive a pseudo-terminal, which only unix has.

@@ -32,6 +32,9 @@ pub struct ManifestEntry {
     pub formerly: Vec<String>,
     /// Per-selector install blocks (`<os>` / `<os>:<distro>`).
     pub install: BTreeMap<Selector, InstallBlock>,
+    /// The stem of the variables `render` gives this entry (`FD` for
+    /// `FD_VERSION`, §8.3), when the logical name's own does not suit.
+    pub var: Option<String>,
 }
 
 /// How to install a package for one selector (§5.4). Fields default or inherit
@@ -75,6 +78,16 @@ impl InstallBlock {
     }
 }
 
+/// Whether `s` names a shell or Dockerfile variable (§8.3): ASCII letters,
+/// digits and `_`, not starting with a digit.
+pub fn is_variable_name(s: &str) -> bool {
+    let mut chars = s.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,6 +116,16 @@ mod tests {
     fn package_for_any_other_backend_is_the_shared_package() {
         let b = block(Some("sharkdp/fd"), &[("winget", "package", "sharkdp.fd")]);
         assert_eq!(b.package_for("github-release"), Some("sharkdp/fd"));
+    }
+
+    #[test]
+    fn a_variable_name_is_letters_digits_and_underscores_not_led_by_a_digit() {
+        for good in ["FD", "_", "_FD", "fd_2", "A1"] {
+            assert!(is_variable_name(good), "{good}");
+        }
+        for bad in ["", "7ZIP", "FD-X", "FD X", "FD.X", "\u{c9}"] {
+            assert!(!is_variable_name(bad), "{bad}");
+        }
     }
 
     #[test]

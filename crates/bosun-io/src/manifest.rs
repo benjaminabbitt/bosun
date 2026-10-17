@@ -18,12 +18,13 @@ use annals_diagnostic::{Arg, Diagnostic};
 use annals_yaml::versioned::{version_of, Loader, MigrationError, Migrations, Upgraded};
 use annals_yaml::Value;
 use bosun_core::manifest::{
-    Backends, InstallBlock, Manifest, ManifestEntry, Options, PACKAGE_OPTION,
+    is_variable_name, Backends, InstallBlock, Manifest, ManifestEntry, Options, PACKAGE_OPTION,
 };
 use bosun_core::platform::Selector;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+use crate::errmsg;
 use crate::error::IoError;
 
 /// The manifest format version this build reads and writes.
@@ -48,6 +49,8 @@ pub enum ManifestError {
     BadSelector { value: String, reason: String },
     /// A package entry with no `name`.
     MissingName,
+    /// An entry's `var` that is not a variable name (§8.3).
+    BadVar { package: String, value: String },
     /// An `install` mapping with both block keys and selector keys.
     InstallMixed { context: String },
     /// An install block with both `backend` and `backends`.
@@ -83,6 +86,9 @@ impl fmt::Display for ManifestError {
                 write!(f, "invalid selector {value:?}: {reason}")
             }
             ManifestError::MissingName => f.write_str("a package entry has no `name`"),
+            ManifestError::BadVar { package, value } => {
+                write!(f, "{package}: var {value:?}: {}", errmsg::BAD_VAR)
+            }
             ManifestError::InstallMixed { context } => write!(
                 f,
                 "{context} mixes a bare install block with selector keys; put the bare block \
@@ -126,6 +132,7 @@ impl Diagnostic for ManifestError {
             ManifestError::UnknownKey { .. } => "bosun.manifest.unknown_key",
             ManifestError::BadSelector { .. } => "bosun.manifest.bad_selector",
             ManifestError::MissingName => "bosun.manifest.missing_name",
+            ManifestError::BadVar { .. } => "bosun.manifest.bad_var",
             ManifestError::InstallMixed { .. } => "bosun.manifest.install_mixed",
             ManifestError::BackendAndBackends { .. } => "bosun.manifest.backend_and_backends",
             ManifestError::PackageBesideBackends { .. } => "bosun.manifest.package_beside_backends",
@@ -157,6 +164,10 @@ impl Diagnostic for ManifestError {
                 ("reason", reason.clone().into()),
             ],
             ManifestError::MissingName => vec![],
+            ManifestError::BadVar { package, value } => vec![
+                ("package", package.clone().into()),
+                ("value", value.clone().into()),
+            ],
             ManifestError::UnknownBackend { package, backend } => vec![
                 ("package", package.clone().into()),
                 ("backend", backend.clone().into()),
@@ -326,7 +337,7 @@ fn entry(v: &Value) -> Result2<ManifestEntry> {
     check_keys(
         entries,
         "a package",
-        &["name", "spec", "formerly", "install"],
+        &["name", "spec", "formerly", "var", "install"],
     )?;
     let name = v
         .get("name")
@@ -341,11 +352,22 @@ fn entry(v: &Value) -> Result2<ManifestEntry> {
         Some(m) => selector_map(m, &format!("{name}.install"))?,
         None => BTreeMap::new(),
     };
+    let var = v
+        .get("var")
+        .map(|s| scalar(s, &format!("{name}.var")))
+        .transpose()?;
+    if let Some(value) = var.as_ref().filter(|v| !is_variable_name(v)) {
+        return Err(ManifestError::BadVar {
+            package: name,
+            value: value.clone(),
+        });
+    }
     Ok(ManifestEntry {
         name,
         spec: v.get("spec").and_then(Value::as_str).map(str::to_string),
         formerly,
         install,
+        var,
     })
 }
 
@@ -624,6 +646,8 @@ struct CanonEntry {
     spec: Option<String>,
     formerly: Vec<String>,
     install: BTreeMap<String, CanonBlock>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    var: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -662,6 +686,7 @@ pub fn manifest_hash(m: &Manifest) -> String {
                 spec: e.spec.clone(),
                 formerly: e.formerly.clone(),
                 install: canon_selector_map(&e.install),
+                var: e.var.clone(),
             })
             .collect(),
     };
@@ -877,6 +902,57 @@ packages:
             " {linux: {backends: {github-release: a.tar.gz}}}",
         ));
         assert!(err.contains("backends.github-release"), "message: {err}");
+    }
+
+    #[test]
+    fn an_entrys_var_is_read() {
+        let m = load(
+            &with_install(" {backend: apt}")
+                .replace("    install:", "    var: FD_TOOL\n    install:"),
+        );
+        assert_eq!(m.packages[0].var.as_deref(), Some("FD_TOOL"));
+        assert_eq!(load(&with_install(" {backend: apt}")).packages[0].var, None);
+    }
+
+    #[test]
+    fn a_var_that_is_not_a_variable_name_is_refused() {
+        for bad in ["fd-tool", "7ZIP", "FD TOOL", "\"\""] {
+            let text = with_install(" {backend: apt}")
+                .replace("    install:", &format!("    var: {bad}\n    install:"));
+            let err = load_err(&text);
+            assert!(err.contains("var"), "{bad}: {err}");
+        }
+        for good in ["FD", "_FD", "fd_2", "Fd"] {
+            let text = with_install(" {backend: apt}")
+                .replace("    install:", &format!("    var: {good}\n    install:"));
+            assert_eq!(load(&text).packages[0].var.as_deref(), Some(good));
+        }
+    }
+
+    #[test]
+    fn a_var_must_be_a_scalar() {
+        let text =
+            with_install(" {backend: apt}").replace("    install:", "    var: [FD]\n    install:");
+        assert!(load_err(&text).contains("var"));
+    }
+
+    #[test]
+    fn hash_covers_var_and_is_unchanged_without_one() {
+        let plain = load(&with_install(" {backend: apt}"));
+        let mut named = plain.clone();
+        named.packages[0].var = Some("FD".to_string());
+        assert_ne!(manifest_hash(&plain), manifest_hash(&named));
+        // No `var` serialises nothing, so locks written before `var` existed
+        // keep matching.
+        let canon = serde_json::to_string(&CanonEntry {
+            name: "x".to_string(),
+            spec: None,
+            formerly: Vec::new(),
+            install: BTreeMap::new(),
+            var: None,
+        })
+        .unwrap();
+        assert!(!canon.contains("var"), "{canon}");
     }
 
     #[test]
@@ -1219,6 +1295,14 @@ packages:
         assert_eq!(
             ManifestError::MissingName.code(),
             "bosun.manifest.missing_name"
+        );
+        assert_eq!(
+            ManifestError::BadVar {
+                package: "p".into(),
+                value: "v".into()
+            }
+            .code(),
+            "bosun.manifest.bad_var"
         );
     }
 

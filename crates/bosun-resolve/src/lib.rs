@@ -811,6 +811,7 @@ mod tests {
             name: name.to_string(),
             spec: spec.map(str::to_string),
             formerly: Vec::new(),
+            var: None,
             install: install.iter().map(|(s, b)| (sel(s), b.clone())).collect(),
         }
     }

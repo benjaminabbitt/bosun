@@ -6,12 +6,14 @@ mod cli;
 mod commands;
 mod edit;
 mod env;
+mod errmsg;
 mod error;
 mod export;
 mod fixture;
 mod logmsg;
 mod migrate;
 mod output;
+mod render;
 
 use std::io::{IsTerminal, Write};
 
@@ -20,7 +22,7 @@ use bosun_core::Scope;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-use crate::cli::{Cli, Command};
+use crate::cli::{Cli, Command, RenderStyle};
 use crate::commands::InstallOpts;
 use crate::env::Env;
 use crate::error::CliError;
@@ -189,6 +191,25 @@ fn dispatch(cli: &Cli, format: Format) -> Result<i32, CliError> {
                 format,
                 &mut out,
             )
+        }
+        Command::Render { style } => {
+            // The output style is the subcommand's, whatever `--format` says:
+            // `$(bosun render args)` is piped, which would otherwise mean JSON.
+            let text = match style {
+                RenderStyle::Args(t) => {
+                    let (target, rendered) = render::this_machine(&env, t.path.clone())?;
+                    rendered.build_args(&target)
+                }
+                RenderStyle::Env(t) => {
+                    let (target, rendered) = render::this_machine(&env, t.path.clone())?;
+                    rendered.env_lines(&target)
+                }
+                RenderStyle::Json(t) => {
+                    render::json(&render::this_machine(&env, t.path.clone())?.1)
+                }
+            };
+            writeln!(out, "{text}").map_err(io_err)?;
+            Ok(0)
         }
         Command::Prune { plan, scope, yes } => {
             let built = commands::prune_plan(&env)?;

@@ -1009,10 +1009,23 @@ ARG FD_VERSION
 RUN apt-get install -y "${FD_PACKAGE}=${FD_VERSION}"
 ```
 
-- **Variable names** derive from the logical name: uppercase, non-alphanumerics → `_`, suffixes
-  `_VERSION` and `_PACKAGE`. The package ID is emitted because it differs per platform
-  (`fd-find` vs `fd`), so the Dockerfile never hardcodes it. Two entries mapping to the same
-  variable is an error; an entry can set `"var": "FD"` to override.
+- **Variable names (DECIDED, built)** derive from the logical name: uppercase, every
+  character but an ASCII letter or digit → `_`, suffixes `_PACKAGE` and `_VERSION` (in that
+  order, entries in manifest order). The package ID is the backend's own (`fd-find`, a
+  GitHub `owner/repo`), emitted because it differs per platform, so the Dockerfile never
+  hardcodes it. An entry's `var: FD` names the stem instead; it must be a variable name
+  (ASCII letters, digits, `_`, not led by a digit), checked when the manifest loads, and it
+  is part of the manifest hash (left out of the hash when absent, so older locks still
+  match). Two entries with one stem are an error naming both, and so is a name whose stem
+  starts with a digit (`7zip`: "set `var`"); both are checked over every entry, so a
+  manifest renders, or fails to, the same on every machine.
+- **Output:** `render args` is one line of `--build-arg NAME=value` flags; `render env` one
+  `NAME=value` per line; `render json` the versions file, lock-shaped:
+  `{"packages": [{"name", "var", "targets": {"linux/amd64": {"backend", "package", "purl",
+  "version"}}}]}`, a platform-independent (`any`) entry listed under each platform. The
+  style is the subcommand's whatever `--format` says (`$(bosun render args)` is piped, which
+  would otherwise mean JSON); errors still follow `--format`. An entry with no block for the
+  target is left out.
 - **Target selection** applies the same `install` selectors and installer preference as the
   `install` command (§5.3, §5.4), for the requested target rather than the current machine.
 - **`render json` covers multi-arch:** build args are the same for every platform in a
@@ -1384,6 +1397,7 @@ under a pty on Unix only.
 | M3-1 | WindowsMachine (Administrator = High/System integrity label in `whoami /groups`; state `%ProgramData%` / `%LOCALAPPDATA%`, config `%APPDATA%`); github-release on Windows (`<binary>.exe` into `%USERPROFILE%\.local\bin`, `;`-separated case-insensitive PATH check); `Step::Remove` replaces `rm -f`; `just check-win` (zig cc as MinGW) | landed hermetically; workspace type-checks for x86_64-pc-windows-gnu; **unverified on a real Windows host** |
 | M3-2 | winget (user), scoop (user), choco (system) backends; probe only on Windows | landed hermetically (argv and output parsing unit-tested, fixture scenarios); **unverified on a real Windows host** |
 | M3-3 | github-installer: a release's `.msi` (`msiexec /i … /qn /norestart`) or `.exe` (manifest `silent_args`, required); found in the Uninstall registry keys (`reg query`, three views) by `display_name` (`*` suffix = prefix); uninstall `msiexec /x {ProductCode}` or the entry's quiet/plain uninstaller; msiexec's 3010 (reboot required) is success, reported; system scope, no hold, no downgrade | landed (unit tests); **unverified on a real Windows host**; no fixture scenario (the seam has no registry) |
+| M3-4 | `bosun render args\|env\|json [path]` for this machine, from its lock (missing or stale: an error naming `bosun lock`); variable stems from the logical name or the entry's `var` (manifest key, checked at load), clashes and digit-led stems refused; the build-args driver is `bosun_apply::render` | landed |
 | M2-10 | with no terminal, every confirm (install, uninstall, prune, remove, migrate) applies, still printing what it applies to stderr; `--yes` only skips a terminal's prompt | landed |
 | M2-11 | `status [path]` lists every claim on each package (manifest, spec, user, whether the manifest still exists); with no path, everything bosun manages on the machine; `install` records a `claim` on a package bosun installed for another project | landed |
 | M2-12 | release selectors `linux:<distro>@<release>`: the release is the purl `distro` value a block's backend gives this machine (deb codename, rpm `<ID>-<VERSION_ID>`); exact `ID` only | landed; checked in Debian 12/13 and Ubuntu 22.04/24.04 containers |

@@ -366,6 +366,7 @@ fn entry(f: &Found, selector: bosun_core::platform::Selector) -> ManifestEntry {
         name: f.name.clone(),
         spec: Some(default_spec(&f.version)),
         formerly: Vec::new(),
+        var: None,
         install: BTreeMap::from([(
             selector,
             InstallBlock {

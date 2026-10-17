@@ -43,3 +43,10 @@ pub const UNSUPPORTED_DOWNGRADE: &str = "backend cannot downgrade to the resolve
 /// change a package it does not own.
 pub const FROZEN_ACCEPTED_CONFLICT: &str =
     "installed outside bosun at a different version than the lock; bosun will not change it";
+
+/// Two manifest entries give `render` the same variable stem (§8.3).
+pub const VAR_CLASH: &str = "two packages give the same render variable";
+
+/// A logical name gives a stem that is not a variable name (§8.3), so the
+/// entry must name one with `var`.
+pub const BAD_DERIVED_VAR: &str = "a package name gives no valid render variable";

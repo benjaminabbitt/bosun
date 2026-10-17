@@ -89,6 +89,7 @@ pub fn add(env: &Env, opts: AddOpts, pref: &[BackendId]) -> Result<AddOutput, Cl
         name: opts.name.clone(),
         spec: opts.spec.clone(),
         formerly: Vec::new(),
+        var: None,
         install: BTreeMap::from([(selector, block)]),
     };
     // The backend options are checked before any lookup, so a typo costs nothing.

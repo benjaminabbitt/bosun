@@ -136,6 +136,7 @@ dependencies = [
  "bosun-ports",
  "serde",
  "serde_json",
+ "thiserror",
 ]
 
 [[package]]

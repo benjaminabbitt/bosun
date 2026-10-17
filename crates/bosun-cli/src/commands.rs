@@ -797,7 +797,7 @@ fn installed_pin(state: &StateDocument, name: &str) -> Option<LockPackage> {
 
 /// This machine's lock for the manifest at `claim_path`, if it has one: a lock
 /// file recording another manifest (a path-hash clash) is not this one's.
-fn this_lock(env: &Env, claim_path: &Path) -> Result<Option<LockDocument>, CliError> {
+pub(crate) fn this_lock(env: &Env, claim_path: &Path) -> Result<Option<LockDocument>, CliError> {
     Ok(read_lock(&env.lock_path(claim_path), &env.schemes())?
         .filter(|l| Path::new(&l.manifest) == claim_path))
 }

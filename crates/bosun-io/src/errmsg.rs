@@ -23,3 +23,6 @@ pub const DUPLICATE_ENTRY: &str = "the manifest already has a package named";
 pub const NO_SUCH_ENTRY: &str = "the manifest has no package named";
 /// The manifest could not be edited in place.
 pub const EDIT: &str = "could not edit the manifest";
+/// An entry's `var` is not a variable name (§8.3).
+pub const BAD_VAR: &str =
+    "is not a variable name (ASCII letters, digits and `_`, not starting with a digit)";

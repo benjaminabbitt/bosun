@@ -19,6 +19,7 @@
 
 mod applier;
 mod errmsg;
+pub mod render;
 mod view;
 
 pub use applier::{ActionOutcome, ApplyReport, ApplyResult, Driver, HostApplier};
