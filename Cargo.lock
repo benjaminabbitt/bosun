@@ -148,6 +148,7 @@ dependencies = [
  "flate2",
  "lzma-rs",
  "minijinja",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

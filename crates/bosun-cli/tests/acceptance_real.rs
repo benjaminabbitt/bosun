@@ -547,6 +547,30 @@ fn warns(w: &mut RealWorld, needle: String) {
     );
 }
 
+#[then(expr = "it does not warn {string}")]
+fn does_not_warn(w: &mut RealWorld, needle: String) {
+    assert!(
+        !w.stdout.contains(&needle) && !w.stderr.contains(&needle),
+        "stdout:\n{}\nstderr:\n{}",
+        w.stdout,
+        w.stderr
+    );
+}
+
+/// Root installs `pkg@version` into npm's own global prefix (a system
+/// Node's, root's to write).
+#[given(regex = r"^root has npm install (\S+)@(\S+) globally$")]
+fn npm_root_global(_w: &mut RealWorld, pkg: String, version: String) {
+    let (code, out) = run("npm", &["install", "-g", &format!("{pkg}@{version}")]);
+    assert_eq!(code, 0, "npm install -g: {out}");
+}
+
+#[then(regex = r"^root removes (\S+) from npm's global prefix$")]
+fn npm_root_global_remove(_w: &mut RealWorld, pkg: String) {
+    let (code, out) = run("npm", &["uninstall", "-g", &pkg]);
+    assert_eq!(code, 0, "npm uninstall -g: {out}");
+}
+
 #[then(expr = "the binary {word} exists and is executable")]
 fn binary_executable(w: &mut RealWorld, name: String) {
     let path = w.bin_dir().join(&name);

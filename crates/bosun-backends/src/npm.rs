@@ -21,17 +21,19 @@
 //! Global installs go under npm's own global prefix (`npm prefix -g`): nvm's
 //! or fnm's Node directory, a configured `~/.npm-global`, `%APPDATA%\npm`, or
 //! a system Node's `/usr/local`. The prefix is read once, on first use, and
-//! logged. A prefix this user cannot write (a system Node's is root's) is
-//! warned of: user-scope steps never run elevated (§5.5), so `npm install -g`
-//! fails there as it would by hand. A prefix whose bin dir is not on `PATH`
-//! is warned of too.
+//! logged. When an install or uninstall step is planned, a prefix this user
+//! cannot write (a system Node's is root's) is warned of: user-scope steps
+//! never run elevated (§5.5), so `npm install -g` fails there as it would by
+//! hand. Whether it is writable is asked of the kernel (`access(2)`), never
+//! by writing there. A prefix whose bin dir is not on `PATH` is warned of
+//! then too.
 //!
 //! `npm -g` keeps no durable hold — a re-run re-asserts the exact version — so
 //! `hold` is a no-op and holds are not needed (§5.2).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, Once, OnceLock};
 
 use bosun_core::{
     BackendId, Capabilities, Installed, Os, Ref, Scheme, Scope, Source, Target, Version, Want,
@@ -128,6 +130,7 @@ impl BackendFactory for NpmFactory {
             prefix: Arc::new(OnceLock::new()),
             local: true,
             registries: Arc::default(),
+            warned: Arc::new(Once::new()),
         };
         Backend {
             index: Box::new(backend.clone()),
@@ -145,6 +148,7 @@ impl BackendFactory for NpmFactory {
             prefix: Arc::new(OnceLock::new()),
             local: false,
             registries: Arc::default(),
+            warned: Arc::new(Once::new()),
         }))
     }
 }
@@ -162,6 +166,8 @@ struct NpmBackend {
     /// npm's configured registry per scope (`""` for unscoped), asked on
     /// first use.
     registries: Arc<Mutex<BTreeMap<String, String>>>,
+    /// Whether the prefix's warnings were given, once a step was planned.
+    warned: Arc<Once>,
 }
 
 fn argv(parts: &[&str]) -> Vec<String> {
@@ -241,51 +247,78 @@ fn bin_off_path(prefix: &Path, os: Os, path_var: &str) -> bool {
     !crate::github_release::on_path(&bin_dir(prefix, os), path_var, os)
 }
 
-/// Whether this user can make files in `dir`, or, while it does not exist,
-/// in its nearest existing ancestor (npm makes the rest). Tried by creating
-/// and removing a file: permission bits alone don't say whose they are.
+/// Whether this user may make files in `dir`, or, while it does not exist,
+/// in its nearest existing ancestor directory (npm makes the rest). Nothing
+/// is written there to find out.
 fn writable(dir: &Path) -> bool {
-    let Some(existing) = dir.ancestors().find(|d| d.exists()) else {
-        return false;
-    };
-    let probe = existing.join(format!(".bosun-write-check-{}", std::process::id()));
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&probe)
-    {
-        Ok(_) => {
-            let _ = std::fs::remove_file(&probe);
-            true
-        }
-        Err(_) => false,
+    dir.ancestors()
+        .find(|d| d.exists())
+        .is_some_and(|existing| existing.is_dir() && may_write(existing))
+}
+
+/// Whether this process may create entries in `dir`: `access(2)` for write
+/// and search with its effective ids, so the kernel weighs ownership,
+/// groups, ACLs and read-only mounts as it would for the install.
+#[cfg(unix)]
+fn may_write(dir: &Path) -> bool {
+    use rustix::fs::{accessat, Access, AtFlags, CWD};
+    accessat(
+        CWD,
+        dir,
+        Access::WRITE_OK | Access::EXEC_OK,
+        AtFlags::EACCESS,
+    )
+    .is_ok()
+}
+
+/// Whether `dir` is writable, by its read-only attribute (Windows).
+#[cfg(not(unix))]
+fn may_write(dir: &Path) -> bool {
+    std::fs::metadata(dir).is_ok_and(|m| !m.permissions().readonly())
+}
+
+/// The warnings a step under `prefix` earns (module docs): `(message,
+/// path)` for a prefix that needs root and a bin dir off `path_var`.
+fn step_warnings(
+    prefix: &Path,
+    os: Os,
+    path_var: &str,
+    can_write: impl Fn(&Path) -> bool,
+) -> Vec<(&'static str, PathBuf)> {
+    let mut found = Vec::new();
+    if needs_root(prefix, os, can_write) {
+        found.push((logmsg::NPM_PREFIX_NEEDS_ROOT, prefix.to_path_buf()));
     }
+    if bin_off_path(prefix, os, path_var) {
+        found.push((logmsg::NPM_BIN_NOT_ON_PATH, bin_dir(prefix, os)));
+    }
+    found
 }
 
 impl NpmBackend {
-    /// npm's global prefix, asked once and warned about (module docs).
+    /// npm's global prefix, asked once (module docs).
     fn prefix(&self) -> Result<&Path, PortError> {
         self.prefix
             .get_or_init(|| {
                 let prefix = global_prefix(self.runner.as_ref(), self.program)?;
                 debug!(message = logmsg::NPM_PREFIX, prefix = %prefix.display());
-                if needs_root(&prefix, self.os, writable) {
-                    warn!(message = logmsg::NPM_PREFIX_NEEDS_ROOT, prefix = %prefix.display());
-                }
-                let path_var = std::env::var("PATH").unwrap_or_default();
-                if bin_off_path(&prefix, self.os, &path_var) {
-                    let bin = bin_dir(&prefix, self.os);
-                    warn!(message = logmsg::NPM_BIN_NOT_ON_PATH, bin_dir = %bin.display());
-                }
                 Ok(prefix)
             })
             .as_deref()
             .map_err(Clone::clone)
     }
 
-    /// `npm <verb> -g --prefix <prefix> <arg>`, as a user-scope step.
+    /// `npm <verb> -g --prefix <prefix> <arg>`, as a user-scope step; the
+    /// first planned in a run gives the prefix's warnings.
     fn global(&self, verb: &str, arg: &str) -> Result<Steps, PortError> {
-        let prefix = self.prefix()?.display().to_string();
+        let prefix = self.prefix()?;
+        self.warned.call_once(|| {
+            let path_var = std::env::var("PATH").unwrap_or_default();
+            for (message, path) in step_warnings(prefix, self.os, &path_var, writable) {
+                warn!(message, path = %path.display());
+            }
+        });
+        let prefix = prefix.display().to_string();
         Ok(vec![Step::Run {
             argv: argv(&[self.program, verb, "-g", "--prefix", &prefix, arg]),
             env: vec![],
@@ -665,6 +698,7 @@ mod tests {
             prefix: Arc::new(prefix),
             local: true,
             registries: Arc::default(),
+            warned: Arc::new(Once::new()),
         }
     }
 
@@ -1018,6 +1052,7 @@ mod tests {
     #[test]
     fn writable_is_whether_files_can_be_made_there_or_in_the_nearest_existing_dir() {
         let dir = tempfile::tempdir().unwrap();
+        let before = std::fs::metadata(dir.path()).unwrap().modified().unwrap();
         assert!(writable(dir.path()));
         assert!(writable(&dir.path().join("lib").join("node_modules")));
         assert_eq!(
@@ -1025,9 +1060,61 @@ mod tests {
             0,
             "leaves nothing behind"
         );
+        assert_eq!(
+            std::fs::metadata(dir.path()).unwrap().modified().unwrap(),
+            before,
+            "writes nothing there"
+        );
         let file = dir.path().join("file");
         std::fs::write(&file, "").unwrap();
         assert!(!writable(&file.join("lib")));
+        assert!(!writable(&file));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_without_write_permission_is_not_writable() {
+        use std::os::unix::fs::PermissionsExt;
+        if rustix::process::geteuid().is_root() {
+            return; // root writes anywhere, whatever the mode says
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        for (mode, can) in [(0o500, false), (0o300, true), (0o600, false), (0o700, true)] {
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(mode)).unwrap();
+            assert_eq!(writable(&locked.join("lib")), can, "{mode:o}");
+        }
+    }
+
+    #[test]
+    fn a_step_warns_of_a_root_prefix_and_a_bin_dir_off_path() {
+        let prefix = Path::new("/usr/local");
+        let both = step_warnings(prefix, Os::Linux, "/usr/bin", |_| false);
+        assert_eq!(
+            both,
+            vec![
+                (logmsg::NPM_PREFIX_NEEDS_ROOT, PathBuf::from("/usr/local")),
+                (logmsg::NPM_BIN_NOT_ON_PATH, PathBuf::from("/usr/local/bin")),
+            ]
+        );
+        assert_eq!(
+            step_warnings(prefix, Os::Linux, "/usr/local/bin:/usr/bin", |_| true),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn reading_what_is_installed_plans_nothing_and_checks_nothing() {
+        // verify_installed and user_installs read npm ls; only a planned
+        // step asks whether the prefix is writable.
+        let fake = Arc::new(FakeCommandRunner::new().with_stdout(LS_GLOBAL));
+        let b = backend(fake, Arc::new(FakeHttpFetcher::new()));
+        b.verify_installed(&reff("pkg:npm/cowsay")).unwrap();
+        assert!(!b.warned.is_completed());
+        b.install_exact(&reff("pkg:npm/cowsay"), &sem("1.6.0"))
+            .unwrap();
+        assert!(b.warned.is_completed());
     }
 
     #[test]

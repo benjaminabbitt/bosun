@@ -20,6 +20,10 @@ tar.workspace = true
 toml.workspace = true
 tracing.workspace = true
 
+# access(2) for whether npm's prefix is writable.
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["fs"] }
+
 [dev-dependencies]
 tempfile.workspace = true
 tracing-subscriber.workspace = true

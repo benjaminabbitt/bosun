@@ -472,6 +472,29 @@ Feature: real backends against a disposable container
     And the non-root user runs `bosun prune --yes`
     Then it succeeds
 
+  # Whether npm's prefix is writable matters only to a step that writes
+  # there: with the tool already installed by root, nothing is planned and
+  # nothing is warned of (and nothing is written to find out).
+  @npm @useradd @runuser
+  Scenario: npm's prefix is checked only when an install or uninstall is planned
+    Given root has npm install semver@7.6.0 globally
+    And the manifest:
+      """
+      version: 2
+      packages:
+        - name: semver
+          spec: "7.6.0"
+          install: {backend: npm}
+      """
+    And a non-root user owns the project
+    When the non-root user runs `bosun install . --yes`
+    Then it succeeds
+    And it does not warn "npm install -g there needs root"
+    When the non-root user runs `bosun status .`
+    Then it succeeds
+    And it does not warn "npm install -g there needs root"
+    And root removes semver from npm's global prefix
+
   @npm @useradd @runuser
   Scenario: npm under a system Node's prefix needs root, and bosun says so
     Given the manifest:
