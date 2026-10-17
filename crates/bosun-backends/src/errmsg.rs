@@ -89,3 +89,6 @@ pub const APT_CACHE: &str = "apt index cache";
 
 /// The target's root filesystem lists no apt source for the arch.
 pub const APT_NO_SOURCES: &str = "the target's apt lists no sources";
+
+/// `apt-get update` in the scratch root failed, with nothing fetched before.
+pub const APT_SCRATCH_UPDATE: &str = "apt-get update for the target's sources failed";

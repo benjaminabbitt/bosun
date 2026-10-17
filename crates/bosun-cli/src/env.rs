@@ -268,8 +268,9 @@ pub struct RemoteBackend {
 
 /// What resolving for a machine bosun isn't running on has (§4.7, §8.3): each
 /// compiled-in backend's remote index, where it has one, built for that
-/// machine's platform. Nothing here runs a program or reads this machine's
-/// state.
+/// machine's platform. Nothing here reads or changes this machine's package
+/// state: the only program run is apt's, in a scratch root of its own under
+/// bosun's cache (§4.7).
 pub struct RemoteEnv {
     /// The backends with a remote index, in registration order.
     pub backends: Vec<RemoteBackend>,
@@ -329,7 +330,10 @@ pub fn remote(
                 &home_dir(),
                 (os, arch, libc),
                 &host_cache()?,
-                root,
+                RemoteApt {
+                    root,
+                    local: Some(Arc::new(ProcessCommandRunner)),
+                },
             );
             Ok(remote_env(&factories))
         }
@@ -376,7 +380,7 @@ fn remote_from_fixture(
         &PathBuf::from(state_dir).join("home"),
         (os, arch, libc),
         &PathBuf::from(state_dir).join("cache"),
-        root,
+        RemoteApt { root, local: None },
     );
     let mut env = remote_env(&factories);
     for b in fx
@@ -487,18 +491,34 @@ fn compiled_in_factories(
     libc: Option<LibcFamily>,
     cache: &Path,
 ) -> Vec<Box<dyn BackendFactory>> {
-    factories_for(runner, fetcher, home, (os, arch, libc), cache, None)
+    factories_for(
+        runner,
+        fetcher,
+        home,
+        (os, arch, libc),
+        cache,
+        RemoteApt::default(),
+    )
 }
 
-/// [`compiled_in_factories`] for a machine of that OS, arch and libc whose
-/// root filesystem is `root` (§4.7), when bosun was given it.
+/// What apt's remote index is given beyond the platform (§4.7).
+#[derive(Default)]
+struct RemoteApt {
+    /// The target's root filesystem, when bosun was given it.
+    root: Option<TargetRoot>,
+    /// Runs this machine's apt in a scratch root, when it is to be asked.
+    local: Option<Arc<dyn CommandRunner>>,
+}
+
+/// [`compiled_in_factories`] for a machine of that OS, arch and libc, with
+/// what apt's remote index is given of it.
 fn factories_for(
     runner: Arc<dyn CommandRunner>,
     fetcher: Arc<dyn HttpFetcher>,
     home: &Path,
     (os, arch, libc): (Os, Arch, Option<LibcFamily>),
     cache: &Path,
-    root: Option<TargetRoot>,
+    apt: RemoteApt,
 ) -> Vec<Box<dyn BackendFactory>> {
     let package = |kind| {
         Box::new(
@@ -513,12 +533,14 @@ fn factories_for(
             .with_libc(libc),
         ) as Box<dyn BackendFactory>
     };
+    let mut apt_factory = AptFactory::new(runner.clone())
+        .with_remote_index(fetcher.clone(), cache.join("apt"))
+        .with_target_root(apt.root);
+    if let Some(local) = apt.local {
+        apt_factory = apt_factory.with_local_apt(local);
+    }
     vec![
-        Box::new(
-            AptFactory::new(runner.clone())
-                .with_remote_index(fetcher.clone(), cache.join("apt"))
-                .with_target_root(root),
-        ),
+        Box::new(apt_factory),
         Box::new(DnfFactory::new(runner.clone())),
         Box::new(bosun_backends::ApkFactory::new(runner.clone())),
         Box::new(

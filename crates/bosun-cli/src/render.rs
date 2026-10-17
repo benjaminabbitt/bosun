@@ -1,9 +1,11 @@
 //! `bosun render` (§8.3): the versions a container build installs, as build
 //! args, env lines or a JSON versions file. For this machine they come from
 //! its lock, which must be there and current. For a machine bosun isn't
-//! running on (another platform, or one described by `--distro` / `--libc`)
-//! they are resolved through remote indexes (§4.7), never through this
-//! machine's package managers or lock.
+//! running on (another platform, an image or root filesystem given with
+//! `--image` / `--rootfs`, or one described by `--distro` / `--libc`) they
+//! are resolved through remote indexes (§4.7), never from this machine's
+//! installed packages, package sources or lock (apt's index may run this
+//! machine's apt, in a scratch root of its own).
 
 use std::path::{Path, PathBuf};
 

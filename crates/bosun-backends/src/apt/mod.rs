@@ -28,6 +28,7 @@ use crate::logmsg;
 
 mod policy;
 pub mod remote;
+pub mod scratch;
 pub mod sources;
 
 const BACKEND: &str = "apt";
@@ -37,6 +38,7 @@ pub struct AptFactory {
     runner: Arc<dyn CommandRunner>,
     remote: Option<(Arc<dyn HttpFetcher>, PathBuf)>,
     root: Option<remote::TargetRoot>,
+    local_apt: Option<Arc<dyn CommandRunner>>,
 }
 
 impl AptFactory {
@@ -46,6 +48,7 @@ impl AptFactory {
             runner,
             remote: None,
             root: None,
+            local_apt: None,
         }
     }
 
@@ -64,6 +67,13 @@ impl AptFactory {
     /// that root (§4.7) rather than a stock image's.
     pub fn with_target_root(mut self, root: Option<remote::TargetRoot>) -> AptFactory {
         self.root = root;
+        self
+    }
+
+    /// Have its remote index ask this machine's apt, run through `runner`, in a
+    /// scratch root when `apt-get` is here (§4.7).
+    pub fn with_local_apt(mut self, runner: Arc<dyn CommandRunner>) -> AptFactory {
+        self.local_apt = Some(runner);
         self
     }
 }
@@ -113,7 +123,8 @@ impl BackendFactory for AptFactory {
         let (fetcher, cache) = self.remote.as_ref()?;
         Some(Box::new(
             remote::RemoteAptIndex::new(fetcher.clone(), cache.clone())
-                .with_root(self.root.clone()),
+                .with_root(self.root.clone())
+                .with_local_apt(self.local_apt.clone()),
         ))
     }
 }

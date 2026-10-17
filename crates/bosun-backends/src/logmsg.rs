@@ -133,3 +133,29 @@ pub const APT_SOURCE_SKIPPED: &str = "unreadable apt source entry; skipped";
 
 /// An `http://` mirror from the target's sources is read over HTTPS.
 pub const APT_HTTPS: &str = "reading the apt mirror over HTTPS";
+
+/// No apt on this machine: bosun reads the target's mirrors itself.
+pub const APT_NO_LOCAL_APT: &str = "no apt-get here; reading the apt mirrors directly";
+
+/// This machine's apt could not read a stock image's sources (a release
+/// without an updates or security suite): bosun reads them itself.
+pub const APT_SCRATCH_STOCK: &str =
+    "apt could not update the stock sources; reading the apt mirrors directly";
+
+/// A source entry has no key in the target's root to check its release file
+/// against: the scratch configuration trusts it, read over HTTPS, and apt
+/// still checks the package indexes against the release file's hashes.
+pub const APT_SCRATCH_UNCHECKED: &str =
+    "no key for this apt source in the target; trusting it over HTTPS in the scratch root";
+
+/// The scratch root's `apt-get update` ran within the freshness window.
+pub const APT_SCRATCH_FRESH: &str = "apt lists in the scratch root are fresh";
+
+/// The scratch root's `apt-get update` failed; the lists it fetched before
+/// are used.
+pub const APT_SCRATCH_STALE: &str =
+    "apt-get update for the target's sources failed; using the lists fetched before";
+
+/// apt's remote index resolves through this machine's apt, in a scratch root.
+pub const APT_THROUGH_LOCAL_APT: &str =
+    "resolving the target's apt packages with this machine's apt, in a scratch root";

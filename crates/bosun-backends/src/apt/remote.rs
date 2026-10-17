@@ -1,20 +1,27 @@
 //! apt's remote index (§4.7): the versions a distro release's apt would offer,
-//! read from its mirror over HTTPS rather than from this machine's apt, so
-//! bosun can resolve for a machine it isn't running on (`render --target`,
-//! §8.3).
+//! for a machine bosun isn't running on (`render --target`, §8.3).
 //!
-//! A release is the suites a stock image of it lists (`bookworm`,
-//! `bookworm-updates` and `bookworm-security` for Debian 12), each fetched the
-//! way apt fetches it: the suite's `InRelease`, then each component's
-//! `Packages.gz` (else `.xz`), checked against the size and SHA256 the `InRelease` lists
-//! (by hash when the release offers `Acquire-By-Hash`). The `InRelease` is
-//! trusted as fetched over HTTPS; its OpenPGP signature is not checked here
-//! (the image's apt checks it when it installs).
+//! A release's sources are the target's own, when bosun was given its root
+//! filesystem (`render --image` / `--rootfs`) and the release is the root's;
+//! else the suites a stock image of it lists (`bookworm`, `bookworm-updates`
+//! and `bookworm-security` for Debian 12).
+//!
+//! When `apt-get` is on this machine, apt itself resolves them, in a scratch
+//! root ([`super::scratch`]), so its priorities, pins and phasing apply.
+//! Without it, bosun reads them itself, each suite fetched the way apt
+//! fetches it: the suite's `InRelease`, then each component's `Packages.gz`
+//! (else `.xz`), checked against the size and SHA256 the `InRelease` lists
+//! (by hash when the release offers `Acquire-By-Hash`), and the versions apt
+//! would consider kept: those of the highest priority apt gives a release
+//! without pins. Either way, a release file with no key to check it against
+//! is trusted as fetched over HTTPS (the image's apt checks its signature
+//! when it installs).
 //!
 //! Fetched files are cached: an `InRelease` is used for [`RELEASE_TTL`] before
 //! it is fetched again (an older one is used, with a warning, when the mirror
 //! can't be reached), and a package index for as long as its hash is the one
-//! the current `InRelease` lists.
+//! the current `InRelease` lists. A scratch root's lists are updated after the
+//! same time.
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -25,10 +32,11 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use bosun_core::{Arch, Ref, Scheme, Target, Version};
-use bosun_ports::{HttpFetcher, HttpRequest, Index, PortError};
+use bosun_ports::{CommandRunner, HttpFetcher, HttpRequest, Index, PortError};
 use sha2::{Digest, Sha256};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
+use super::scratch::{self, Scratch};
 use super::sources::{self, SourceEntry};
 use crate::{errmsg, logmsg};
 
@@ -340,7 +348,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), PortError> {
 }
 
 /// Whether the file at `path` was written less than `ttl` ago.
-fn fresh(path: &Path, ttl: Duration) -> bool {
+pub(super) fn fresh(path: &Path, ttl: Duration) -> bool {
     fs::metadata(path)
         .and_then(|m| m.modified())
         .ok()
@@ -351,6 +359,9 @@ fn fresh(path: &Path, ttl: Duration) -> bool {
 /// Package name → its versions across a release's suites and components,
 /// each with the priority apt gives it.
 pub type Available = BTreeMap<String, Vec<(String, i32)>>;
+
+/// A release, as its distro, codename and arch.
+type ReleaseKey = (String, String, Arch);
 
 /// The versions apt would consider installing, with nothing installed: those
 /// of the highest priority among `versions`, none when that is negative.
@@ -390,10 +401,36 @@ pub struct RemoteAptIndex {
     fetcher: Arc<dyn HttpFetcher>,
     cache: PathBuf,
     root: Option<TargetRoot>,
+    /// Runs this machine's apt, when it is to be asked.
+    apt: Option<Arc<dyn CommandRunner>>,
     /// Each release read this run, by distro, codename and arch.
-    releases: RefCell<BTreeMap<(String, String, Arch), Rc<Available>>>,
+    releases: RefCell<BTreeMap<ReleaseKey, Rc<Available>>>,
+    /// Each release's scratch root this run; `None` when apt can't read it.
+    scratches: RefCell<BTreeMap<ReleaseKey, Option<Rc<Scratch>>>>,
     /// Set by `refresh`: fetch every `InRelease` again, however fresh.
     refetch: Cell<bool>,
+}
+
+/// Where a release's sources come from.
+enum Chosen<'a> {
+    /// The target's root lists them.
+    Root(&'a Path, Vec<SourceEntry>),
+    /// What a stock image of the release lists.
+    Stock(Sources),
+}
+
+/// `sources` as source list entries.
+fn entries_of(sources: &Sources) -> Vec<SourceEntry> {
+    sources
+        .suites
+        .iter()
+        .map(|s| SourceEntry {
+            uri: s.mirror.clone(),
+            suite: s.suite.clone(),
+            components: s.components.clone(),
+            ..SourceEntry::default()
+        })
+        .collect()
 }
 
 impl RemoteAptIndex {
@@ -403,7 +440,9 @@ impl RemoteAptIndex {
             fetcher,
             cache,
             root: None,
+            apt: None,
             releases: RefCell::new(BTreeMap::new()),
+            scratches: RefCell::new(BTreeMap::new()),
             refetch: Cell::new(false),
         }
     }
@@ -414,13 +453,22 @@ impl RemoteAptIndex {
         self
     }
 
+    /// Through this machine's apt, when `apt-get` is here (§4.7): it resolves
+    /// in a scratch root under the cache, run through `runner`, and bosun's
+    /// own reading of the mirrors is used only without it.
+    pub fn with_local_apt(mut self, runner: Option<Arc<dyn CommandRunner>>) -> RemoteAptIndex {
+        self.apt = runner;
+        self
+    }
+
     /// The sources of `distro` `codename` for `arch`: the target root's when
     /// it is that release, else a stock image's.
-    fn sources(&self, distro: &str, codename: &str, arch: Arch) -> Result<Sources, PortError> {
+    fn chosen(&self, distro: &str, codename: &str, arch: Arch) -> Result<Chosen<'_>, PortError> {
         match &self.root {
             Some(root) if root.distro == distro && root.codename == codename => {
-                let sources = sources_from(&sources::read_root(&root.path), arch);
-                if sources.suites.is_empty() {
+                let entries = sources::read_root(&root.path);
+                let arch_name = arch.to_string();
+                if !entries.iter().any(|e| e.applies_to(&arch_name)) {
                     return Err(PortError::Backend {
                         detail: format!(
                             "{}: {} for {arch}",
@@ -429,11 +477,70 @@ impl RemoteAptIndex {
                         ),
                     });
                 }
-                Ok(sources)
+                Ok(Chosen::Root(&root.path, entries))
             }
-            _ => default_sources(distro, codename, arch).ok_or_else(|| PortError::Backend {
-                detail: format!("{}: {distro}", errmsg::APT_NO_MIRROR),
-            }),
+            _ => default_sources(distro, codename, arch)
+                .map(Chosen::Stock)
+                .ok_or_else(|| PortError::Backend {
+                    detail: format!("{}: {distro}", errmsg::APT_NO_MIRROR),
+                }),
+        }
+    }
+
+    /// The versions of `name` and their priorities as this machine's apt
+    /// gives them for `key`'s release; `None` when apt isn't here, or when
+    /// it can't read a stock image's sources (a release without an updates
+    /// suite), which bosun then reads itself.
+    fn through_apt(
+        &self,
+        key: &ReleaseKey,
+        name: &str,
+    ) -> Result<Option<Vec<(String, i32)>>, PortError> {
+        let Some(runner) = &self.apt else {
+            return Ok(None);
+        };
+        let known = self.scratches.borrow().get(key).cloned();
+        let scratch = match known {
+            Some(s) => s,
+            None => {
+                let (distro, codename, arch) = key;
+                let chosen = self.chosen(distro, codename, *arch)?;
+                let plan = match &chosen {
+                    Chosen::Root(path, entries) => scratch::plan(Some(path), entries, *arch),
+                    Chosen::Stock(sources) => scratch::plan(None, &entries_of(sources), *arch),
+                };
+                let s = Scratch::write(&self.cache, &plan)?;
+                let s = match s.update(runner.as_ref(), self.refetch.get()) {
+                    Ok(()) => {
+                        info!(message = logmsg::APT_THROUGH_LOCAL_APT, dir = %s.dir().display());
+                        Some(Rc::new(s))
+                    }
+                    Err(PortError::CommandNotFound { .. }) => {
+                        info!(message = logmsg::APT_NO_LOCAL_APT);
+                        None
+                    }
+                    Err(e) if matches!(chosen, Chosen::Stock(_)) => {
+                        info!(message = logmsg::APT_SCRATCH_STOCK, error = %e);
+                        None
+                    }
+                    Err(e) => return Err(e),
+                };
+                self.scratches.borrow_mut().insert(key.clone(), s.clone());
+                s
+            }
+        };
+        let Some(s) = scratch else {
+            return Ok(None);
+        };
+        match s.policy(runner.as_ref(), name) {
+            Ok(versions) => Ok(Some(versions)),
+            // Lists fetched before, but no apt here now.
+            Err(PortError::CommandNotFound { .. }) => {
+                info!(message = logmsg::APT_NO_LOCAL_APT);
+                self.scratches.borrow_mut().insert(key.clone(), None);
+                Ok(None)
+            }
+            Err(e) => Err(e),
         }
     }
 
@@ -648,7 +755,7 @@ pub fn index_file<'r>(
 
 /// The distro, codename and arch a deb identity names (§5.6); the arch falls
 /// back to the target's.
-fn release_of(pkg: &Ref, target: &Target) -> Result<(String, String, Arch), PortError> {
+fn release_of(pkg: &Ref, target: &Target) -> Result<ReleaseKey, PortError> {
     let needs = || PortError::Backend {
         detail: format!("{}: {}", errmsg::APT_NO_DISTRO, pkg.purl),
     };
@@ -666,30 +773,39 @@ impl Index for RemoteAptIndex {
     fn refresh(&self) -> Result<(), PortError> {
         self.refetch.set(true);
         self.releases.borrow_mut().clear();
+        self.scratches.borrow_mut().clear();
         Ok(())
     }
 
     fn query_available(&self, pkg: &Ref, target: &Target) -> Result<Vec<Version>, PortError> {
         let key = release_of(pkg, target)?;
+        let name = pkg.purl.name();
+        let parse = |versions: &[(String, i32)]| -> Vec<Version> {
+            candidates(versions)
+                .into_iter()
+                .filter_map(|v| Version::parse(v, Scheme::Debian).ok())
+                .collect()
+        };
+        if let Some(versions) = self.through_apt(&key, name)? {
+            return Ok(parse(&versions));
+        }
         let known = self.releases.borrow().get(&key).cloned();
         let available = match known {
             Some(a) => a,
             None => {
                 let (distro, codename, arch) = &key;
-                let sources = self.sources(distro, codename, *arch)?;
+                let sources = match self.chosen(distro, codename, *arch)? {
+                    Chosen::Root(_, entries) => sources_from(&entries, *arch),
+                    Chosen::Stock(sources) => sources,
+                };
                 let read = Rc::new(self.read_release(&sources, *arch)?);
                 self.releases.borrow_mut().insert(key.clone(), read.clone());
                 read
             }
         };
-        let versions = available
-            .get(pkg.purl.name())
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        Ok(candidates(versions)
-            .into_iter()
-            .filter_map(|v| Version::parse(v, Scheme::Debian).ok())
-            .collect())
+        Ok(parse(
+            available.get(name).map(Vec::as_slice).unwrap_or_default(),
+        ))
     }
 }
 

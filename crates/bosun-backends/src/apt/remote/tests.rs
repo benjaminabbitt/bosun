@@ -822,7 +822,7 @@ fn logged(f: impl FnOnce()) -> String {
         let subscriber = tracing_subscriber::fmt()
             .with_writer(|| ThisThread)
             .with_ansi(false)
-            .with_max_level(tracing::Level::WARN)
+            .with_max_level(tracing::Level::INFO)
             .finish();
         tracing::subscriber::set_global_default(subscriber).expect("the only global subscriber");
     });
@@ -970,4 +970,190 @@ fn a_flat_repository_is_fetched_by_hash_when_it_offers_it() {
         versions(&rooted(&fetcher, dir.path(), root.path()), JQ),
         vec!["1"]
     );
+}
+
+// ---- through this machine's apt ----------------------------------------------
+
+fn out(code: i32, stdout: &str) -> bosun_ports::Output {
+    bosun_ports::Output {
+        code: Some(code),
+        stdout: stdout.as_bytes().to_vec(),
+        stderr: b"E: apt says no".to_vec(),
+    }
+}
+
+const JQ_POLICY: &str = "\
+jq:
+  Installed: (none)
+  Candidate: 1.6-2.1+deb12u3
+  Version table:
+     9.9-1~bpo12+1 100
+        100 https://deb.debian.org/debian bookworm-backports/main amd64 Packages
+     1.6-2.1+deb12u3 500
+        500 https://deb.debian.org/debian-security bookworm-security/main amd64 Packages
+     1.6-2.1+deb12u2 500
+        500 https://deb.debian.org/debian bookworm/main amd64 Packages
+";
+
+type Runner = bosun_ports::testing::FakeCommandRunner;
+
+fn apt(outputs: &[(i32, &str)]) -> Arc<Runner> {
+    let mut runner = Runner::new();
+    for (code, stdout) in outputs {
+        runner = runner.with_output(out(*code, stdout));
+    }
+    Arc::new(runner)
+}
+
+fn programs(runner: &Runner) -> Vec<String> {
+    runner.calls().iter().map(|c| c.program.clone()).collect()
+}
+
+fn with_apt(index: RemoteAptIndex, runner: &Arc<Runner>) -> RemoteAptIndex {
+    index.with_local_apt(Some(runner.clone() as Arc<dyn CommandRunner>))
+}
+
+#[test]
+fn apts_own_choice_is_asked_when_apt_is_here() {
+    let dir = tempfile::tempdir().unwrap();
+    let runner = apt(&[(0, ""), (0, JQ_POLICY), (0, "")]);
+    let idx = with_apt(
+        index(&Arc::new(FakeHttpFetcher::new()), dir.path()),
+        &runner,
+    );
+    assert_eq!(
+        versions(&idx, JQ),
+        vec!["1.6-2.1+deb12u2", "1.6-2.1+deb12u3"]
+    );
+    // One update per release however many packages; nothing fetched by bosun.
+    assert!(versions(&idx, "pkg:deb/debian/nope?arch=amd64&distro=bookworm").is_empty());
+    assert_eq!(programs(&runner), vec!["apt-get", "apt-cache", "apt-cache"]);
+    assert_eq!(fs::read_dir(dir.path().join("scratch")).unwrap().count(), 1);
+}
+
+#[test]
+fn without_apt_bosun_reads_the_mirrors_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    let runner = apt(&[]);
+    let idx = with_apt(index(&Arc::new(bookworm_mirror()), dir.path()), &runner);
+    let log = logged(|| {
+        assert_eq!(versions(&idx, JQ).len(), 2);
+        assert_eq!(versions(&idx, JQ).len(), 2);
+    });
+    assert!(log.contains(logmsg::APT_NO_LOCAL_APT), "{log}");
+    // Asked once; not again for the release.
+    assert_eq!(runner.calls().len(), 1);
+}
+
+#[test]
+fn apt_failing_on_a_stock_images_sources_hands_them_to_bosun() {
+    let dir = tempfile::tempdir().unwrap();
+    let runner = apt(&[(100, "")]);
+    let idx = with_apt(index(&Arc::new(bookworm_mirror()), dir.path()), &runner);
+    let log = logged(|| assert_eq!(versions(&idx, JQ).len(), 2));
+    assert!(log.contains(logmsg::APT_SCRATCH_STOCK), "{log}");
+}
+
+#[test]
+fn apt_failing_on_the_targets_own_sources_is_an_error() {
+    let r = root_with(
+        "a.list",
+        "deb https://deb.debian.org/debian bookworm main\n",
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let runner = apt(&[(100, "")]);
+    let idx = with_apt(
+        rooted(&Arc::new(bookworm_mirror()), dir.path(), r.path()),
+        &runner,
+    );
+    let err = query_err(&idx, JQ);
+    assert!(err.contains(errmsg::APT_SCRATCH_UPDATE), "{err}");
+    assert!(err.contains("E: apt says no"), "{err}");
+}
+
+#[test]
+fn the_targets_root_is_what_apt_reads() {
+    let r = root_with(
+        "a.list",
+        "deb http://deb.debian.org/debian bookworm main\n\
+         deb [arch=arm64] https://only.example s main\n",
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let runner = apt(&[(0, ""), (0, JQ_POLICY)]);
+    let idx = with_apt(
+        rooted(&Arc::new(FakeHttpFetcher::new()), dir.path(), r.path()),
+        &runner,
+    );
+    assert_eq!(versions(&idx, JQ).len(), 2);
+    let scratch = fs::read_dir(dir.path().join("scratch"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let written =
+        fs::read_to_string(scratch.join("etc/apt/sources.list.d/target.sources")).unwrap();
+    // Every entry, for apt to filter by arch; no key, so trusted over HTTPS.
+    assert!(
+        written.contains("URIs: https://deb.debian.org/debian\n"),
+        "{written}"
+    );
+    assert!(
+        written.contains("URIs: https://only.example\n"),
+        "{written}"
+    );
+    assert!(written.contains("Architectures: arm64\n"), "{written}");
+}
+
+#[test]
+fn refresh_updates_the_scratch_root_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let runner = apt(&[(0, ""), (0, JQ_POLICY), (0, ""), (0, JQ_POLICY)]);
+    let idx = with_apt(
+        index(&Arc::new(FakeHttpFetcher::new()), dir.path()),
+        &runner,
+    );
+    versions(&idx, JQ);
+    idx.refresh().unwrap();
+    versions(&idx, JQ);
+    assert_eq!(
+        programs(&runner),
+        vec!["apt-get", "apt-cache", "apt-get", "apt-cache"]
+    );
+}
+
+#[test]
+fn a_stock_images_sources_go_to_apt_as_they_are() {
+    let s = default_sources("ubuntu", "noble", Arch::Arm64).unwrap();
+    let entries = entries_of(&s);
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[1].uri, UBUNTU_PORTS);
+    assert_eq!(entries[1].suite, "noble-updates");
+    assert_eq!(entries[1].components.len(), 4);
+    assert!(entries.iter().all(|e| e.signed_by.is_none() && !e.trusted));
+}
+
+#[test]
+fn apt_gone_since_the_lists_were_fetched_hands_them_to_bosun() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = apt(&[(0, ""), (0, JQ_POLICY)]);
+    versions(
+        &with_apt(index(&Arc::new(FakeHttpFetcher::new()), dir.path()), &first),
+        JQ,
+    );
+    // The lists are fresh, so update is not run; apt-cache is not there.
+    let gone = apt(&[]);
+    let idx = with_apt(index(&Arc::new(bookworm_mirror()), dir.path()), &gone);
+    assert_eq!(versions(&idx, JQ).len(), 2);
+    assert_eq!(versions(&idx, JQ).len(), 2);
+    assert_eq!(programs(&gone), vec!["apt-cache"]);
+}
+
+#[test]
+fn apt_cache_failing_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let runner = apt(&[(0, ""), (1, "")]);
+    let idx = with_apt(index(&Arc::new(bookworm_mirror()), dir.path()), &runner);
+    let err = query_err(&idx, JQ);
+    assert!(err.contains("apt-cache"), "{err}");
 }
