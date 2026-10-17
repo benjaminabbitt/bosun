@@ -384,12 +384,23 @@ package manager). cargo (crates.io's sparse index), npm (the npm registry), uv (
 API), github-release, github-deb and github-rpm (GitHub's API) return the index they always
 use, so none of them needs to be on this machine; apt returns its remote index. Resolving for
 another machine runs every factory with a command runner that runs nothing, so it cannot touch
-this machine's package managers.
+this machine's package managers; the one program it may run is this machine's apt, in a scratch
+root of its own (below), which reads and writes nothing of this machine's apt state.
 
 **apt's remote index (DECIDED, built).** The release comes from the identity: the deb purl's
 namespace is the distro, its `distro` qualifier the codename, its `arch` the architecture.
 
-- **Sources:** what a stock container image of the release lists. Debian: `main` of
+- **Sources: the target's own, else a stock image's.** When `render` was given the target's
+  root filesystem (`--image` / `--rootfs`, §8.3) and the release is the root's (its os-release
+  `ID` and `VERSION_CODENAME`), the sources are the ones its apt reads: `etc/apt/sources.list`,
+  then each `etc/apt/sources.list.d` file ending in `.list` (one-line format) or `.sources`
+  (deb822), in name order. Only `deb` entries are read (`deb-src` and deb822 `Enabled: no` are
+  dropped); a deb822 stanza is one entry per URI and suite; `arch=` / `Architectures:` limit an
+  entry to those architectures; flat repositories (`deb <uri> ./`) are read; every other option
+  is kept for apt. So a repository the Dockerfile added (a vendor's, NodeSource, a PPA,
+  backports) is read with the rest, and a derived distro with no stock mirror (Pop!_OS) works.
+  A root with no entry for the arch is an error naming it. Otherwise, and only then, the
+  sources are what a stock container image of the release lists. Debian: `main` of
   `<codename>` and `<codename>-updates` from `deb.debian.org/debian` and `<codename>-security`
   from `deb.debian.org/debian-security` (checked against `debian:12` and `debian:13`). Ubuntu:
   `main restricted universe multiverse` of `<codename>`, `-updates` and `-security`, from
@@ -397,30 +408,67 @@ namespace is the distro, its `distro` qualifier the codename, its `arch` the arc
   `ports.ubuntu.com/ubuntu-ports` on arm64. Backports are left out (apt never picks them unless
   asked). The release's own suite missing is an error naming it; a missing `-updates` or
   `-security` suite (sid has neither) is skipped. Any other distro is an error: bosun knows no
-  mirror for it. There is no mirror override yet.
-- **Versions** are every version of the package in those suites, as `apt-cache madison` lists
-  them; selection takes the highest in the spec as everywhere (§7), which with every suite at
-  priority 500 is apt's candidate.
-- **Integrity: the hash chain, not the signature.** Each suite's `InRelease` is fetched over
-  HTTPS; each component's package index (`Packages.gz`, else `Packages.xz`: Ubuntu writes its xz
-  indexes as two streams, which the pure-Rust xz decoder doesn't read, and Debian's security
-  suite lists only xz) is fetched by hash when the release offers `Acquire-By-Hash`, and refused
-  unless its size and SHA256 are the ones the `InRelease` lists. A release file must name the
-  suite asked for (its `Suite` or `Codename`). The `InRelease`'s OpenPGP signature is not
-  verified, and bosun does not warn about it (decided, §11): HTTPS and the hash chain are
-  enough to choose versions, and the image's apt verifies the release against its keyring when
-  it installs what was chosen. `Valid-Until` is not checked either.
+  mirror for it. Using the stock sources is logged (info).
+- **apt resolves, when it is on this machine.** The release's sources are written, as deb822,
+  into a scratch root under the cache (`apt/scratch/<digest of its files>`): an `apt.conf` with
+  `Dir` the scratch root, `Dir::State::status` an empty file, `APT::Architecture` and
+  `APT::Architectures` the target's, `Acquire::Languages "none"` and `Acquire::GzipIndexes`.
+  apt is run with `APT_CONFIG` naming it (apt reads that before any other configuration, so this
+  machine's `apt.conf.d` and sources are not read) and `LC_ALL=C`: `apt-get -q update`, then
+  `apt-cache policy <package>`, whose version table gives each version and its priority. The
+  versions at the highest priority are offered (none if it is negative), so apt's own rules
+  choose: pins, `NotAutomatic` / `ButAutomaticUpgrades` suites, priorities, phasing as this
+  machine's apt applies it. From the target's root the scratch root takes its `preferences` and
+  `preferences.d`, its `trusted.gpg` and `trusted.gpg.d`, and every keyring a `Signed-By` names
+  (copied in, the entry pointed at the copy); not its `apt.conf.d`, which may hold hooks
+  (`APT::Update::Post-Invoke`) that would run here. The update follows `RELEASE_TTL` (a stamp
+  file); `Index::refresh` runs it again. A failed update is an error carrying apt's stderr,
+  unless one succeeded before, whose lists are then used with a warning. Foreign architectures
+  work as non-root (arm64 from amd64, checked). No `apt-get` (or no `apt-cache`) on this machine
+  means bosun reads the mirrors itself, as below; so does apt rejecting a stock image's sources
+  (a release without an `-updates` suite), which bosun then reads skipping what is missing.
+- **bosun reads the mirrors itself, without apt.** Each suite is fetched over HTTPS (an
+  `http://` URI from the target's sources is read as `https://`, logged at debug): its
+  `InRelease`, then each component's package index (`Packages.gz`, else `Packages.xz`: Ubuntu
+  writes its xz indexes as two streams, which the pure-Rust xz decoder doesn't read, and
+  Debian's security suite lists only xz; a flat repository's at its top), fetched by hash when
+  the release offers `Acquire-By-Hash`, and refused unless its size and SHA256 are the ones the
+  `InRelease` lists. A release file must name the suite asked for (its `Suite` or `Codename`;
+  not for a flat repository). The versions offered are those of the highest priority apt gives
+  a release with no pins (apt_preferences(5)): 500, or 100 for a `NotAutomatic` release that is
+  also `ButAutomaticUpgrades`, or 1 for `NotAutomatic` alone, a version listed twice taking its
+  highest. So backports listed by an image (Ubuntu's do) offer only what nothing else does.
+  The target's pins are not applied on this path, and a root with `preferences` or
+  `preferences.d` is warned of. Selection takes the highest in the spec as everywhere (§7).
+- **Integrity: the hash chain, and a signature only where apt has the target's key.** bosun
+  verifies no OpenPGP signature itself and warns of none (decided, §11): HTTPS and the hash
+  chain are enough to choose versions, and the image's apt verifies the release against its
+  keyring when it installs what was chosen. When apt resolves, it checks each release file
+  against the target's own keys copied into the scratch root, as the target's apt would. An entry
+  with no key to check it against there (stock sources, a keyring path the root lacks, a
+  fingerprint with no trusted keys) is written `Trusted: yes` in the scratch configuration only,
+  with its URI read over HTTPS, logged at debug; apt still checks the package indexes against
+  the release file's hashes. `Allow-Insecure` and the like are never set; the target's own
+  trust is never changed. `Valid-Until` is checked by apt, and not when bosun reads the mirrors.
 - **Cache and freshness:** under the user cache directory (`$XDG_CACHE_HOME/bosun/apt`,
   default `~/.cache/bosun/apt`; `%LOCALAPPDATA%\bosun\cache\apt` on Windows), one directory per
-  mirror and suite. An `InRelease` is reused for an hour (`RELEASE_TTL`) and then fetched again;
-  apt has no time-to-live (it fetches on `apt-get update`, with If-Modified-Since), but bosun's
-  HTTP port carries no response headers, and an hour keeps a render close to what a fresh
-  `apt-get update` sees while sparing the mirror a fetch per run. A package index is reused for
-  as long as its hash is the one the current `InRelease` lists, so a new index is downloaded only
-  when the release changes. When the mirror can't be reached, the `InRelease` fetched before is
-  used, with a warning. `Index::refresh` fetches every `InRelease` again.
+  mirror and suite, and the scratch roots under `scratch/`. An `InRelease` is reused for an hour
+  (`RELEASE_TTL`) and then fetched again; apt has no time-to-live (it fetches on `apt-get
+  update`, with If-Modified-Since), but bosun's HTTP port carries no response headers, and an
+  hour keeps a render close to what a fresh `apt-get update` sees while sparing the mirror a
+  fetch per run. A package index is reused for as long as its hash is the one the current
+  `InRelease` lists, so a new index is downloaded only when the release changes. When the mirror
+  can't be reached, the `InRelease` fetched before is used, with a warning. `Index::refresh`
+  fetches every `InRelease` again.
 - **Checked** against `apt-cache policy` after `apt-get update` in `debian:12`, `debian:13` and
   `ubuntu:24.04` containers (2026-10-16): 14, 15 and 14 packages, every candidate the same.
+  Rendered from each image with `--image` through apt (2026-10-17), 30 packages each in
+  `debian:12`, `debian:13`, `ubuntu:22.04` and `ubuntu:24.04`, every candidate the one
+  `apt-cache policy` gives inside; arm64 from amd64, the same as the image's apt with arm64 added
+  (Debian; arch-`all` packages aside, which `pkg:arm64` doesn't name) and as bosun's own reading
+  (Ubuntu, whose arm64 sources are the ports mirror); a `debian:12` image adding Docker's
+  repository with a `Signed-By` keyring and a pin (`docker-ce-cli` to `5:27.*`, priority 1001):
+  through apt the pinned version, as inside; without apt the newest, with the pins warned of.
 
 ### 4.8 Plan and apply
 
@@ -1102,11 +1150,13 @@ image builds are the same mechanism. Both of the first two shapes are supported 
   --checksum` instructions, with names and versions as literals. The user's Dockerfile is never
   edited. Chain it with `docker build --build-arg BASE=<image>` or a bake file that uses the
   base as a named build context. A tool bump rebuilds only the tool layer, not the base.
-  Rendering needs the base image's distro (for selectors and purl namespace): declared per
-  target (`--distro debian@bookworm`, §5.4), or read once from the image's `/etc/os-release`.
-  Versions for a platform other than the rendering machine's come from remote indexes (§4.7;
-  apt so far), as `render --target` resolves them (§8.3); a backend without one is rendered
-  inside the base image, or from exact specs.
+  Rendering needs the base image's distro (for selectors and purl namespace) and, for apt, its
+  sources: read from the image itself (`render --image <ref>`, which copies its os-release and
+  `/etc/apt` out without running it, §8.3), or declared per target (`--distro debian@bookworm
+  --like …`, §5.4, with a stock image's sources). Versions for a platform other than the
+  rendering machine's come from remote indexes (§4.7; apt so far), as `render --target`
+  resolves them (§8.3); a backend without one is rendered inside the base image, or from exact
+  specs.
 - **in-build execution inside that layer** is the alternative when the distro can't be known
   ahead of time: the generated layer `COPY`s the static bosun binary and runs
   `bosun install --yes`, which reads the real base's os-release.
@@ -1170,15 +1220,25 @@ RUN apt-get install -y "${FD_PACKAGE}=${FD_VERSION}"
   missing lock is an error naming `bosun lock`. Another platform's versions are resolved
   through remote indexes when the backend has one (§4.7), else rendering for it is an error.
 - **Another machine (DECIDED, built):** a target is another machine when its platform isn't
-  this machine's, or when `--distro` or `--libc` describes it (even on this platform: the
-  flags say the machine isn't this one). It is resolved fresh, the newest version each spec
-  allows, through each backend's remote index (§4.7); this machine's package managers and
-  lock are never read, and nothing is written. Its facts come from the flags only:
-  `--distro <id>[@<release>]` in selector form, the release spelled as the purl `distro`
-  qualifier (`debian@bookworm`, `ubuntu@noble`, `fedora@fedora-41`), with `ID_LIKE` from a
-  small table of known distros (Ubuntu is like Debian; Mint and Pop!_OS like Ubuntu and
-  Debian; RHEL, CentOS, Rocky, Alma and Amazon Linux like Fedora); `--libc <gnu|musl>[@<version>]`.
-  Without `--libc`, libc selectors don't match, and without `--distro` distro selectors don't;
+  this machine's, or when `--image`, `--rootfs`, `--distro` or `--libc` describes it (even on
+  this platform: the flags say the machine isn't this one). It is resolved fresh, the newest
+  version each spec allows, through each backend's remote index (§4.7); this machine's
+  installed packages, package sources and lock are never read, and nothing of them is written
+  (apt's index may run this machine's apt in a scratch root of its own, §4.7).
+- **The target's facts, from its image (DECIDED, built):** `--image <ref>` copies
+  `/etc/os-release`, `/usr/lib/os-release`, `/etc/apt` and `/usr/share/keyrings` out of the
+  image for each target platform (`podman`, else `docker`: `create --platform <target> <ref>`,
+  `cp`, `rm`; the container is never started; a path the image lacks is left out; logged with
+  the engine) into a temporary directory removed afterwards; `--rootfs <dir>` reads the same
+  files from a directory. The distro is its os-release's `ID`, `ID_LIKE`, `VERSION_ID` and
+  `VERSION_CODENAME`, and apt reads its sources, pins and keys (§4.7). Either excludes
+  `--distro` (and each other).
+- **Or from the flags:** `--distro <id>[@<release>]` in selector form, the release spelled as
+  the purl `distro` qualifier (`debian@bookworm`, `ubuntu@noble`, `fedora@fedora-41`), like
+  only the families `--like <id>,…` names (its `ID_LIKE`: `--distro ubuntu@noble --like
+  debian`; there is no built-in table, so without `--like` only the distro's own selectors
+  match); apt then reads a stock image's sources. `--libc <gnu|musl>[@<version>]`.
+  Without `--libc`, libc selectors don't match, and without a distro distro selectors don't;
   each is a warning when the manifest has such selectors, and an apt entry with no distro is an
   error saying to pass `--distro`. An entry whose acceptable backends have no remote index, or
   with nothing in its spec, is an error naming them. The installer preference is this machine's
@@ -1568,6 +1628,7 @@ under a pty on Unix only.
 | TV-3 | npm and PyPI ranges evaluated natively (`nodejs-semver` 7.0.0, `pep440_rs`); npm resolves locally with `npm pack --dry-run --json`, uv with `uv pip compile -` (stdin, new on `Command`) for `uv python find --system`; uv's if-necessary pre-release rule | landed; real tier in `node:22-bookworm-slim` (yarn `*` → 1.22.22, the `latest` tag, though 2.4.3 exists) and `python:3.9-slim` with uv 0.13.1 (black `*` → 25.11.0, the newest for Python 3.9) |
 | TV-4 | configured registries on this machine: npm `npm config get registry` / `@scope:registry`; cargo source replacement from its config files (cwd ancestors, `$CARGO_HOME`; `toml` 1.1.6), a git, local or vendored source an error; uv's index left to uv (no PyPI listing locally) | landed (unit tests) |
 | TV-5 | npm prefix writability by `access(2)` (no probe file), warned once when an install or uninstall step is planned | landed; real tier: root-installed semver accepted with no warning |
+| M3-8 | render reads the target from its image: `--image <ref>` (podman, else docker: create / cp / rm, never run) or `--rootfs <dir>` give os-release (`ID`, `ID_LIKE`, release) and apt sources (one-line and deb822, `deb` only, `Enabled: no` dropped, `arch=` honoured, flat repositories, vendor repositories included); stock sources only without them, logged; apt resolves with this machine's apt in a scratch root (`APT_CONFIG`, empty status, the target's arch, its pins and keys; no key: `Trusted: yes` over HTTPS in the scratch config only), bosun's own reading (apt's default priorities, `NotAutomatic` suites only for what nothing else has, pins warned of) without it; the `--distro` `ID_LIKE` table dropped for `--like` | landed; `--image` renders match `apt-cache policy` inside `debian:12`, `debian:13`, `ubuntu:22.04`, `ubuntu:24.04` (30 packages each), arm64 from amd64, and a derived `debian:12` with Docker's repository and a pin |
 | M2-10 | with no terminal, every confirm (install, uninstall, prune, remove, migrate) applies, still printing what it applies to stderr; `--yes` only skips a terminal's prompt | landed |
 | M2-11 | `status [path]` lists every claim on each package (manifest, spec, user, whether the manifest still exists); with no path, everything bosun manages on the machine; `install` records a `claim` on a package bosun installed for another project | landed |
 | M2-12 | release selectors `linux:<distro>@<release>`: the release is the purl `distro` value a block's backend gives this machine (deb codename, rpm `<ID>-<VERSION_ID>`); exact `ID` only | landed; checked in Debian 12/13 and Ubuntu 22.04/24.04 containers |
