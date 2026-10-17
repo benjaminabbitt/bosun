@@ -348,7 +348,8 @@ mod tests {
         assert!(r.contains(&a("1.7.1_p2-r3")));
         assert!(!r.contains(&a("1.7.1_rc1-r0")));
         assert!(!r.contains(&a("1.7.2_rc1-r0")));
-        assert!(r.mentions_prerelease());
+        // apk has no pre-release concept: `_alpha` is only an ordering.
+        assert!(!r.mentions_prerelease());
     }
 
     #[test]

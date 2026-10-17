@@ -163,20 +163,6 @@ pub(super) fn is_valid(raw: &str) -> bool {
     t.kind == Kind::End
 }
 
-/// Whether `raw` carries a pre-release suffix (`_alpha`, `_beta`, `_pre`,
-/// `_rc`), which sorts below the release.
-pub(super) fn is_prerelease(raw: &str) -> bool {
-    let mut tokens = Tokens::new(raw);
-    let mut t = tokens.first();
-    while t.kind < Kind::End {
-        if t.is_pre_release() {
-            return true;
-        }
-        t = tokens.next_token();
-    }
-    false
-}
-
 /// Two digit runs by value, however long.
 fn numeric(a: &str, b: &str) -> Ordering {
     let (a, b) = (a.trim_start_matches('0'), b.trim_start_matches('0'));
@@ -358,22 +344,6 @@ mod tests {
             "1.0_p1.2",
         ] {
             assert!(!is_valid(v), "{v:?} should be invalid");
-        }
-    }
-
-    #[test]
-    fn only_a_pre_release_suffix_makes_a_pre_release() {
-        for v in [
-            "1.0_alpha",
-            "1.0_beta2",
-            "1.0_pre",
-            "1.0_rc1-r0",
-            "1.0_p1_rc1",
-        ] {
-            assert!(is_prerelease(v), "{v}");
-        }
-        for v in ["1.0", "1.0_p1", "1.0_git20260101", "1.0a", "1.0~ab-r1"] {
-            assert!(!is_prerelease(v), "{v}");
         }
     }
 }

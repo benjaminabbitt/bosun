@@ -17,7 +17,7 @@ Feature: dnf installs and holds RPM packages on Fedora and the RHEL family
     Then it succeeds
     And the lock identifies jq as pkg:rpm/fedora/jq?arch=x86_64&distro=fedora-41
 
-  Scenario: versions order as rpm orders them: epoch first, pre-releases not chosen
+  Scenario: versions order as rpm orders them: epoch first, and a tilde build is chosen like any other
     Given a Fedora 41 amd64 machine, not elevated
     And dnf 5.2.17.0 is available
     And dnf publishes jq 2.0-1.fc41, 1:1.6-1.fc41 and 1:1.7~rc1-1.fc41
@@ -32,7 +32,7 @@ Feature: dnf installs and holds RPM packages on Fedora and the RHEL family
       """
     When I run `bosun lock .`
     Then it succeeds
-    And the lock pins jq 1:1.6-1.fc41
+    And the lock pins jq 1:1.7~rc1-1.fc41
 
   Scenario: bosun add writes a range over any release of the newest version
     Given a Fedora 41 amd64 machine, not elevated

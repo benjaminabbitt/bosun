@@ -5,7 +5,9 @@
 //! is no separate "exact" path. Selection is a single rule — **the highest
 //! available version in the set** — with one guard: a pre-release is never
 //! selected unless the spec itself names a pre-release (a constraint version
-//! is a pre-release, or the spec is a bare pre-release version).
+//! is a pre-release, or the spec is a bare pre-release version). Only the
+//! language schemes have pre-releases; Debian, RPM and Alpine versions have
+//! none (see [`Version::is_prerelease`]).
 //!
 //! There is no policy and no deviation: vers ranges subsume the old
 //! exact/range/tolerant distinction.
@@ -289,6 +291,39 @@ mod tests {
         // A spec naming a pre-release admits pre-releases.
         let named = Spec::new(">=1.1.0-rc1", "cargo").unwrap();
         assert_eq!(named.select(&available).unwrap().as_str(), "1.1.0-rc1");
+    }
+
+    #[test]
+    fn an_os_spec_selects_the_newest_build_the_repositories_carry() {
+        // No pre-release guard for OS schemes: apt, dnf and apk install a
+        // `~rc1` or `_rc1` build when it is the newest on offer.
+        let deb = vers(Scheme::Debian, &["2.10-3", "2.11~rc1-1"]);
+        assert_eq!(
+            Spec::new("*", "deb")
+                .unwrap()
+                .select(&deb)
+                .unwrap()
+                .as_str(),
+            "2.11~rc1-1"
+        );
+        let rpm = vers(Scheme::Rpm, &["2.0-1.fc41", "1:1.7~rc1-1.fc41"]);
+        assert_eq!(
+            Spec::new(">=1.6", "rpm")
+                .unwrap()
+                .select(&rpm)
+                .unwrap()
+                .as_str(),
+            "1:1.7~rc1-1.fc41"
+        );
+        let apk = vers(Scheme::Alpine, &["1.7.1-r10", "1.8.0_rc1-r0"]);
+        assert_eq!(
+            Spec::new(">=1.7", "apk")
+                .unwrap()
+                .select(&apk)
+                .unwrap()
+                .as_str(),
+            "1.8.0_rc1-r0"
+        );
     }
 
     #[test]

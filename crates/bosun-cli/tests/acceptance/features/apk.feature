@@ -3,7 +3,8 @@ Feature: apk installs Alpine packages at system scope
   Alpine's apk offers what its repositories carry: one version of a package
   per branch, so an exact version is only there while a configured branch
   still has it. Versions order as apk-tools orders them: a revision (`-r1`)
-  after the release, a pre-release suffix (`_rc1`) before it. The package is
+  after the release, a pre-release suffix (`_rc1`) before it, though apk, like
+  apt and dnf, installs such a build when its branch carries it. The package is
   identified as `pkg:apk/<ID>/<name>?arch=<apk arch>`, with no release in it:
   Alpine has no release selectors, so its entries use `linux:alpine`. An
   install pins the version in apk's world file, which is also the hold.
@@ -12,7 +13,7 @@ Feature: apk installs Alpine packages at system scope
     Given an Alpine 3.20.3 amd64 machine, not elevated
     And apk 2.14.4 is available
 
-  Scenario: the newest release is locked, never a pre-release
+  Scenario: the newest version the branch carries is locked, an _rc build too
     Given apk publishes jq 1.7.1-r0, 1.8.0_rc1-r0 and 1.7.1-r10
     And the manifest:
       """
@@ -25,7 +26,7 @@ Feature: apk installs Alpine packages at system scope
       """
     When I run `bosun lock .`
     Then it succeeds
-    And the lock pins jq 1.7.1-r10
+    And the lock pins jq 1.8.0_rc1-r0
     And the lock identifies jq as pkg:apk/alpine/jq?arch=x86_64
 
   Scenario: an absent package is planned to install, then hold

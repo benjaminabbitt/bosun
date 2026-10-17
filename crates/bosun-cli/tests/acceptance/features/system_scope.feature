@@ -40,3 +40,19 @@ Feature: accept, hold and privilege at system scope (apt)
     When I run `bosun --format json install . --yes`
     Then it succeeds
     And it says "applied"
+
+  Scenario: Debian has no pre-releases: the newest build apt offers is locked, a ~rc one too
+    Given a Debian trixie amd64 machine, not elevated
+    And apt publishes hello 2.10-3 and 2.11~rc1-1
+    And the manifest:
+      """
+      version: 2
+      packages:
+        - name: hello
+          spec: "*"
+          install:
+            linux:debian: {backend: apt}
+      """
+    When I run `bosun lock .`
+    Then it succeeds
+    And the lock pins hello 2.11~rc1-1
