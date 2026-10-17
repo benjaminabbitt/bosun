@@ -1,9 +1,10 @@
 Feature: real backends against a disposable container
 
   Each tag names a program the scenario needs on `PATH`: its package
-  manager (`@apt-get`, `@dnf`, `@apk`; `@dnf-3` only under dnf4), or
-  `useradd` and `runuser` to act as a non-root user. So one feature serves
-  Debian, Fedora, RHEL-family and Alpine containers.
+  manager (`@apt-get`, `@dnf`, `@apk`, `@npm`, `@uv`; `@dnf-3` only under
+  dnf4), or `useradd` and `runuser` to act as a non-root user. So one feature
+  serves Debian, Fedora, RHEL-family and Alpine containers, and any of them
+  with Node or uv.
 
   @apt-get
   Scenario: apt installs and holds a package, then prune removes and unholds it
@@ -256,3 +257,68 @@ Feature: real backends against a disposable container
     When I run `bosun lock .`
     Then it fails
     And it reports "unsatisfiable"
+
+  # npm is user scope, so it runs as a non-root user (§5.5). A system Node's
+  # own prefix is root's, so global installs go under ~/.local.
+  @npm @useradd @runuser
+  Scenario: npm installs a tool into the user's prefix, moves it down, and prune removes it
+    Given the manifest:
+      """
+      version: 2
+      packages:
+        - name: semver
+          spec: "7.6.0"
+          install: {backend: npm}
+      """
+    And a non-root user owns the project
+    When the non-root user runs `bosun install . --yes`
+    Then it succeeds
+    And the binary semver exists and is executable
+    And npm lists semver 7.6.0 under ~/.local
+    When the manifest becomes:
+      """
+      version: 2
+      packages:
+        - name: semver
+          spec: "7.5.0"
+          install: {backend: npm}
+      """
+    And the non-root user runs `bosun install . --yes`
+    Then it succeeds
+    And npm lists semver 7.5.0 under ~/.local
+    When the manifest is deleted
+    And the non-root user runs `bosun prune --yes`
+    Then it succeeds
+    And the binary semver does not exist
+
+  # uv is user scope too; it places tools' executables in ~/.local/bin.
+  @uv @useradd @runuser
+  Scenario: uv installs a tool, moves it down, and prune removes it
+    Given the manifest:
+      """
+      version: 2
+      packages:
+        - name: ruff
+          spec: "0.6.9"
+          install: {backend: uv}
+      """
+    And a non-root user owns the project
+    When the non-root user runs `bosun install . --yes`
+    Then it succeeds
+    And the binary ruff exists and is executable
+    And uv lists ruff 0.6.9
+    When the manifest becomes:
+      """
+      version: 2
+      packages:
+        - name: ruff
+          spec: "0.6.8"
+          install: {backend: uv}
+      """
+    And the non-root user runs `bosun install . --yes`
+    Then it succeeds
+    And uv lists ruff 0.6.8
+    When the manifest is deleted
+    And the non-root user runs `bosun prune --yes`
+    Then it succeeds
+    And the binary ruff does not exist

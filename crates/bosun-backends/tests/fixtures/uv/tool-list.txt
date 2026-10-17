@@ -1,0 +1,11 @@
+black v24.1a1
+- black
+- blackd
+django-upgrade v1.20.0
+- django-upgrade
+httpie v3.2.3
+- http
+- httpie
+- https
+ruff v0.6.8
+- ruff

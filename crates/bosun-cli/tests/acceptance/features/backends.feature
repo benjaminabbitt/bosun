@@ -32,3 +32,11 @@ Feature: bosun backends lists the backends available on this host
     When I run `bosun --format text backends`
     Then it succeeds
     And it lists apk as skipped: not present
+
+  Scenario: a machine without npm or uv skips them as not present
+    Given the machine has no npm
+    And the machine has no uv
+    When I run `bosun --format text backends`
+    Then it succeeds
+    And it lists npm as skipped: not present
+    And it lists uv as skipped: not present

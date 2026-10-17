@@ -1,5 +1,5 @@
 //! Real-backend acceptance (§11, tier 2): runs the real `bosun` binary against
-//! real apt / dnf / apk / github-release, **mutating the container**. Guarded
+//! real apt / dnf / apk / npm / uv / github-release, **mutating the container**. Guarded
 //! twice — it refuses to run unless `BOSUN_ACCEPTANCE_REAL=1` *and* a container marker is
 //! present — so `cargo test --workspace` (which builds and runs this binary)
 //! stays hermetic and a developer cannot run it on a workstation by mistake.
@@ -9,7 +9,8 @@
 //! temp dir); system-scope apt/dnf/apk state lives at its real
 //! `/var/lib/bosun` path, cleaned at the start of each system scenario. Each
 //! tag names a program the scenario needs on `PATH` (`@apt-get`, `@dnf`,
-//! `@dnf-3` for dnf4, `@apk`, `@useradd @runuser`); it runs only where all are.
+//! `@dnf-3` for dnf4, `@apk`, `@npm`, `@uv`, `@useradd @runuser`); it runs
+//! only where all are.
 
 use std::fs;
 #[cfg(unix)]
@@ -458,6 +459,39 @@ fn binary_executable(w: &mut RealWorld, name: String) {
         "{} not executable",
         path.display()
     );
+}
+
+#[then(expr = "the binary {word} does not exist")]
+fn binary_gone(w: &mut RealWorld, name: String) {
+    let path = w.bin_dir().join(&name);
+    assert!(!path.exists(), "{} still exists", path.display());
+}
+
+/// `npm ls -g` under the user's `~/.local` prefix names `pkg` at `version`.
+#[then(expr = "npm lists {word} {word} under ~\\/.local")]
+fn npm_lists(w: &mut RealWorld, pkg: String, version: String) {
+    let prefix = w.home().join(".local").display().to_string();
+    let (code, out) = run(
+        "npm",
+        &["ls", "-g", "--depth=0", "--json", "--prefix", &prefix],
+    );
+    assert_eq!(code, 0, "npm ls: {out}");
+    let ls: serde_json::Value = serde_json::from_str(&out).expect("npm ls --json");
+    assert_eq!(
+        ls["dependencies"][&pkg]["version"],
+        version.as_str(),
+        "npm ls:\n{out}"
+    );
+}
+
+/// `uv tool list`, for the non-root user's home, names `pkg` at `version`.
+#[then(expr = "uv lists {word} {word}")]
+fn uv_lists(w: &mut RealWorld, pkg: String, version: String) {
+    let home = format!("HOME={}", w.home().display());
+    let (code, out) = run("env", &[&home, "uv", "tool", "list"]);
+    assert_eq!(code, 0, "uv tool list: {out}");
+    let want = format!("{pkg} v{version}");
+    assert!(out.lines().any(|l| l == want), "uv tool list:\n{out}");
 }
 
 #[then("the bin dir has no temp files")]

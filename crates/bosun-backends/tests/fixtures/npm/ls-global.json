@@ -1,0 +1,17 @@
+{
+  "name": "lib",
+  "dependencies": {
+    "@types/semver": {
+      "version": "7.5.8",
+      "overridden": false
+    },
+    "cowsay": {
+      "version": "1.6.0",
+      "overridden": false
+    },
+    "semver": {
+      "version": "7.6.0",
+      "overridden": false
+    }
+  }
+}

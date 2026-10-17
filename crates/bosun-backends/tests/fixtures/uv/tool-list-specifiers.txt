@@ -1,0 +1,9 @@
+black v24.1a1 [required: ==24.1a1]
+- black
+- blackd
+localtool v0.1.0 [required: file:///tmp/localtool]
+- localtool
+pycowsay v0.0.0.2
+- pycowsay
+ruff v0.6.9 [required: ==0.6.9] [with: six]
+- ruff

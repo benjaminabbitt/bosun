@@ -216,7 +216,8 @@ pub struct FixtureInstaller {
 /// own apt and cargo parsers through a [`HandRunner`].
 #[derive(Clone)]
 pub struct HandRecord {
-    /// The backend id, which picks the parser (`apt`, `cargo`, `apk`); any other
+    /// The backend id, which picks the parser (`apt`, `cargo`, `apk`, `npm`,
+    /// `uv`); any other
     /// keeps no record.
     pub backend: String,
     /// What the user installed, by native id.
@@ -227,8 +228,9 @@ pub struct HandRecord {
 
 /// Answers the commands a backend reads its user installs with — `apt-mark
 /// showmanual`, `dpkg-query -W -f=… <names>`, `cargo install --list`, the
-/// apk world file and `apk info -e -v <names>` — from a [`HandRecord`] and
-/// what the fixture machine has installed now.
+/// apk world file and `apk info -e -v <names>`, `npm ls -g --json` and `uv
+/// tool list` — from a [`HandRecord`] and what the fixture machine has
+/// installed now.
 struct HandRunner {
     installed: BTreeMap<String, String>,
     record: HandRecord,
@@ -277,6 +279,20 @@ impl CommandRunner for HandRunner {
                 // apk exits with the number of names it did not find.
                 ((names.len() - lines.len()) as i32, lines.concat())
             }
+            ("npm", ["ls", "-g", "--depth=0", "--json", "--prefix", _]) => {
+                let dependencies: serde_json::Map<String, serde_json::Value> = self
+                    .present()
+                    .map(|(n, v)| (n.clone(), serde_json::json!({ "version": v })))
+                    .collect();
+                let ls = serde_json::json!({ "name": "lib", "dependencies": dependencies });
+                (0, ls.to_string())
+            }
+            ("uv", ["tool", "list", "--show-version-specifiers"]) => (
+                0,
+                self.present()
+                    .map(|(n, v)| format!("{n} v{v} [required: =={v}]\n- {n}\n"))
+                    .collect(),
+            ),
             ("cargo", ["install", "--list"]) => (
                 0,
                 self.present()
@@ -389,6 +405,12 @@ impl Installer for FixtureInstaller {
             "apt" => bosun_backends::apt::user_installs(&runner),
             "cargo" => bosun_backends::cargo::user_installs(&runner),
             "apk" => bosun_backends::apk::user_installs(&runner),
+            "npm" => bosun_backends::npm::user_installs(
+                &runner,
+                "npm",
+                std::path::Path::new("/home/tester/.local"),
+            ),
+            "uv" => bosun_backends::uv::user_installs(&runner),
             _ => Ok(UserInstalls::Unsupported),
         }
     }

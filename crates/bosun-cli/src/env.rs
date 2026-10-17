@@ -13,7 +13,8 @@ use std::sync::Arc;
 use bosun_apply::{ApplyReport, Driver, HostApplier, Plan};
 use bosun_backends::{
     AptFactory, CargoFactory, ChocoFactory, DnfFactory, GithubInstallerFactory,
-    GithubPackageFactory, GithubReleaseFactory, PackageKind, ScoopFactory, WingetFactory,
+    GithubPackageFactory, GithubReleaseFactory, NpmFactory, PackageKind, ScoopFactory, UvFactory,
+    WingetFactory,
 };
 use bosun_core::vers::scheme_for_type;
 use bosun_core::version::Scheme;
@@ -310,11 +311,10 @@ pub fn remote(os: Os, arch: Arch, libc: Option<LibcFamily>) -> Result<RemoteEnv,
         Some((fixture, state_dir)) => remote_from_fixture(&fixture, &state_dir, os, arch, libc),
         None => {
             let fetcher: Arc<dyn HttpFetcher> = Arc::new(UreqHttpFetcher::new());
-            let bin_dir = user_bin_dir(&home_dir());
             let factories = compiled_in_factories(
                 Arc::new(NoPrograms),
                 fetcher,
-                bin_dir,
+                &home_dir(),
                 os,
                 arch,
                 libc,
@@ -361,7 +361,7 @@ fn remote_from_fixture(
     let factories = compiled_in_factories(
         Arc::new(NoPrograms),
         canned_fetcher(&fx.http)?,
-        user_bin_dir(&PathBuf::from(state_dir).join("home")),
+        &PathBuf::from(state_dir).join("home"),
         os,
         arch,
         libc,
@@ -463,13 +463,14 @@ fn system_cache() -> PathBuf {
     }
 }
 
-/// Every compiled-in backend factory, built (not probed). The schemes map is
-/// taken from these so a backend absent this run is still known (§6). `cache`
-/// is where remote indexes keep what they fetch (§4.7).
+/// Every compiled-in backend factory, built (not probed), for a user whose
+/// home is `home`. The schemes map is taken from these so a backend absent
+/// this run is still known (§6). `cache` is where remote indexes keep what
+/// they fetch (§4.7).
 fn compiled_in_factories(
     runner: Arc<dyn CommandRunner>,
     fetcher: Arc<dyn HttpFetcher>,
-    bin_dir: PathBuf,
+    home: &Path,
     os: Os,
     arch: Arch,
     libc: Option<LibcFamily>,
@@ -495,7 +496,17 @@ fn compiled_in_factories(
         Box::new(DnfFactory::new(runner.clone())),
         Box::new(bosun_backends::ApkFactory::new(runner.clone())),
         Box::new(CargoFactory::new(runner.clone(), fetcher.clone())),
-        Box::new(GithubReleaseFactory::new(fetcher.clone(), bin_dir, os, arch).with_libc(libc)),
+        Box::new(NpmFactory::new(
+            runner.clone(),
+            fetcher.clone(),
+            home.to_path_buf(),
+            os,
+        )),
+        Box::new(UvFactory::new(runner.clone(), fetcher.clone())),
+        Box::new(
+            GithubReleaseFactory::new(fetcher.clone(), user_bin_dir(home), os, arch)
+                .with_libc(libc),
+        ),
         package(PackageKind::Deb),
         package(PackageKind::Rpm),
         Box::new(WingetFactory::new(runner.clone())),
@@ -610,11 +621,10 @@ fn from_host() -> Result<Env, CliError> {
         _ => (None, None),
     };
     let fetcher: Arc<dyn HttpFetcher> = Arc::new(UreqHttpFetcher::new());
-    let bin_dir = user_bin_dir(&home_dir());
     let factories = compiled_in_factories(
         runner.clone(),
         fetcher.clone(),
-        bin_dir,
+        &home_dir(),
         os,
         arch,
         libc.as_ref().map(|l| l.family),
@@ -799,7 +809,7 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
     let mut option_keys = factory_option_keys(&compiled_in_factories(
         fake_runner,
         fetcher.clone(),
-        bin_dir.clone(),
+        &home,
         os,
         arch,
         family,
@@ -808,7 +818,7 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
     for b in &backends {
         option_keys.entry(b.id.as_str().to_string()).or_default();
     }
-    let skipped = absent_backends(&fx.absent, fetcher.clone(), &bin_dir, &cache_dir, os, arch)?;
+    let skipped = absent_backends(&fx.absent, fetcher.clone(), &home, &cache_dir, os, arch)?;
     let store = FileStateStore::new(system.clone(), user.clone(), schemes.clone());
     let lock_dir = bosun_io::paths::locks_beside(&user);
     let machine = FakeMachine {
@@ -850,25 +860,18 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
 fn absent_backends(
     absent: &[String],
     fetcher: Arc<dyn HttpFetcher>,
-    bin_dir: &Path,
+    home: &Path,
     cache: &Path,
     os: Os,
     arch: Arch,
 ) -> Result<Vec<Skipped>, CliError> {
     let no_programs: Arc<dyn CommandRunner> =
         Arc::new(bosun_ports::testing::FakeCommandRunner::new());
-    let factories: Vec<_> = compiled_in_factories(
-        no_programs.clone(),
-        fetcher,
-        bin_dir.to_path_buf(),
-        os,
-        arch,
-        None,
-        cache,
-    )
-    .into_iter()
-    .filter(|f| absent.iter().any(|id| id == f.id().as_str()))
-    .collect();
+    let factories: Vec<_> =
+        compiled_in_factories(no_programs.clone(), fetcher, home, os, arch, None, cache)
+            .into_iter()
+            .filter(|f| absent.iter().any(|id| id == f.id().as_str()))
+            .collect();
     if let Some(unknown) = absent
         .iter()
         .find(|id| !factories.iter().any(|f| f.id().as_str() == id.as_str()))
@@ -1023,7 +1026,7 @@ mod tests {
         let factories = compiled_in_factories(
             runner,
             fetcher,
-            PathBuf::from("/tmp/bin"),
+            Path::new("/home/u"),
             Os::Linux,
             Arch::Amd64,
             None,
@@ -1034,6 +1037,8 @@ mod tests {
         assert_eq!(schemes.get("dnf"), Some(&Scheme::Rpm));
         assert_eq!(schemes.get("apk"), Some(&Scheme::Alpine));
         assert_eq!(schemes.get("cargo"), Some(&Scheme::Semver));
+        assert_eq!(schemes.get("npm"), Some(&Scheme::Semver));
+        assert_eq!(schemes.get("uv"), Some(&Scheme::Pep440));
         assert_eq!(schemes.get("github-release"), Some(&Scheme::Semver));
     }
 
@@ -1044,7 +1049,7 @@ mod tests {
         let factories = compiled_in_factories(
             runner,
             fetcher,
-            PathBuf::from("/tmp/bin"),
+            Path::new("/home/u"),
             Os::Linux,
             Arch::Amd64,
             None,

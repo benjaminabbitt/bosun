@@ -543,7 +543,7 @@ universal-app → install the channel or commit, then hold.
 
 snap and flatpak are heavily used on desktop Linux (snap ships by default on Ubuntu, flatpak
 with Flathub on Fedora Workstation, Linux Mint and SteamOS), but they wait until wanted, as do
-pacman, zypper, `go install` and gem; the next backends are dnf, apk, npm and uv, then brew
+pacman, zypper, `go install` and gem; dnf, apk, npm and uv are built, and brew is next
 (§13). The mechanics in the snap/flatpak row are unverified.
 
 Properties worth designing around:
@@ -954,7 +954,8 @@ both (the grammars are small).
     (`1.10 > 1.9`), (2) a pre-release chunk *lowers* precedence (`1.0rc1 < 1.0`; Debian `~` sorts
     before empty), (3) arity/missing chunks need a defined rule (pad-zero vs rank-lowest, absent
     epoch = 0).
-  - Reference impls to depend on where possible: `deb-version`, `semver`, a PEP 440 crate.
+  - Reference impls to depend on where possible: `deb-version`, `semver`, `pep440_rs` (PEP 440,
+    vers type `pypi`).
     RPM (`rpmvercmp`) and Alpine (apk-tools) ordering are bosun's own, tested against each
     tool's reference cases. Reserve the custom regex-chunk path for the long tail.
   - Go pseudo-versions (`v0.0.0-TIMESTAMP-hash`) validate the model — they order by the embedded
@@ -1405,13 +1406,13 @@ committed; the real host install is the user's to run (`bosun install`, then
 **Since M1** (the M2 and M3 slices below): manifest version 2, the per-machine lock, `add` /
 `remove` / `migrate` / `upgrade` / `export`, more github release kinds, Windows (hermetic only),
 apply without a terminal, claims in `status`, Linux breadth: release selectors and libc
-(§5.4), dnf and apk, and `render` (§8.3) with apt's remote index (§4.7). `just test` runs 793
+(§5.4), dnf and apk, npm and uv, and `render` (§8.3) with apt's remote index (§4.7). `just test` runs 793
 tests and 184 scenarios.
 
 **Next, in order.**
 
-1. **Containers and language backends:** `Containerfile.bosun` (§8.2) on `render`'s
-   resolution, npm and uv (and their remote indexes); dnf's and apk's remote indexes.
+1. **Containers:** `Containerfile.bosun` (§8.2) on `render`'s resolution; npm's and uv's
+   remote indexes; dnf's and apk's remote indexes. (npm and uv are built: M3-7.)
 2. **macOS, and Windows on a real host:** the macOS machine, brew (research first), and
    verifying scoop, winget, choco and github-installer on Windows.
 
@@ -1472,6 +1473,7 @@ under a pty on Unix only.
 | M3-4 | `bosun render args\|env\|json [path]` for this machine, from its lock (missing or stale: an error naming `bosun lock`); variable stems from the logical name or the entry's `var` (manifest key, checked at load), clashes and digit-led stems refused; the build-args driver is `bosun_apply::render` | landed |
 | M3-5 | apt's remote index (§4.7): a release's suites from its mirror over HTTPS (Debian and Ubuntu defaults, as stock images list them), `InRelease` → package index hash chain (by hash), signature not verified (seam `ReleaseSignature`, warned), cached under the user cache dir (`InRelease` an hour, indexes while their hash holds); `BackendFactory::remote_index` (apt, cargo, github-release, github-deb, github-rpm) | landed; unit tests over trimmed real Debian 12 captures; same candidates as `apt-cache policy` in `debian:12`, `debian:13` and `ubuntu:24.04` |
 | M3-6 | `render args\|env --target <platform>`, `render json --targets a,b`, `--distro <id>[@<release>]`, `--libc <family>[@<version>]`: another machine is resolved fresh through remote indexes with a runner that runs nothing; a backend without one is an error naming it; missing distro or libc facts are warned about. Debian pre-releases are `~` before a pre-release tag (`~deb12u1`, `~bpo`, `~24.04.1` are releases) | landed |
+| M3-7 | npm and uv backends (user scope, platform-independent, no hold): npm registry abbreviated metadata / `npm install -g --prefix` / `npm ls -g --json`; PyPI JSON API / `uv tool install name==ver` / `uv tool list`; export from each; PEP 440 ordering (`pep440_rs`, vers `pypi`, conformance suites run); `npm` and `pypi` purls must-pass | landed; real tier in `node:22-slim` with uv 0.13.1 (semver 7.6.0 → 7.5.0 → pruned; ruff 0.6.9 → 0.6.8 → pruned) |
 | M2-10 | with no terminal, every confirm (install, uninstall, prune, remove, migrate) applies, still printing what it applies to stderr; `--yes` only skips a terminal's prompt | landed |
 | M2-11 | `status [path]` lists every claim on each package (manifest, spec, user, whether the manifest still exists); with no path, everything bosun manages on the machine; `install` records a `claim` on a package bosun installed for another project | landed |
 | M2-12 | release selectors `linux:<distro>@<release>`: the release is the purl `distro` value a block's backend gives this machine (deb codename, rpm `<ID>-<VERSION_ID>`); exact `ID` only | landed; checked in Debian 12/13 and Ubuntu 22.04/24.04 containers |
@@ -1611,13 +1613,35 @@ Command-level reference for the five researched backends. (apt, dnf, apk, uv, np
 - Repositories need their signing key in `/etc/apk/keys` as well as a URL, so bosun
   configures none; `ensure_source` adds no step.
 
-### uv (Python)
+### uv (Python; built and checked 2026-10-16 with uv 0.13.1)
 - Project: `pyproject.toml` `==` specifiers + `uv.lock` (true lockfile). `uv add 'pkg==X'`,
   `uv lock [--check|--upgrade|--upgrade-package pkg==X]`, `uv sync [--frozen|--locked|--inexact]`
   (exact-by-default: removes unlisted).
 - Tools (binaries): `uv tool install pkg==X` (own venv, symlinked bins); `uv tool upgrade` stays
   within the install-time constraint; `uvx pkg@version` ephemeral.
 - pip surface: `uv pip install 'pkg==X'` (no lockfile on this path).
+- What bosun drives (backend `uv`, user scope, purl `pkg:pypi/<name>`, vers `pypi`):
+  - Discover: PyPI's JSON API, `https://pypi.org/pypi/<name>/json`, `releases` (version → its
+    files); a release with no files, or with every file yanked, is left out, as is a version
+    outside PEP 440. An unknown project is a 404. (uv may be pointed at another index; bosun
+    asks PyPI.)
+  - Install exact / up / down: `uv tool install <name>==<version>`. With another version
+    installed it uninstalls that and installs this one; with this one installed it prints
+    "`<name>==<version>` is already installed" and exits 0.
+  - Installed: `uv tool list` prints `<name> v<version>` per tool (the name PEP 503-normalized:
+    `Django_Upgrade` → `django-upgrade`), then `- <executable>` lines; `No tools installed`
+    when empty; a broken tool environment is a warning on stderr and the tool is not listed.
+  - Executables go to `~/.local/bin` unless `UV_TOOL_BIN_DIR` / `XDG_BIN_HOME` say otherwise
+    (the `ghcr.io/astral-sh/uv` images set `UV_TOOL_BIN_DIR=/usr/local/bin`).
+  - Remove: `uv tool uninstall <name>` (exits 2 when it is not installed).
+  - No hold: re-asserted each run.
+  - What the user asked for (export): `uv tool list --show-version-specifiers` adds
+    `[required: ==0.6.9]` (and `[with: six]`); a tool installed from a directory or URL shows
+    `[required: file:///…]` and is left out.
+  - Versions: PEP 440, ordered by `pep440_rs` (`1.0.dev1 < 1.0a1 < 1.0rc1 < 1.0 < 1.0+local <
+    1.0.post1`, `1.0 == 1.0.0`, epochs first). Alpha, beta, rc and dev releases are
+    pre-releases; post-releases are not. `bosun add` writes the caret range over the release
+    numbers (`0.6.9` → `>=0.6.9|<0.7.0`, `3.2.3` → `>=3.2.3|<4.0.0`).
 
 ### npm (Node)
 - Manifest: bare `"1.2.3"` = exact; `^`/`~`/x-ranges otherwise (default save = `^`). Force exact:
@@ -1626,6 +1650,26 @@ Command-level reference for the five researched backends. (apt, dnf, apk, uv, np
   lock; errors on mismatch; never writes package.json/lock; wipes node_modules).
 - Install exact: `npm i <name>@<version>`; downgrade is just an install of a lower version.
 - Global tools: `npm i -g pkg@version` — **no lockfile, no durable pin** (weakest tier).
+- What bosun drives (backend `npm`, user scope, purl `pkg:npm/[%40scope/]<name>`, vers `npm` =
+  SemVer; built and checked 2026-10-16 with npm 10.9.9 in `node:22-slim`):
+  - Discover: `https://registry.npmjs.org/<name>` (a scope's `/` as `%2F`) with `Accept:
+    application/vnd.npm.install-v1+json` (abbreviated metadata); every key of `versions` that
+    is SemVer. An unknown package is a 404.
+  - Prefix: global installs go under npm's configured prefix (`npm config get prefix`) when
+    it lies in the user's home (nvm, fnm, `~/.npm-global`, `%APPDATA%\npm`), else under
+    `~/.local`, whose `bin` is bosun's user bin dir: a system Node's prefix (`/usr/local`) is
+    root's, and a non-root `npm i -g` there fails with EACCES. Every command names it with
+    `--prefix`; the choice is logged.
+  - Install exact / up / down: `npm install -g --prefix <p> <name>@<version>` ("changed N
+    packages" when moving an installed one).
+  - Installed: `npm ls -g --depth=0 --json --prefix <p>` → `dependencies.<name>.version`. A
+    prefix npm has not yet installed into exits 254 with `{"error": {"code": "ENOENT"}}`:
+    nothing installed. npm exits 1 when the tree has problems but still lists it.
+  - Remove: `npm uninstall -g --prefix <p> <name>` (exits 0 even when absent).
+  - No hold: re-asserted each run.
+  - What the user asked for (export): the same listing, less `npm` and `corepack`, which
+    Node ships in its own prefix.
+  - On Windows the program is `npm.cmd`.
 
 ### winget, scoop, Chocolatey (Windows; built 2026-10-15, unverified on a real host)
 

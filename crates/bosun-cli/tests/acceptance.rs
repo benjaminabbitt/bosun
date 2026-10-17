@@ -88,6 +88,20 @@ fn known_backend(id: &str) -> BackendMeta {
             scope: "user",
             supports_hold: false,
         },
+        "npm" => BackendMeta {
+            purl_type: "npm",
+            vers_type: "npm",
+            platform_independent: true,
+            scope: "user",
+            supports_hold: false,
+        },
+        "uv" => BackendMeta {
+            purl_type: "pypi",
+            vers_type: "pypi",
+            platform_independent: true,
+            scope: "user",
+            supports_hold: false,
+        },
         "github-release" => BackendMeta {
             purl_type: "github",
             vers_type: "semver",

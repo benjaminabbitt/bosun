@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "ENOENT",
+    "summary": "ENOENT: no such file or directory, lstat '/tmp/p'",
+    "detail": "This is related to npm not being able to find a file."
+  }
+}

@@ -53,3 +53,15 @@ pub const APT_SUITE_ABSENT: &str = "apt suite not on the mirror; skipped";
 
 /// A suite lists no package index for a component and arch; skipped.
 pub const APT_NO_INDEX_LISTED: &str = "apt suite lists no package index for it; skipped";
+
+/// Where npm global installs go for this user: npm's own prefix when it is in
+/// the user's home, else `~/.local`.
+pub const NPM_PREFIX: &str = "npm installs globally under this prefix";
+
+/// A global package Node ships itself (npm, corepack), not one the user
+/// installed; it is left out of the export.
+pub const NPM_BUNDLED_LEFT_OUT: &str = "npm package Node ships left out of the export";
+
+/// A uv tool installed from a path or URL, not PyPI, which bosun installs
+/// from; it is left out of the export.
+pub const NOT_FROM_PYPI: &str = "uv tool not from PyPI left out of the export";
