@@ -87,3 +87,22 @@ Feature: install, upgrade and cross-claim resolution at user scope (cargo)
     When I run `bosun prune --yes`
     Then it succeeds
     And bosun has recorded ripgrep 14.1.1
+
+  # The lock follows what was installed: when another project's claim makes
+  # bosun install a version this project's lock does not pin, the lock pins
+  # the installed one once the install succeeds.
+  Scenario: another project's claim moves this project's lock to the version installed
+    Given cargo publishes ripgrep 14.0.0, 14.0.3 and 14.1.1
+    When I run `bosun lock .`
+    Then the lock pins ripgrep 14.1.1
+    Given bosun installed ripgrep 14.0.0 for another project wanting ">=14.0.0|<14.1.0"
+    When I run `bosun --format json install . --plan`
+    Then the plan's actions are "upgrade ripgrep"
+    And the lock pins ripgrep 14.1.1
+    When I run `bosun --format json install . --yes`
+    Then it succeeds
+    And bosun has recorded ripgrep 14.0.3
+    And the lock pins ripgrep 14.0.3
+    When I run `bosun --format json install . --frozen --plan`
+    Then it succeeds
+    And the plan's actions are none

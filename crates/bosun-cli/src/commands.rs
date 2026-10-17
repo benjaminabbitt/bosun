@@ -695,8 +695,10 @@ pub(crate) struct PendingLock {
 }
 
 impl PendingLock {
-    /// Pin each `(name, target, version)` the package manager moved the
-    /// package to, so the lock follows what is installed (§4.6).
+    /// Pin each `(name, target, version)` the install ends the package at
+    /// where that is not the lock's pin (the package manager moved it, or
+    /// every claim's intersection chose another), so the lock follows what is
+    /// installed (§4.6).
     fn follow(&mut self, followed: &[(String, Target, Version)]) {
         for (name, target, version) in followed {
             let leaf = self
@@ -1157,7 +1159,9 @@ fn managed_from_resolution<'a>(
                     &vers_type,
                     resolved,
                 );
-                if moved_from.is_some() && resolved != leaf.resolved {
+                // The lock follows what the plan ends at: the package manager's
+                // move, or another claim's intersection choosing elsewhere.
+                if resolved != leaf.resolved {
                     followed.push((entry.name.clone(), *target, resolved.clone()));
                 }
                 let checksum = (resolved == leaf.resolved)
@@ -1194,7 +1198,8 @@ fn managed_from_resolution<'a>(
 
 /// What [`managed_from_resolution`] decided: the packages to plan for, the
 /// diagnostics resolution carried, and each package whose end version follows
-/// the package manager's move rather than the lock, by name and target.
+/// the package manager's move or every claim's choice rather than the lock,
+/// by name and target.
 struct Resolved<'a> {
     managed: Vec<Managed<'a>>,
     carried: Vec<Diagnostic>,

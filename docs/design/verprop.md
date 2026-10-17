@@ -353,6 +353,11 @@ Only the header and the per-target leaf fields differ:
   resolving a shared tool for the first time therefore locks the installed version rather than
   bumping it, and `bosun upgrade` is how a project moves it. Only `install --frozen` holds a
   claim to its lock's exact version, and refuses on a clash with another claim.
+- **The lock follows what was installed (DECIDED, built).** When other claims make `install`
+  end a package at a version this project's lock does not pin (the pin is outside their
+  intersection), the lock pins the version installed, written once the install succeeds, so
+  `install --frozen` afterwards changes nothing. A declined or failed install leaves the lock
+  as it was.
 
 **Multiple OS users.** Claims in the *system* state file also record the claiming user
 (`"user": "babbitt"` alongside `manifest`), so prune and conflict checks in one user's project
@@ -1711,6 +1716,7 @@ under a pty on Unix only.
 | TV-11 | apt scratch roots pruned by age: `used` stamped on each write, `updated` on each successful update; `prune_scratch` removes roots idle for `SCRATCH_MAX_AGE` (30 days) once a run, when the remote index first reads through apt | landed (unit tests with file times set back) |
 | TV-12 | `render --image` never changes the local image store: `create --pull=never --platform <target>`; an image missing locally or held for another platform is an error naming `<engine> pull --platform <target> <ref>` | landed; podman 5.4 with amd64-only `debian:12`: `--target linux/arm64` errors with the pull, amd64 renders, the store unchanged; docker 29 refuses a platform mismatch under `--pull=never` the same way |
 | TV-13 | without elevation, system-scope `accept`, `claim` and `drop-claim` are left out of `install`, `uninstall` and `prune` as `deferred` notes (`defer_system_records`), reported by apply, so user-scope actions in the same plan apply; `remove <name>` keeps needing elevation for them | landed; scenarios: a mixed apt/cargo manifest with root's system state installs ripgrep, defers claim jq and accept tree, and leaves the system state unchanged; a non-elevated prune defers its drop-claim |
+| TV-14 | the lock follows what was installed: when every claim's intersection ends a package at a version other than this project's pin, the pending lock pins it and is written after a successful apply | landed; scenario: lock pins ripgrep 14.1.1, another project's `<14.1.0` claim upgrades it to 14.0.3, the lock then pins 14.0.3 and `install --frozen --plan` plans nothing; red before: the lock kept 14.1.1 |
 
 **First real-host smoke run (2026-10-14, release build, Debian 13, read-only `--plan` and
 `lock` in a scratch dir).** `backends` found apt 3.0.3, cargo 1.96.1 and github-release; jq
