@@ -73,12 +73,15 @@ becomes a *feature* here (see container-inject), so budget musl static builds ea
 ```
 manifest  ──►  resolver  ──►  lock  ──►  drivers
 (vers spec    (ordering +    (resolved   (host-apply | container-inject | …)
- + purl per    availability:  versions,
- entry)        highest in set) per target)
+ + purl per    the package    versions,
+ entry)        manager's      per target)
+               choice in set)
 ```
 
 - **manifest** — declarative; per-entry vers spec and per-backend install selectors (§5.6).
-- **resolver** — queries available versions, applies ordering, selects the highest in each spec's set.
+- **resolver** — asks each backend's package manager for its choice within each spec's set
+  (apt's and dnf's priorities, npm's and uv's own resolution, else the highest available
+  version, §5.6).
 - **lock** — the resolved versions, the single source of truth both drivers
   consume. Deterministic/sorted output (good for diffing and Docker layer caching).
 - **drivers** — apply the lock to a target. "Apply to host" and "inject into a container build"
@@ -94,7 +97,7 @@ real to check later):
 | `bosun-core` | domain: `Version`, `Segment` + `Ord`, `Spec` (vers), `Purl`, `Entry`, `Resolution`. Pure, no I/O. |
 | `bosun-ports` | traits: `Index`, `Installer`, `Driver`, `StateStore` |
 | `bosun-backends` | adapters: apt, dnf, pacman, zypper, apk, snap, flatpak, brew, scoop, winget, cargo, go, npm, uv, pipx, gem, github-release (§12) |
-| `bosun-resolve` | manifest + `Index` queries → lock (ordering; highest in set) |
+| `bosun-resolve` | manifest + `Index` queries → lock (ordering; the package manager's choice in the set) |
 | `bosun-io` | manifest and user config (YAML via `annals-yaml`, comment-preserving edits) and lock/state (JSON) |
 | `bosun-apply` | drivers: host applier, container renderer |
 | `bosun-host` | probe OS/arch/distro family; run backend probes; build the registry of present backends (§5.3) |
@@ -324,8 +327,9 @@ Only the header and the per-target leaf fields differ:
 **Conflicts across claimants.** One install scope holds one version, so `install` resolves against
 *all* claims for a package, not just the current project's:
 
-- Specs whose vers sets intersect: pick the highest available version in the intersection. This is the
-  main reason to prefer ranges for widely shared tools.
+- Specs whose vers sets intersect: take the package manager's choice in the intersection (§5.6;
+  the highest available version where it has none). This is the main reason to prefer ranges
+  for widely shared tools.
 - Claims that can't all be satisfied (empty intersection, e.g. two different exact pins): **refuse (DECIDED)**,
   naming the manifests and specs that disagree. Never last-writer-wins, which would flip the
   installed version every time you switch projects.
@@ -913,16 +917,54 @@ bosun does not invent a package-ID or version-range syntax. It uses the package-
   interval. Each type's comparison rules come from bosun's version model (§6). Types with no
   vers definition yet (github-release tags, brew) use `semver` where the versions are SemVer,
   otherwise bosun's generic chunk ordering.
+- **npm and PyPI ranges are evaluated as their ecosystems evaluate them (DECIDED).** vers
+  stays the stored form; for containment bosun converts the range to the native grammar and
+  asks the ecosystem's own rules (`bosun_core::native`):
+  - `npm` → a node-semver range: each piece a comparator set (`>=1.2.0 <2.0.0`, a bare
+    `1.2.0`, `*`), pieces joined by ` || `; node-semver has no `!=`, so an exclusion splits
+    the interval holding it. Evaluated by the `nodejs-semver` crate, whose pre-release rule
+    is node-semver's: a pre-release satisfies a set only when a bound of the same
+    `major.minor.patch` is one.
+  - `pypi` → PEP 440 specifier sets, one per interval (PEP 440 has no union), each carrying
+    the exclusions as `!=`. Evaluated by `pep440_rs`: `<V` admits no pre-release of `V`, `>V`
+    no post-release of `V`, `==V` ignores a local label.
+  - Several claims together are the conjunction of each combination of pieces. The same
+    native forms are what bosun hands npm and uv to resolve (below). A version the native
+    grammar rejects falls back to the vers walk.
 - **No other range grammar in M1:** no `^`, `~` or `1.7.*`. They can come back later as
   documented sugar that expands to vers.
 - The lockfile stores each spec in canonical vers form (`vers:<type>/…`), so a reader needs
   only the vers spec to know what a lock entry allowed.
 
-**One selection rule, no policies (DECIDED).** A spec is a vers set; bosun selects the
-**highest available version in the set**, or fails naming the spec and what was available.
-A bare version is a one-version set, so an exact pin needs no separate mode. There is no
-`policy` field in the manifest, lockfile or state, and no `deviation`: what was resolved is
-always inside what was written.
+**Selection: the package manager's choice within the set, no policies (DECIDED).** A spec
+is a vers set, and bosun owns the set: its grammar, its storage and the intersection of every
+claim's (§4.6). The version *within* it is the package manager's view, so bosun keeps no
+ranking of its own that could drift from the installer's (`Index::select`):
+
+- **apt** chooses by pin priority, read from `apt-cache policy <pkg>`, as apt chooses its
+  candidate: the highest priority, the newest among equals, never behind the installed
+  version below priority 1000. A version at priority 100 (a backports suite) loses to the
+  release's 500 unless the set admits only it. A version at priority 0 or below is never
+  apt's candidate; bosun takes it only when the spec names it exactly, as `apt-get install
+  pkg=version` installs it despite the pin (and warns). Phased updates do not change the
+  choice: apt defers them only in `upgrade`, and `apt-get install pkg` takes them.
+- **dnf** chooses by repository priority, then version, as `dnf install` does; a
+  lower-priority repository's build only when the set admits nothing better (an explicit
+  `name-version` installs it). Excludes and module filtering are already `repoquery`'s.
+- **npm and uv** resolve the set themselves on this machine: npm with its own picker (`npm
+  pack --dry-run --json name@<range>`: the `latest` dist-tag when it satisfies, then
+  non-deprecated, then engine-compatible versions), uv with `uv pip compile` for the
+  interpreter its tools use (requires-python, yanked releases (PEP 592), wheels, its own
+  index). bosun checks the answer is in the set and records it.
+- **Everything else** (cargo, apk, the github backends, the Windows backends) and every
+  remote index (`render --target`, no package manager to ask) takes the **highest available
+  version in the set**.
+
+A locked version stays while the package manager still offers it and the set admits it
+(lockfiles advise, specs decide). When nothing fits, resolution fails naming the spec and what
+was available. A bare version is a one-version set, so an exact pin needs no separate mode.
+There is no `policy` field in the manifest, lockfile or state, and no `deviation`: what was
+resolved is always inside what was written.
 
 - "Prefer 1.7.1, but accept a later revision" is a range: `vers:deb/>=1.7.1|<1.7.2~`.
   Because selection takes the highest, write an upper bound to stay close to a version.
@@ -962,19 +1004,21 @@ both (the grammars are small).
 
 ## 7. Resolution (orthogonal to backend)
 
-Every spec is a vers set, and resolution selects the highest available version in it (§5.6).
-There are no per-entry policies: an exact pin is a one-version set and a range is a wider one.
+Every spec is a vers set, and resolution takes the backend's package manager's choice in it:
+apt's and dnf's priorities, npm's and uv's own resolution, else the highest available version
+(§5.6). There are no per-entry policies: an exact pin is a one-version set and a range is a
+wider one.
 
 Consequences:
 
-- `highest-in-set` is impossible without correct ordering (§6). That is the payoff for
-  getting ordering right.
+- Containment and `highest-in-set` are impossible without correct ordering (§6). That is the
+  payoff for getting ordering right.
 - A pin that the configured sources no longer carry is unsatisfiable. The remedy is to widen
   the range (e.g. `>=1.7.1|<1.7.2~` for "any Debian revision of 1.7.1"), not a fallback mode.
 - Ranges **break reproducibility by design**, so bosun inherits uv/npm's frozen-vs-update split.
   **A locked version stays until it's upgraded (DECIDED):** resolving keeps each pin that
   still fits — the same backend and package identity, still published, still in the spec —
-  and gives the newest in-spec version only to new entries and pins that no longer fit. A new
+  and gives the package manager's in-spec choice only to new entries and pins that no longer fit. A new
   entry first takes the version bosun already installed, when it fits (§4.6).
   - `bosun lock` — resolve and record versions for this machine (§4.7), keeping pins.
   - `bosun install --frozen` — apply this machine's lock verbatim, no re-resolve, no lock
@@ -1294,6 +1338,11 @@ remote indexes. Traits stay ready; nothing is stubbed.
 - **purl + vers (user decision, §5.6):** package identity is purl; every spec is vers;
   selection is "highest available in the vers set". This supersedes the per-scheme range grammar recorded below (no `^`, `~`,
   `1.2.*` in M1).
+- **The tool's view (user decision, 2026-10-17):** no rule that duplicates, and could fall
+  out of sync with, what apt, dnf, npm or uv decide. bosun keeps vers as the stored spec and
+  the intersection across manifests; within a spec the package manager chooses (§5.6), npm
+  and PyPI ranges are evaluated by their ecosystems' own rules, and each tool's configured
+  registry is honoured on this machine (remote indexes keep the public ones).
 - Error and log text lives in `errmsg` / `logmsg` constants; data-carrying thiserror
   variants use a named binding (`#[error("{kind}: {0}", kind = errmsg::X)]`).
 
@@ -1470,6 +1519,11 @@ under a pty on Unix only.
 | M3-5 | apt's remote index (§4.7): a release's suites from its mirror over HTTPS (Debian and Ubuntu defaults, as stock images list them), `InRelease` → package index hash chain (by hash), signature not verified (decided: HTTPS and the hash chain; the image's apt verifies at install), cached under the user cache dir (`InRelease` an hour, indexes while their hash holds); `BackendFactory::remote_index` (apt, cargo, github-release, github-deb, github-rpm) | landed; unit tests over trimmed real Debian 12 captures; same candidates as `apt-cache policy` in `debian:12`, `debian:13` and `ubuntu:24.04` |
 | M3-6 | `render args\|env --target <platform>`, `render json --targets a,b`, `--distro <id>[@<release>]`, `--libc <family>[@<version>]`: another machine is resolved fresh through remote indexes with a runner that runs nothing; a backend without one is an error naming it; missing distro or libc facts are warned about. Debian pre-releases are `~` before a pre-release tag (`~deb12u1`, `~bpo`, `~24.04.1` are releases) | landed |
 | M3-7 | npm and uv backends (user scope, platform-independent, no hold): npm registry abbreviated metadata / `npm install -g --prefix` under npm's own global prefix (`npm prefix -g`; warned when not writable or its bin dir is off `PATH`) / `npm ls -g --json`; PyPI JSON API / `uv tool install name==ver` / `uv tool list`; both offer their registry as their remote index (`render --target`); export from each; PEP 440 ordering (`pep440_rs`, vers `pypi`, conformance suites run); `npm` and `pypi` purls must-pass | landed; real tier in `node:22-slim` with uv 0.13.1 (semver 7.6.0 → 7.5.0 → pruned under `~/.npm-global`; the system prefix fails, warned; ruff 0.6.9 → 0.6.8 → pruned) |
+| TV-1 | `Index::select` (the package manager chooses within a `Want`, every claim's vers set; lock preferred while still offered); apt by `apt-cache policy` priorities (`LC_ALL=C`), replacing `madison` | landed; real tier in `debian:13` (a local repo pinned at 100 and at -1); fixtures from `debian:12` + bookworm-backports, pin files, `ubuntu:24.04` phased updates |
+| TV-2 | dnf by repository priority: `repoquery` with `%{repoid}`, priorities from `dnf --dump-repo-config='*'` (dnf5) or the dnf Python API (dnf4) | landed; real tier in `fedora:41` (fedora at priority 1: wget2 2.1.0, then 2.2.0 for `>=2.2`) and `rockylinux:9` (the 9.5 vault at priority 1: unzip 6.0-58.el9_5, then 6.0-60.el9_8) |
+| TV-3 | npm and PyPI ranges evaluated natively (`nodejs-semver` 7.0.0, `pep440_rs`); npm resolves locally with `npm pack --dry-run --json`, uv with `uv pip compile -` (stdin, new on `Command`) for `uv python find --system`; uv's if-necessary pre-release rule | landed; real tier in `node:22-bookworm-slim` (yarn `*` → 1.22.22, the `latest` tag, though 2.4.3 exists) and `python:3.9-slim` with uv 0.13.1 (black `*` → 25.11.0, the newest for Python 3.9) |
+| TV-4 | configured registries on this machine: npm `npm config get registry` / `@scope:registry`; cargo source replacement from its config files (cwd ancestors, `$CARGO_HOME`; `toml` 1.1.6), a git, local or vendored source an error; uv's index left to uv (no PyPI listing locally) | landed (unit tests) |
+| TV-5 | npm prefix writability by `access(2)` (no probe file), warned once when an install or uninstall step is planned | landed; real tier: root-installed semver accepted with no warning |
 | M2-10 | with no terminal, every confirm (install, uninstall, prune, remove, migrate) applies, still printing what it applies to stderr; `--yes` only skips a terminal's prompt | landed |
 | M2-11 | `status [path]` lists every claim on each package (manifest, spec, user, whether the manifest still exists); with no path, everything bosun manages on the machine; `install` records a `claim` on a package bosun installed for another project | landed |
 | M2-12 | release selectors `linux:<distro>@<release>`: the release is the purl `distro` value a block's backend gives this machine (deb codename, rpm `<ID>-<VERSION_ID>`); exact `ID` only | landed; checked in Debian 12/13 and Ubuntu 22.04/24.04 containers |
@@ -1537,6 +1591,28 @@ Command-level reference for the five researched backends. (apt, dnf, apk, uv, np
 - Hard limit: the version must still be in a configured repo (archives keep ~latest only →
   snapshot.debian.org / PPA / local `.deb`).
 
+**What the `apt` backend reads to choose** (checked 2026-10-17 in `debian:12` with
+bookworm-backports and pin files, apt 2.6, and `ubuntu:24.04`, apt 2.8.3):
+
+- `apt-cache madison` lists every version in every source and ignores pins, so bosun no
+  longer uses it. `apt-cache policy <pkg>` (run under `LC_ALL=C`) prints the version table:
+  each version indented five columns (` *** ` marks the installed one) with the priority apt
+  gives it (a version pin's, else its best source's), then its sources indented eight, each
+  with its own priority; dpkg's status file (`100 /var/lib/dpkg/status`) only marks the
+  installed version. An unknown package prints nothing and exits 0.
+- Candidate rule, as observed: backports at 100 lose to the release at 500 (`curl
+  8.14.1-2+deb13u2~bpo13+1` vs `7.88.1-10+deb12u15`); once a backport is installed it stays
+  the candidate over the release's older version (below 1000 apt never goes back past the
+  installed version); a pin of 1001 makes an older version the candidate; a package whose
+  versions are all pinned below 0 has `Candidate: (none)`.
+- `apt-get install pkg=version` installs a version pinned at -1 or -10 all the same, so a
+  pin does not stop an exact install; bosun takes such a version only when the spec names
+  it, and warns.
+- Phased updates (`500 (phased 80%)` on noble-updates): the policy candidate is the phased
+  version whatever `APT::Machine-ID` says; `apt-get install pkg` (named, installed or not)
+  takes it; only `apt-get upgrade` defers it, and only with a machine id (an image's empty
+  `/etc/machine-id` defers nothing). bosun installs by name, so it takes it too.
+
 ### dnf / rpm
 - NEVRA: `name-[epoch:]version-release.arch`. Discover: `dnf list --showduplicates <pkg>`,
   `dnf repoquery --available <pkg>`.
@@ -1552,11 +1628,24 @@ Command-level reference for the five researched backends. (apt, dnf, apk, uv, np
 - Probe: `dnf --version`; the version is the last word of the first line (`dnf5 version
   5.2.17.0`, `4.14.0`).
 - Available: `dnf repoquery --available --queryformat
-  '%{name}|%{epoch}|%{version}|%{release}|%{arch}\n' <name>`, kept only where the name is exact
-  (repoquery also matches globs and provides) and the arch is the target's (`x86_64`,
-  `aarch64`) or `noarch`. Recorded as `[epoch:]version-release`, the epoch only when non-zero.
-  An unknown package is empty output with exit 0, so a non-zero exit (bad repo, no network) is
-  an error. dnf4 prints its own newline after the format's, leaving blank lines.
+  '%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{repoid}\n' <name>`, kept only where the
+  name is exact (repoquery also matches globs and provides) and the arch is the target's
+  (`x86_64`, `aarch64`) or `noarch`. Recorded as `[epoch:]version-release`, the epoch only
+  when non-zero. An unknown package is empty output with exit 0, so a non-zero exit (bad repo,
+  no network) is an error. dnf4 prints its own newline after the format's, leaving blank lines.
+- Choosing (checked 2026-10-17 in `fedora:41` with `priority=1` on `fedora`, and
+  `rockylinux:9` with the 9.5 BaseOS vault added at `priority=1`): `repoquery` applies
+  excludes (`excludepkgs`) and module filtering (Rocky 9 with no stream enabled lists only the
+  non-modular `nodejs` 16), but **not** repository priority, and `--latest-limit 1` takes the
+  newest EVR regardless of it. `dnf install <name>` takes the best-priority repository's build
+  even when older (`vim-enhanced 2:9.1.737` from fedora over updates' `2:9.1.1914`; `curl
+  7.76.1-31.el9` from the vault over baseos' `-40.el9_8.8`), while `dnf install
+  <name>-<version>` from a lower-priority repository installs. So bosun ranks admitted builds
+  by their best repository's priority (lower number first, 99 by default), then EVR. The
+  priorities are dnf's: dnf5 prints them (`dnf --dump-repo-config='*'`, a `======== "<id>"
+  repository configuration: ========` header then `priority = N`); dnf4 has no command that
+  does, so its Python API is asked (`dnf.Base().read_all_repos()`, `repo.priority`), which
+  works unprivileged.
 - Installed: `rpm -q --queryformat '%|EPOCH?{%{EPOCH}:}:{}|%{VERSION}-%{RELEASE}\n' <name>`;
   exit 1 with `package <name> is not installed` on stdout means absent; several lines
   (installonly packages) take the newest.
@@ -1617,10 +1706,23 @@ Command-level reference for the five researched backends. (apt, dnf, apk, uv, np
   within the install-time constraint; `uvx pkg@version` ephemeral.
 - pip surface: `uv pip install 'pkg==X'` (no lockfile on this path).
 - What bosun drives (backend `uv`, user scope, purl `pkg:pypi/<name>`, vers `pypi`):
-  - Discover: PyPI's JSON API, `https://pypi.org/pypi/<name>/json`, `releases` (version → its
-    files); a release with no files, or with every file yanked, is left out, as is a version
-    outside PEP 440. An unknown project is a 404. (uv may be pointed at another index; bosun
-    asks PyPI.)
+  - Choose (this machine): uv resolves the spec, `uv pip compile - --no-deps --no-header
+    --no-annotate --quiet --color never --python <interpreter>` with `<name><specifiers>` on
+    standard input, one call per interval of the vers range (PEP 440 has no union), the
+    newest result taken. Its stdout is `<normalized-name>==<version>`; no match is exit 1 with
+    `No solution found` on stderr (logged as uv's explanation), a network failure exit 2. The
+    interpreter is the one `uv tool install` uses: `uv python find --system` (uv-managed
+    first); tools list it in `uv tool list --show-python`. uv skips yanked releases unless
+    pinned with `==` (`httpie==2.0.0` resolves, `httpie>=2.0.0,<2.1` does not), pre-releases
+    unless named or nothing else exists, and releases whose `Requires-Python` the interpreter
+    misses (black: 24.8.0 for 3.8, 25.11.0 for 3.9, 26.10.1 for 3.10). uv reads its own index
+    configuration (`UV_DEFAULT_INDEX`, `UV_INDEX_URL`, `uv.toml`); bosun reads none and
+    fetches nothing from PyPI on this machine.
+  - Discover (remote index): PyPI's JSON API, `https://pypi.org/pypi/<name>/json`, `releases`
+    (version → its files); a release with no files, or with every file yanked, is left out,
+    as is a version outside PEP 440. An unknown project is a 404. The highest version in the
+    range is taken, pre-releases only when named or when every version is one (uv's
+    `if-necessary-or-explicit`).
   - Install exact / up / down: `uv tool install <name>==<version>`. With another version
     installed it uninstalls that and installs this one; with this one installed it prints
     "`<name>==<version>` is already installed" and exits 0.
@@ -1649,19 +1751,34 @@ Command-level reference for the five researched backends. (apt, dnf, apk, uv, np
 - Global tools: `npm i -g pkg@version` — **no lockfile, no durable pin** (weakest tier).
 - What bosun drives (backend `npm`, user scope, purl `pkg:npm/[%40scope/]<name>`, vers `npm` =
   SemVer; built and checked 2026-10-16 with npm 10.9.9 in `node:22-slim`):
-  - Discover: `https://registry.npmjs.org/<name>` (a scope's `/` as `%2F`) with `Accept:
+  - Choose (this machine, checked 2026-10-17 with npm 10.9.7): npm resolves the spec's
+    node-semver range with npm-pick-manifest, `npm pack --dry-run --json <name>@<range>` →
+    `[{"version": …}]`; no match is exit 1 with `{"error": {"code": "ETARGET"}}` (`E404` for
+    an unknown package) on stdout. It prefers the `latest` dist-tag when it satisfies the
+    range (`yarn@*` → 1.22.22 though 2.4.3 is published; `npm@>=12` → 12.2.0, `latest`,
+    though 12.2.1 is published), then non-deprecated versions, then those whose `engines`
+    fit. It fetches the tarball into npm's cache, which the install reuses. `npm view
+    <name>@<range> version` lists *every* matching version, so it is not npm's choice.
+  - Discover: npm's configured registry (`npm config get registry`, or `@<scope>:registry`
+    for a scoped package, `undefined` when unset; the public registry for the remote index),
+    `<registry>/<name>` (a scope's `/` as `%2F`) with `Accept:
     application/vnd.npm.install-v1+json` (abbreviated metadata); every key of `versions` that
-    is SemVer. An unknown package is a 404.
+    is SemVer. An unknown package is a 404. On this machine the listing serves only the
+    message when nothing fits; the remote index takes the highest version in the range.
   - Prefix: global installs always go under npm's own global prefix (`npm prefix -g`): nvm's
     or fnm's Node directory, a configured `~/.npm-global`, `%APPDATA%\npm`, or a system Node's
     `/usr/local`. bosun never picks one of its own. It is read once, logged, and every command
-    names it with `--prefix`. A prefix this user cannot write where npm puts packages
-    (`<p>/lib/node_modules`, `<p>\node_modules` on Windows; tried by creating a file in it or
-    its nearest existing parent) is warned of: `npm install -g` there needs root, user-scope
-    steps never run elevated (§5.5), so the install fails with npm's EACCES, as it would by
-    hand; the remedy is a prefix of the user's own (`npm config set prefix ~/.npm-global`).
-    A prefix whose bin dir (`<p>/bin`, `<p>` on Windows) is not on `PATH` is warned of, as
-    github-release's bin dir is. `npm prefix -g` failing fails every npm step and listing.
+    names it with `--prefix`. When an install or uninstall step is first planned in a run, a
+    prefix this user cannot write where npm puts packages (`<p>/lib/node_modules`,
+    `<p>\node_modules` on Windows, or its nearest existing parent) is warned of: `npm install
+    -g` there needs root, user-scope steps never run elevated (§5.5), so the install fails
+    with npm's EACCES, as it would by hand; the remedy is a prefix of the user's own (`npm
+    config set prefix ~/.npm-global`). Writability is asked of the kernel, `access(2)` for
+    write and search with the effective ids (`faccessat(…, AT_EACCESS)`; the read-only
+    attribute on Windows), never by writing there; `status` and reads of what is installed
+    check nothing. A prefix whose bin dir (`<p>/bin`, `<p>` on Windows) is not on `PATH` is
+    warned of then too, as github-release's bin dir is. `npm prefix -g` failing fails every
+    npm step and listing.
   - Install exact / up / down: `npm install -g --prefix <p> <name>@<version>` ("changed N
     packages" when moving an installed one).
   - Installed: `npm ls -g --depth=0 --json --prefix <p>` → `dependencies.<name>.version`. A
@@ -1692,6 +1809,13 @@ Command-level reference for the five researched backends. (apt, dnf, apk, uv, np
   `choco pin add --name=<id> --version=<v>`; downgrade adds `--allow-downgrade`.
 
 ### Cross-cutting
+- Registries: on this machine each language backend lists from the registry its tool is
+  configured with: npm's (`npm config get`), cargo's source replacement (`[source.crates-io]
+  replace-with` followed to a `sparse+` `registry`/`[registries.<n>] index`, read from
+  `.cargo/config.toml` (or `config`) in the working directory and its ancestors, then
+  `$CARGO_HOME`, the deeper file winning; `cargo config get` is nightly-only on the pinned
+  toolchain), and uv's own resolution. A git, local-registry or vendored cargo source is not
+  one bosun can list, and says so. Remote indexes keep the public registries.
 - True lockfiles: only uv (`uv.lock`) and npm (`package-lock.json`). apt/dnf/apk = policy/list only;
   all binary/tool installs = manifest/imperative only.
 - Impedance mismatches: repo-bound (apt/dnf) vs registry-bound (uv/npm) availability;
