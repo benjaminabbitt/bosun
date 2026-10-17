@@ -333,6 +333,9 @@ Only the header and the per-target leaf fields differ:
   in a project adds or updates that project's claims, and drops its claims for entries no longer
   in its manifest — a state-only change; the package stays installed until `prune`. `status`
   reports claims whose manifest no longer exists (repo moved or deleted); `prune` drops them.
+  A manifest whose existence can't be checked (permission denied, e.g. inside another user's
+  0700 home, seen from a system-scope claim) counts as present: only a manifest known to be
+  gone loses its claim (logged at debug).
 - `purl` records the package **as actually installed** (§5.6), so prune removes the
   right thing even if the manifest's name mapping changes later (§5.4).
 - **User-level manifest:** `<config dir>/bosun/bosun.yaml` holds personal tools. It is just
@@ -1719,6 +1722,7 @@ under a pty on Unix only.
 | TV-13 | without elevation, system-scope `accept`, `claim` and `drop-claim` are left out of `install`, `uninstall` and `prune` as `deferred` notes (`defer_system_records`), reported by apply, so user-scope actions in the same plan apply; `remove <name>` keeps needing elevation for them | landed; scenarios: a mixed apt/cargo manifest with root's system state installs ripgrep, defers claim jq and accept tree, and leaves the system state unchanged; a non-elevated prune defers its drop-claim |
 | TV-14 | the lock follows what was installed: when every claim's intersection ends a package at a version other than this project's pin, the pending lock pins it and is written after a successful apply | landed; scenario: lock pins ripgrep 14.1.1, another project's `<14.1.0` claim upgrades it to 14.0.3, the lock then pins 14.0.3 and `install --frozen --plan` plans nothing; red before: the lock kept 14.1.1 |
 | TV-15 | apt keeps the installed version no source offers any more: `Policy::choose` admits the installed version (dpkg status, priority 100) as a candidate when the spec admits it, as apt's candidate stays there below priority 1000 | landed; real tier in `debian:13` (apt 3.0.3): bosun-probe 2.0-1 installed, dropped from the local file repository, `upgrade` under `*`, `install` keeps 2.0-1; red without it: a downgrade to 1.0-1 was applied |
+| TV-16 | `prune` (and `status`) count a claim whose manifest can't be checked (`try_exists` errors: permission denied) as present, logged at debug (`MANIFEST_UNCHECKED`) | landed; unit test with a directory this user may not search (skipped as root); red before: the claim counted as gone |
 
 **First real-host smoke run (2026-10-14, release build, Debian 13, read-only `--plan` and
 `lock` in a scratch dir).** `backends` found apt 3.0.3, cargo 1.96.1 and github-release; jq

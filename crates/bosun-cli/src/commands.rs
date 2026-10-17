@@ -303,7 +303,7 @@ fn claim_statuses(claims: &[Claim]) -> Vec<ClaimStatus> {
             manifest: c.manifest.display().to_string(),
             spec: c.spec.clone(),
             user: c.user.clone(),
-            manifest_exists: c.manifest.exists(),
+            manifest_exists: manifest_present(&c.manifest),
         })
         .collect()
 }
@@ -1087,8 +1087,22 @@ pub fn uninstall_plan(env: &Env, path: Option<PathBuf>) -> Result<Plan, CliError
 pub fn prune_plan(env: &Env) -> Result<Plan, CliError> {
     let state = combined_state(env)?;
     let installers = env.installers();
-    build_prune_plan(&state, &installers, |p| p.exists())
+    build_prune_plan(&state, &installers, manifest_present)
         .map_err(|e| CliError::Resolve(e.to_string()))
+}
+
+/// Whether a claim's manifest is still there, for `prune`. One that can't be
+/// checked (in a directory this user may not search, such as another user's
+/// home) counts as there: only a manifest known to be gone loses its claim.
+fn manifest_present(path: &Path) -> bool {
+    path.try_exists().unwrap_or_else(|e| {
+        tracing::debug!(
+            message = crate::logmsg::MANIFEST_UNCHECKED,
+            path = %path.display(),
+            error = %e
+        );
+        true
+    })
 }
 
 fn managed_from_resolution<'a>(
@@ -1530,6 +1544,38 @@ mod tests {
 
     fn ids(order: &[BackendId]) -> Vec<&str> {
         order.iter().map(BackendId::as_str).collect()
+    }
+
+    #[test]
+    fn a_manifest_that_is_there_or_gone_is_present_or_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("bosun.yaml");
+        assert!(!manifest_present(&manifest));
+        fs::write(&manifest, "version: 2\n").unwrap();
+        assert!(manifest_present(&manifest));
+    }
+
+    /// A manifest in a directory this user may not search (another user's
+    /// 0700 home) can't be checked, so its claim stands. Root searches any
+    /// directory, so there it is not run.
+    #[cfg(unix)]
+    #[test]
+    fn a_manifest_that_cannot_be_checked_counts_as_present() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        fs::create_dir(&home).unwrap();
+        fs::write(home.join("bosun.yaml"), "version: 2\n").unwrap();
+        fs::set_permissions(&home, fs::Permissions::from_mode(0o000)).unwrap();
+        let searchable = fs::metadata(home.join("bosun.yaml")).is_ok();
+        let present = manifest_present(&home.join("bosun.yaml"));
+        let gone = manifest_present(&home.join("gone.yaml"));
+        fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
+        if searchable {
+            return;
+        }
+        assert!(present);
+        assert!(gone);
     }
 
     #[test]

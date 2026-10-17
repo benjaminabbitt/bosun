@@ -47,3 +47,8 @@ pub const INSTALLED_MOVED: &str =
 /// spec; the plan moves it back as for any other.
 pub const INSTALLED_OUTSIDE_SPEC: &str =
     "the package manager moved this package outside the spec; planning to move it back";
+
+/// prune could not check whether a claim's manifest exists (a directory this
+/// user may not search); the claim stands.
+pub const MANIFEST_UNCHECKED: &str =
+    "could not check that the claim's manifest exists; keeping the claim";
