@@ -117,6 +117,13 @@ fn an_entry_without_a_keyring_is_checked_against_the_roots_trusted_keys() {
          Types: deb\nURIs: http://archive.ubuntu.com/ubuntu\nSuites: jammy-updates\n\
          Components: main\nSigned-By: 0123ABCD\n"
     );
+    // trusted.gpg.d alone is enough.
+    let parts = root(&[("etc/apt/trusted.gpg.d/a.gpg", "K1")]);
+    let only = plan_of(
+        Some(parts.path()),
+        "deb http://archive.ubuntu.com/ubuntu jammy main\n",
+    );
+    assert!(!only.contains("Trusted"), "{only}");
     // A fingerprint with no trusted keys to find it among is no key.
     let alone = plan_of(None, "deb [signed-by=0123ABCD] http://a.example s main\n");
     assert!(
