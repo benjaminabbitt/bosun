@@ -45,6 +45,7 @@ struct MachineDistro {
     id_like: Vec<String>,
     codename: Option<String>,
     version_id: Option<String>,
+    base_codename: Option<String>,
 }
 
 /// A backend's fixed metadata, as the real backend declares it.
@@ -253,6 +254,7 @@ impl BosunWorld {
                 "id_like": d.id_like,
                 "codename": d.codename,
                 "version_id": d.version_id,
+                "base_codename": d.base_codename,
             });
         }
         if let Some((family, version)) = &m.libc {
@@ -476,36 +478,42 @@ fn a_machine(world: &mut BosunWorld, os: String, arch: String, privilege: String
             id_like: Vec::new(),
             codename: Some(codename.into()),
             version_id: None,
+            base_codename: None,
         }),
         Some(("Ubuntu", codename)) => Some(MachineDistro {
             id: "ubuntu".into(),
             id_like: vec!["debian".into()],
             codename: Some(codename.into()),
             version_id: None,
+            base_codename: None,
         }),
         Some(("Fedora", release)) => Some(MachineDistro {
             id: "fedora".into(),
             id_like: Vec::new(),
             codename: None,
             version_id: Some(release.into()),
+            base_codename: None,
         }),
         Some(("Rocky", release)) => Some(MachineDistro {
             id: "rocky".into(),
             id_like: vec!["rhel".into(), "centos".into(), "fedora".into()],
             codename: None,
             version_id: Some(release.into()),
+            base_codename: None,
         }),
         Some(("Alpine", version_id)) => Some(MachineDistro {
             id: "alpine".into(),
             id_like: Vec::new(),
             codename: None,
             version_id: Some(version_id.into()),
+            base_codename: None,
         }),
         _ if os == "Alpine" => Some(MachineDistro {
             id: "alpine".into(),
             id_like: Vec::new(),
             codename: None,
             version_id: None,
+            base_codename: None,
         }),
         _ => None,
     };
@@ -515,6 +523,25 @@ fn a_machine(world: &mut BosunWorld, os: String, arch: String, privilege: String
         distro,
         libc: None,
         elevated: privilege == "elevated",
+    });
+}
+
+/// Linux Mint: its own codename, and the Ubuntu release its apt reads
+/// (`UBUNTU_CODENAME`).
+#[given(regex = r"^a Linux Mint (\S+) (\S+) machine based on Ubuntu (\S+), not elevated$")]
+fn a_mint_machine(world: &mut BosunWorld, codename: String, arch: String, base: String) {
+    world.machine = Some(Machine {
+        os: "linux".into(),
+        arch,
+        distro: Some(MachineDistro {
+            id: "linuxmint".into(),
+            id_like: vec!["ubuntu".into(), "debian".into()],
+            codename: Some(codename),
+            version_id: None,
+            base_codename: Some(base),
+        }),
+        libc: None,
+        elevated: false,
     });
 }
 
@@ -539,6 +566,7 @@ fn a_debian_machine_without_release(world: &mut BosunWorld, arch: String) {
             id_like: Vec::new(),
             codename: None,
             version_id: None,
+            base_codename: None,
         }),
         libc: None,
         elevated: false,

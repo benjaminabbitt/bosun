@@ -151,3 +151,38 @@ Feature: an install block can name one release of a distro
     Then it succeeds
     And a lock is written
     And the lock pins jq 1.6-6
+
+  # Linux Mint 22's own codename is wilma, but its apt reads Ubuntu noble's
+  # archive, so its packages and release selectors say noble (§5.4): one
+  # naming wilma matches nothing, and bosun says which release to name.
+  Scenario: a selector naming a derivative's own codename warns with the release to use
+    Given a Linux Mint wilma amd64 machine based on Ubuntu noble, not elevated
+    And apt 2.7.14 is available
+    And apt publishes jq 1.7.1-3build1
+    And the manifest:
+      """
+      version: 2
+      packages:
+        - name: jq
+          spec: "*"
+          install:
+            linux:linuxmint@wilma: {backend: apt}
+      """
+    When I run `bosun lock .`
+    Then it succeeds
+    And it warns "names the distro's own codename"
+    And it warns "linux:linuxmint@noble"
+    And the lock does not mention jq
+    When the manifest is replaced by:
+      """
+      version: 2
+      packages:
+        - name: jq
+          spec: "*"
+          install:
+            linux:linuxmint@noble: {backend: apt}
+      """
+    And I run `bosun lock .`
+    Then it succeeds
+    And it does not warn "own codename"
+    And the lock pins jq 1.7.1-3build1

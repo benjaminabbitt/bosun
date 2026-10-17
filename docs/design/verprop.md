@@ -854,7 +854,10 @@ noble. Alpine's `VERSION_ID` is a point release.)
   - **A derivative's own codename names nothing (DECIDED):** `linux:linuxmint@wilma` does not
     match Mint 22; `linux:linuxmint@noble` does, as it does Mint 22.1 (`xia`) and 22.2
     (`zara`), which read the same Ubuntu suites and so offer the same versions. One token per
-    machine keeps the selector and the recorded purl in one vocabulary.
+    machine keeps the selector and the recorded purl in one vocabulary. A selector naming the
+    machine's own codename where that is not its release is warned about, once per selector,
+    naming the one to write (`OWN_CODENAME_SELECTOR`: `selector=linux:linuxmint@wilma
+    release=noble instead=linux:linuxmint@noble`); `render` warns the same of the target's.
   - A distro whose package type has no `distro` rule (Arch, Alpine) gets no release
     selectors. This holds for Alpine after apk lands too: bosun doesn't invent a branch rule
     (`alpine@3.20`) ahead of purl; Alpine entries use `linux:alpine` and libc keys.
@@ -1723,6 +1726,7 @@ under a pty on Unix only.
 | TV-14 | the lock follows what was installed: when every claim's intersection ends a package at a version other than this project's pin, the pending lock pins it and is written after a successful apply | landed; scenario: lock pins ripgrep 14.1.1, another project's `<14.1.0` claim upgrades it to 14.0.3, the lock then pins 14.0.3 and `install --frozen --plan` plans nothing; red before: the lock kept 14.1.1 |
 | TV-15 | apt keeps the installed version no source offers any more: `Policy::choose` admits the installed version (dpkg status, priority 100) as a candidate when the spec admits it, as apt's candidate stays there below priority 1000 | landed; real tier in `debian:13` (apt 3.0.3): bosun-probe 2.0-1 installed, dropped from the local file repository, `upgrade` under `*`, `install` keeps 2.0-1; red without it: a downgrade to 1.0-1 was applied |
 | TV-16 | `prune` (and `status`) count a claim whose manifest can't be checked (`try_exists` errors: permission denied) as present, logged at debug (`MANIFEST_UNCHECKED`) | landed; unit test with a directory this user may not search (skipped as root); red before: the claim counted as gone |
+| TV-17 | a release selector naming a derivative's own codename that is not its release warns with the release to use (`Distro::deb_release_for_own_codename`, `OWN_CODENAME_SELECTOR`), on load for this machine and in `render` for the target | landed; scenario: Mint 22 (`wilma`, `UBUNTU_CODENAME=noble`) with `linux:linuxmint@wilma` warns naming `linux:linuxmint@noble` and locks nothing; `@noble` locks jq without a warning |
 
 **First real-host smoke run (2026-10-14, release build, Debian 13, read-only `--plan` and
 `lock` in a scratch dir).** `backends` found apt 3.0.3, cargo 1.96.1 and github-release; jq

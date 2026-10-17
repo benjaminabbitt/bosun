@@ -85,6 +85,9 @@ pub struct FixtureDistro {
     /// The `VERSION_CODENAME`.
     #[serde(default)]
     pub codename: Option<String>,
+    /// The base distro's codename (`UBUNTU_CODENAME`, else `DEBIAN_CODENAME`).
+    #[serde(default)]
+    pub base_codename: Option<String>,
     /// The `VERSION_ID`.
     #[serde(default)]
     pub version_id: Option<String>,

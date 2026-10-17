@@ -52,3 +52,9 @@ pub const INSTALLED_OUTSIDE_SPEC: &str =
 /// user may not search); the claim stands.
 pub const MANIFEST_UNCHECKED: &str =
     "could not check that the claim's manifest exists; keeping the claim";
+
+/// A release selector names the distro's own codename where its packages
+/// spell the release by the base distro's (Linux Mint 22: `wilma`, whose apt
+/// reads Ubuntu `noble`), so it matches nothing.
+pub const OWN_CODENAME_SELECTOR: &str =
+    "a release selector names the distro's own codename, which is not its release; it matches nothing, name the release instead";

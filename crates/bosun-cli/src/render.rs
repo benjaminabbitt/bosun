@@ -90,6 +90,7 @@ pub fn rendered(req: Request) -> Result<(Vec<Target>, Rendered), CliError> {
             if distro.is_none() && has_selector(m, |s| s.distro().is_some()) {
                 tracing::warn!(message = logmsg::RENDER_NO_DISTRO, target = %target);
             }
+            crate::commands::warn_of_own_codenames(m, distro.as_ref());
             let machine = Machine {
                 target: *target,
                 distro: distro.as_ref(),

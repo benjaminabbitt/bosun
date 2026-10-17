@@ -1,12 +1,13 @@
 //! The M1 read/resolve commands (§4.2): `backends`, `status`, `lock`.
 //! Each returns one typed value; the mutating commands are slice 10-2.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use bosun_core::platform::Selector;
 use bosun_core::record::{LockDocument, LockLeaf, LockPackage, Package, StateDocument, StateLeaf};
-use bosun_core::{BackendId, Libc, Manifest, Os, Scope, Spec, Target, Version};
+use bosun_core::{BackendId, Distro, Libc, Manifest, Os, Scope, Spec, Target, Version};
 use bosun_io::{check_options, load_manifest, lock, manifest_hash};
 use bosun_ports::Installer;
 use bosun_resolve::{resolve, resolve_with_lock, NotApplicable, Outcome, Resolution};
@@ -132,7 +133,40 @@ pub(crate) fn manifest_file(path: Option<PathBuf>) -> Result<PathBuf, CliError> 
 /// Load the manifest at `file` and check its backend options against the
 /// backends this build has (§5.4).
 pub(crate) fn load(env: &Env, file: &Path) -> Result<Manifest, CliError> {
-    load_checked(env.option_keys(), file)
+    let manifest = load_checked(env.option_keys(), file)?;
+    warn_of_own_codenames(&manifest, env.machine().distro());
+    Ok(manifest)
+}
+
+/// Warn, once per selector, of each release selector that names `distro`'s
+/// own codename where its packages spell the release by the base distro's
+/// (`linux:linuxmint@wilma` on Linux Mint 22, whose release is `noble`): it
+/// matches nothing, and the warning names the selector to write (§5.4).
+pub(crate) fn warn_of_own_codenames(manifest: &Manifest, distro: Option<&Distro>) {
+    let Some(distro) = distro else { return };
+    let selectors: BTreeSet<&Selector> = manifest
+        .defaults
+        .keys()
+        .chain(manifest.packages.iter().flat_map(|e| e.install.keys()))
+        .collect();
+    for sel in selectors {
+        let (Some(os), Some(family), Some(release)) = (sel.os(), sel.distro(), sel.release())
+        else {
+            continue;
+        };
+        if family != distro.id {
+            continue;
+        }
+        if let Some(deb) = distro.deb_release_for_own_codename(release) {
+            let instead = Selector::OsDistroRelease(os, family.to_string(), deb.clone());
+            warn!(
+                message = crate::logmsg::OWN_CODENAME_SELECTOR,
+                selector = %sel,
+                release = %deb,
+                instead = %instead,
+            );
+        }
+    }
 }
 
 /// Load the manifest at `file`, checking its backend options against `keys`.

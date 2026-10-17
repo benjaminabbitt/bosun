@@ -446,6 +446,15 @@ impl Distro {
             _ => None,
         }
     }
+
+    /// The deb release to name in place of `release` when `release` is this
+    /// distro's own codename but its packages spell the release by the base
+    /// distro's (Linux Mint 22: `wilma`, whose apt reads Ubuntu `noble`), so
+    /// a selector naming it matches nothing. `None` otherwise.
+    pub fn deb_release_for_own_codename(&self, release: &str) -> Option<String> {
+        let deb = self.release("deb")?;
+        (self.version_codename.as_deref() == Some(release) && deb != release).then_some(deb)
+    }
 }
 
 #[cfg(test)]
@@ -658,6 +667,26 @@ mod tests {
             ..mint
         };
         assert_eq!(blank.release("deb").as_deref(), Some("wilma"));
+    }
+
+    #[test]
+    fn a_derivatives_own_codename_points_to_its_deb_release() {
+        let mint = Distro {
+            base_codename: Some("noble".into()),
+            ..os_release("linuxmint", Some("22"), Some("wilma"))
+        };
+        assert_eq!(
+            mint.deb_release_for_own_codename("wilma").as_deref(),
+            Some("noble")
+        );
+        assert_eq!(mint.deb_release_for_own_codename("noble"), None);
+        assert_eq!(mint.deb_release_for_own_codename("faye"), None);
+        // Debian's own codename is its release.
+        let bookworm = os_release("debian", Some("12"), Some("bookworm"));
+        assert_eq!(bookworm.deb_release_for_own_codename("bookworm"), None);
+        // No deb release at all: nothing to point to.
+        let sid = os_release("debian", None, None);
+        assert_eq!(sid.deb_release_for_own_codename("sid"), None);
     }
 
     #[test]
