@@ -1,0 +1,261 @@
+[
+  {
+    "id": "@types/semver@7.5.8",
+    "name": "@types/semver",
+    "version": "7.5.8",
+    "size": 6418,
+    "unpackedSize": 23276,
+    "shasum": "8268a8c57a3e4abd25c165ecd36237db7948a55e",
+    "integrity": "sha512-I8EUhyrgfLrcTkzV3TSsGyl1tSuPrEDzr0yd5m90UgNxQkyDXULk3b6MlQqTCpZpNtWe1K0hzclnZkTcLBe2UQ==",
+    "filename": "types-semver-7.5.8.tgz",
+    "files": [
+      {
+        "path": "semver/",
+        "size": 0,
+        "mode": 493
+      },
+      {
+        "path": "semver/classes/",
+        "size": 0,
+        "mode": 493
+      },
+      {
+        "path": "semver/classes/comparator.d.ts",
+        "size": 514,
+        "mode": 420
+      },
+      {
+        "path": "semver/classes/range.d.ts",
+        "size": 640,
+        "mode": 420
+      },
+      {
+        "path": "semver/classes/semver.d.ts",
+        "size": 1590,
+        "mode": 420
+      },
+      {
+        "path": "semver/functions/",
+        "size": 0,
+        "mode": 493
+      },
+      {
+        "path": "semver/functions/clean.d.ts",
+        "size": 290,
+        "mode": 420
+      },
+      {
+        "path": "semver/functions/cmp.d.ts",
+        "size": 500,
+        "mode": 420
+      },
+      {
+        "path": "semver/functions/coerce.d.ts",
+        "size": 289,
+        "mode": 420
+      },
+      {
+        "path": "semver/functions/compare-build.d.ts",
+        "size": 539,
+        "mode": 420
+      },
+      {
+        "path": "semver/functions/compare-loose.d.ts",
+        "size": 156,
+        "mode": 420
+      },
+      {
+        "path": "semver/functions/compare.d.ts",
+        "size": 513,
+        "mode": 420
+      },
+      {
+        "path": "semver/functions/diff.d.ts",
+        "size": 369,
+        "mode": 420
+      },
+      {
+        "path": "semver/functions/eq.d.ts",
+        "size": 363,
+        "mode": 420
+      },
+      {
+        "path": "semver/functions/gt.d.ts",
+        "size": 232,
+        "mode": 420
+      },
+      {
+        "path": "semver/functions/gte.d.ts",
+        "size": 235,
+        "mode": 420
+      },
+      {
+        "path": "semver/functions/inc.d.ts",
+        "size": 736,
+        "mode": 420
+      },
+      {
+        "path": "semver/functions/lt.d.ts",
+        "size": 232,
+        "mode": 420
+      },
+      {
+        "path": "semver/functions/lte.d.ts",
+        "size": 234,
+        "mode": 420
+      },
+      {
+        "path": "semver/functions/major.d.ts",
+        "size": 246,
+        "mode": 420
+      },
+      {
+        "path": "semver/functions/minor.d.ts",
+        "size": 246,
+        "mode": 420
+      },
+      {
+        "path": "semver/functions/neq.d.ts",
+        "size": 255,
+        "mode": 420
+      },
+      {
+        "path": "semver/functions/parse.d.ts",
+        "size": 323,
+        "mode": 420
+      },
+      {
+        "path": "semver/functions/patch.d.ts",
+        "size": 246,
+        "mode": 420
+      },
+      {
+        "path": "semver/functions/prerelease.d.ts",
+        "size": 331,
+        "mode": 420
+      },
+      {
+        "path": "semver/functions/rcompare.d.ts",
+        "size": 341,
+        "mode": 420
+      },
+      {
+        "path": "semver/functions/rsort.d.ts",
+        "size": 299,
+        "mode": 420
+      },
+      {
+        "path": "semver/functions/satisfies.d.ts",
+        "size": 357,
+        "mode": 420
+      },
+      {
+        "path": "semver/functions/sort.d.ts",
+        "size": 296,
+        "mode": 420
+      },
+      {
+        "path": "semver/functions/valid.d.ts",
+        "size": 315,
+        "mode": 420
+      },
+      {
+        "path": "semver/index.d.ts",
+        "size": 4236,
+        "mode": 420
+      },
+      {
+        "path": "semver/internals/",
+        "size": 0,
+        "mode": 493
+      },
+      {
+        "path": "semver/internals/identifiers.d.ts",
+        "size": 474,
+        "mode": 420
+      },
+      {
+        "path": "semver/LICENSE",
+        "size": 1141,
+        "mode": 420
+      },
+      {
+        "path": "semver/package.json",
+        "size": 1562,
+        "mode": 420
+      },
+      {
+        "path": "semver/preload.d.ts",
+        "size": 47,
+        "mode": 420
+      },
+      {
+        "path": "semver/ranges/",
+        "size": 0,
+        "mode": 493
+      },
+      {
+        "path": "semver/ranges/gtr.d.ts",
+        "size": 376,
+        "mode": 420
+      },
+      {
+        "path": "semver/ranges/intersects.d.ts",
+        "size": 319,
+        "mode": 420
+      },
+      {
+        "path": "semver/ranges/ltr.d.ts",
+        "size": 373,
+        "mode": 420
+      },
+      {
+        "path": "semver/ranges/max-satisfying.d.ts",
+        "size": 436,
+        "mode": 420
+      },
+      {
+        "path": "semver/ranges/min-satisfying.d.ts",
+        "size": 435,
+        "mode": 420
+      },
+      {
+        "path": "semver/ranges/min-version.d.ts",
+        "size": 338,
+        "mode": 420
+      },
+      {
+        "path": "semver/ranges/outside.d.ts",
+        "size": 529,
+        "mode": 420
+      },
+      {
+        "path": "semver/ranges/simplify.d.ts",
+        "size": 722,
+        "mode": 420
+      },
+      {
+        "path": "semver/ranges/subset.d.ts",
+        "size": 299,
+        "mode": 420
+      },
+      {
+        "path": "semver/ranges/to-comparators.d.ts",
+        "size": 275,
+        "mode": 420
+      },
+      {
+        "path": "semver/ranges/valid.d.ts",
+        "size": 309,
+        "mode": 420
+      },
+      {
+        "path": "semver/README.md",
+        "size": 718,
+        "mode": 420
+      }
+    ],
+    "entryCount": 49,
+    "bundled": []
+  }
+]

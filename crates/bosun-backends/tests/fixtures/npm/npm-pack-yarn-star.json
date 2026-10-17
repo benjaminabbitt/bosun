@@ -1,0 +1,71 @@
+[
+  {
+    "id": "yarn@1.22.22",
+    "name": "yarn",
+    "version": "1.22.22",
+    "size": 1238429,
+    "unpackedSize": 5340487,
+    "shasum": "ac34549e6aa8e7ead463a7407e1c7390f61a6610",
+    "integrity": "sha512-prL3kGtyG7o9Z9Sv8IPfBNrWTDmXB4Qbes8A9rEzt6wkJV8mUvoirjU0Mp3GGAU06Y0XQyA3/2/RQFVuK7MTfg==",
+    "filename": "yarn-1.22.22.tgz",
+    "files": [
+      {
+        "path": "LICENSE",
+        "size": 1355,
+        "mode": 420
+      },
+      {
+        "path": "README.md",
+        "size": 3353,
+        "mode": 420
+      },
+      {
+        "path": "bin/yarn",
+        "size": 1025,
+        "mode": 493
+      },
+      {
+        "path": "bin/yarn.cmd",
+        "size": 34,
+        "mode": 493
+      },
+      {
+        "path": "bin/yarn.js",
+        "size": 1015,
+        "mode": 493
+      },
+      {
+        "path": "bin/yarnpkg",
+        "size": 42,
+        "mode": 493
+      },
+      {
+        "path": "bin/yarnpkg.cmd",
+        "size": 30,
+        "mode": 493
+      },
+      {
+        "path": "lib/cli.js",
+        "size": 5320747,
+        "mode": 493
+      },
+      {
+        "path": "lib/v8-compile-cache.js",
+        "size": 9910,
+        "mode": 420
+      },
+      {
+        "path": "package.json",
+        "size": 634,
+        "mode": 420
+      },
+      {
+        "path": "preinstall.js",
+        "size": 2342,
+        "mode": 420
+      }
+    ],
+    "entryCount": 11,
+    "bundled": []
+  }
+]

@@ -18,6 +18,7 @@
 use std::fmt;
 
 use crate::errmsg;
+use crate::native;
 use crate::version::{Scheme, Version};
 
 /// A vers comparator.
@@ -173,7 +174,22 @@ impl VersRange {
     /// constraint excludes it; the remaining comparator constraints form
     /// sorted, alternating-bound intervals, and a version in any interval is
     /// contained.
+    ///
+    /// An npm or PyPI range is evaluated as its ecosystem evaluates it
+    /// ([`crate::native`]): node-semver's pre-release rule, PEP 440's
+    /// exclusive bounds. A version that ecosystem's grammar rejects is
+    /// walked as above.
     pub fn contains(&self, version: &Version) -> bool {
+        match self.ty.as_str() {
+            "npm" => native::npm_contains(self, version),
+            "pypi" => native::pep440_contains(self, version),
+            _ => None,
+        }
+        .unwrap_or_else(|| self.interval_contains(version))
+    }
+
+    /// [`VersRange::contains`] by the vers algorithm alone.
+    fn interval_contains(&self, version: &Version) -> bool {
         let scheme = self.scheme();
         let cver = |c: &VersConstraint| Version::parse(&c.version, scheme).ok();
 
@@ -383,41 +399,78 @@ mod tests {
         assert!(!r.contains(&v("1:1.7.1-1.fc41"))); // a higher epoch is above
     }
 
+    /// The vers walk (cargo) and node-semver (npm) agree on release
+    /// versions, so each containment case runs under both.
+    const SEMVER_TYPES: [&str; 2] = ["cargo", "npm"];
+
+    fn semver_range(ty: &str, constraints: &str) -> VersRange {
+        VersRange::parse(&format!("vers:{ty}/{constraints}")).unwrap()
+    }
+
     #[test]
     fn bare_version_is_equality() {
-        let r = VersRange::parse("vers:npm/1.0.0").unwrap();
-        assert_eq!(
-            r.constraints(),
-            &[VersConstraint {
-                op: VersOp::Eq,
-                version: "1.0.0".into()
-            }]
-        );
-        assert!(r.contains(&ver("1.0.0", Scheme::Semver)));
-        assert!(!r.contains(&ver("1.0.1", Scheme::Semver)));
+        for ty in SEMVER_TYPES {
+            let r = semver_range(ty, "1.0.0");
+            assert_eq!(
+                r.constraints(),
+                &[VersConstraint {
+                    op: VersOp::Eq,
+                    version: "1.0.0".into()
+                }]
+            );
+            assert!(r.contains(&ver("1.0.0", Scheme::Semver)), "{ty}");
+            assert!(!r.contains(&ver("1.0.1", Scheme::Semver)), "{ty}");
+            let two = semver_range(ty, "1.0.0|2.0.0");
+            assert!(two.contains(&ver("2.0.0", Scheme::Semver)), "{ty}");
+            assert!(!two.contains(&ver("1.5.0", Scheme::Semver)), "{ty}");
+        }
     }
 
     #[test]
     fn open_bounds() {
-        let lo = VersRange::parse("vers:npm/>=1.0.0").unwrap();
-        assert!(lo.contains(&ver("2.0.0", Scheme::Semver)));
-        assert!(!lo.contains(&ver("0.9.0", Scheme::Semver)));
-        let hi = VersRange::parse("vers:npm/<2.0.0").unwrap();
-        assert!(hi.contains(&ver("1.0.0", Scheme::Semver)));
-        assert!(!hi.contains(&ver("2.0.0", Scheme::Semver)));
+        for ty in SEMVER_TYPES {
+            let lo = semver_range(ty, ">=1.0.0");
+            assert!(lo.contains(&ver("2.0.0", Scheme::Semver)), "{ty}");
+            assert!(lo.contains(&ver("1.0.0", Scheme::Semver)), "{ty}");
+            assert!(!lo.contains(&ver("0.9.0", Scheme::Semver)), "{ty}");
+            let hi = semver_range(ty, "<2.0.0");
+            assert!(hi.contains(&ver("1.0.0", Scheme::Semver)), "{ty}");
+            assert!(!hi.contains(&ver("2.0.0", Scheme::Semver)), "{ty}");
+            let hi_incl = semver_range(ty, "<=2.0.0");
+            assert!(hi_incl.contains(&ver("2.0.0", Scheme::Semver)), "{ty}");
+            assert!(!hi_incl.contains(&ver("2.0.1", Scheme::Semver)), "{ty}");
+        }
     }
 
     #[test]
     fn not_equal_excludes() {
-        let r = VersRange::parse("vers:npm/>=1.0.0|!=1.5.0|<2.0.0").unwrap();
-        assert!(r.contains(&ver("1.4.0", Scheme::Semver)));
-        assert!(!r.contains(&ver("1.5.0", Scheme::Semver)));
+        for ty in SEMVER_TYPES {
+            let r = semver_range(ty, ">=1.0.0|!=1.5.0|<2.0.0");
+            assert!(r.contains(&ver("1.4.0", Scheme::Semver)), "{ty}");
+            assert!(!r.contains(&ver("1.5.0", Scheme::Semver)), "{ty}");
+            assert!(r.contains(&ver("1.5.1", Scheme::Semver)), "{ty}");
+        }
     }
 
     #[test]
     fn star_contains_everything() {
-        let r = VersRange::parse("vers:npm/*").unwrap();
-        assert!(r.contains(&ver("0.0.1", Scheme::Semver)));
+        for ty in SEMVER_TYPES {
+            let r = semver_range(ty, "*");
+            assert!(r.contains(&ver("0.0.1", Scheme::Semver)), "{ty}");
+        }
+    }
+
+    #[test]
+    fn several_intervals_each_contain_their_own() {
+        for ty in SEMVER_TYPES {
+            let r = semver_range(ty, ">1.0.0|<=1.2.0|>2.0.0|<3.0.0");
+            assert!(!r.contains(&ver("1.0.0", Scheme::Semver)), "{ty}");
+            assert!(r.contains(&ver("1.2.0", Scheme::Semver)), "{ty}");
+            assert!(!r.contains(&ver("1.5.0", Scheme::Semver)), "{ty}");
+            assert!(!r.contains(&ver("2.0.0", Scheme::Semver)), "{ty}");
+            assert!(r.contains(&ver("2.5.0", Scheme::Semver)), "{ty}");
+            assert!(!r.contains(&ver("3.0.0", Scheme::Semver)), "{ty}");
+        }
     }
 
     #[test]
@@ -477,24 +530,31 @@ mod tests {
 
     #[test]
     fn strict_lower_bound_excludes_its_boundary() {
-        let r = VersRange::parse("vers:npm/>1.0.0|<2.0.0").unwrap();
-        assert!(!r.contains(&ver("1.0.0", Scheme::Semver))); // strict `>`
-        assert!(r.contains(&ver("1.0.1", Scheme::Semver)));
+        for ty in SEMVER_TYPES {
+            let r = semver_range(ty, ">1.0.0|<2.0.0");
+            assert!(!r.contains(&ver("1.0.0", Scheme::Semver)), "{ty}"); // strict `>`
+            assert!(r.contains(&ver("1.0.1", Scheme::Semver)), "{ty}");
+        }
     }
 
     #[test]
     fn upper_bound_inclusive_vs_exclusive() {
-        let incl = VersRange::parse("vers:npm/>=1.0.0|<=2.0.0").unwrap();
-        assert!(incl.contains(&ver("2.0.0", Scheme::Semver))); // `<=` includes
-        let excl = VersRange::parse("vers:npm/>=1.0.0|<2.0.0").unwrap();
-        assert!(!excl.contains(&ver("2.0.0", Scheme::Semver))); // `<` excludes
+        for ty in SEMVER_TYPES {
+            let incl = semver_range(ty, ">=1.0.0|<=2.0.0");
+            assert!(incl.contains(&ver("2.0.0", Scheme::Semver)), "{ty}"); // `<=` includes
+            let excl = semver_range(ty, ">=1.0.0|<2.0.0");
+            assert!(!excl.contains(&ver("2.0.0", Scheme::Semver)), "{ty}"); // `<` excludes
+            assert!(excl.contains(&ver("1.0.0", Scheme::Semver)), "{ty}");
+        }
     }
 
     #[test]
     fn strict_open_lower_bound() {
-        let r = VersRange::parse("vers:npm/>1.0.0").unwrap();
-        assert!(r.contains(&ver("2.0.0", Scheme::Semver)));
-        assert!(!r.contains(&ver("1.0.0", Scheme::Semver))); // strict, no upper
+        for ty in SEMVER_TYPES {
+            let r = semver_range(ty, ">1.0.0");
+            assert!(r.contains(&ver("2.0.0", Scheme::Semver)), "{ty}");
+            assert!(!r.contains(&ver("1.0.0", Scheme::Semver)), "{ty}"); // strict, no upper
+        }
     }
 
     #[test]

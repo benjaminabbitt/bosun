@@ -5,17 +5,30 @@
 //! list`; `query_available` reads PyPI's JSON API over HTTP (the query side
 //! may run anywhere, §4.7). Versions are PEP 440 (vers type `pypi`).
 //!
+//! On this machine uv itself chooses the version within the spec (§5.6):
+//! `uv pip compile - --no-deps` resolves `name<specifiers>` from its
+//! standard input, against uv's own configured index, skipping yanked
+//! releases unless pinned with `==` (PEP 592), pre-releases unless named or
+//! nothing else exists, and releases whose `Requires-Python` or wheels do
+//! not fit the interpreter `uv tool install` would use (`uv python find
+//! --system`). A vers range that is a union of intervals is resolved
+//! interval by interval, PEP 440 having no union, and the newest result
+//! taken. The remote index, with no uv to ask, takes the newest version in
+//! the range.
+//!
 //! uv places the tool's executables itself (`~/.local/bin` unless configured
 //! otherwise). A tool keeps no durable hold — a re-run re-asserts the exact
 //! version — so `hold` is a no-op and holds are not needed (§5.2).
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
-use bosun_core::{BackendId, Capabilities, Installed, Ref, Scheme, Scope, Source, Target, Version};
+use bosun_core::{
+    BackendId, Capabilities, Installed, Ref, Scheme, Scope, Source, Target, Version, Want,
+};
 use bosun_ports::{
     Backend, BackendFactory, Command, CommandRunner, HostInfo, HttpFetcher, HttpRequest, Index,
-    Installer, PortError, Probe, Step, Steps, UserInstall, UserInstalls,
+    Installer, PortError, Probe, Selection, Step, Steps, UserInstall, UserInstalls,
 };
 use tracing::debug;
 
@@ -66,6 +79,8 @@ impl BackendFactory for UvFactory {
         let backend = UvBackend {
             runner: self.runner.clone(),
             fetcher: self.fetcher.clone(),
+            local: true,
+            python: Arc::new(OnceLock::new()),
         };
         Backend {
             index: Box::new(backend.clone()),
@@ -78,6 +93,8 @@ impl BackendFactory for UvFactory {
         Some(Box::new(UvBackend {
             runner: self.runner.clone(),
             fetcher: self.fetcher.clone(),
+            local: false,
+            python: Arc::new(OnceLock::new()),
         }))
     }
 }
@@ -99,6 +116,133 @@ fn parse_uv_version(stdout: &str) -> Result<Version, PortError> {
 struct UvBackend {
     runner: Arc<dyn CommandRunner>,
     fetcher: Arc<dyn HttpFetcher>,
+    /// Whether uv is on this machine to choose versions itself.
+    local: bool,
+    /// The interpreter `uv tool install` would use, asked on first use;
+    /// `None` when uv finds none (it would then fetch one).
+    python: Arc<OnceLock<Option<String>>>,
+}
+
+/// What `uv pip compile` prints when no version satisfies the requirement.
+const NO_SOLUTION: &str = "No solution found";
+
+impl UvBackend {
+    /// The interpreter `uv tool install` would use: `uv python find
+    /// --system` (asked once).
+    fn python(&self) -> Option<&str> {
+        self.python
+            .get_or_init(|| {
+                let out = self
+                    .runner
+                    .run(&Command::new("uv", argv(&["python", "find", "--system"])));
+                match out {
+                    Ok(out) if out.success() => {
+                        let found = out.stdout_utf8().trim().to_string();
+                        debug!(message = logmsg::UV_PYTHON, python = %found);
+                        (!found.is_empty()).then_some(found)
+                    }
+                    _ => {
+                        debug!(message = logmsg::UV_NO_PYTHON);
+                        None
+                    }
+                }
+            })
+            .as_deref()
+    }
+
+    /// The version uv resolves `requirement` to, or `None` when nothing
+    /// satisfies it.
+    fn resolve(&self, requirement: &str) -> Result<Option<Version>, PortError> {
+        let mut args = argv(&[
+            "pip",
+            "compile",
+            "-",
+            "--no-deps",
+            "--no-header",
+            "--no-annotate",
+            "--quiet",
+            "--color",
+            "never",
+        ]);
+        if let Some(python) = self.python() {
+            args.extend(argv(&["--python", python]));
+        }
+        let out = self
+            .runner
+            .run(&Command::new("uv", args).with_stdin(format!("{requirement}\n")))?;
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if !out.success() {
+            if stderr.contains(NO_SOLUTION) {
+                return Ok(None);
+            }
+            return Err(PortError::CommandFailed {
+                program: "uv".to_string(),
+                code: out.code,
+                stderr: stderr.into_owned(),
+            });
+        }
+        let stdout = out.stdout_utf8();
+        let pinned = stdout
+            .lines()
+            .find_map(|l| l.split_once("=="))
+            .map(|(_, v)| v.split([' ', ';']).next().unwrap_or(v).trim().to_string())
+            .ok_or_else(|| PortError::CommandOutput {
+                detail: format!("uv pip compile for {requirement:?} pinned nothing: {stdout:?}"),
+            })?;
+        Version::parse(&pinned, Scheme::Pep440)
+            .map(Some)
+            .map_err(|e| PortError::CommandOutput {
+                detail: format!("uv pip compile version {pinned:?}: {e}"),
+            })
+    }
+
+    /// uv's own choice in `want` (module docs): a locked version uv still
+    /// resolves, else the newest of what uv resolves each interval to.
+    fn uv_select(
+        &self,
+        pkg: &Ref,
+        want: &Want,
+        prefer: &[Version],
+    ) -> Result<Selection, PortError> {
+        let name = pkg.purl.native_id();
+        for locked in prefer {
+            if !want.admissible(std::slice::from_ref(locked)).is_empty()
+                && self.resolve(&format!("{name}=={locked}"))?.as_ref() == Some(locked)
+            {
+                return Ok(Selection {
+                    chosen: Some(locked.clone()),
+                    available: vec![locked.clone()],
+                });
+            }
+        }
+        let mut found = Vec::new();
+        for set in want.pep440_sets() {
+            if let Some(v) = self.resolve(&format!("{name}{set}"))? {
+                found.push(v);
+            }
+        }
+        let Some(chosen) = found.into_iter().max() else {
+            debug!(message = logmsg::UV_NO_MATCH, package = %name, spec = %want.summary());
+            return Ok(Selection {
+                chosen: None,
+                available: self.query_available(pkg, &Target::Any).unwrap_or_default(),
+            });
+        };
+        if !want.admits(&chosen) {
+            return Err(PortError::Backend {
+                detail: format!(
+                    "{kind}: uv chose {name}=={chosen}, outside {spec}",
+                    kind = crate::errmsg::TOOL_CHOICE_OUTSIDE_SPEC,
+                    spec = want.summary(),
+                ),
+            });
+        }
+        debug!(message = logmsg::UV_CHOSEN, package = %name, version = %chosen);
+        Ok(Selection {
+            chosen: Some(chosen.clone()),
+            available: vec![chosen],
+        })
+    }
 }
 
 fn argv(parts: &[&str]) -> Vec<String> {
@@ -177,6 +321,25 @@ impl Index for UvBackend {
             .filter(|(_, files)| files.iter().any(|f| !f.yanked))
             .filter_map(|(v, _)| Version::parse(v, Scheme::Pep440).ok())
             .collect())
+    }
+
+    /// On this machine uv resolves the range itself; the remote index takes
+    /// the newest version in it.
+    fn select(
+        &self,
+        pkg: &Ref,
+        target: &Target,
+        want: &Want,
+        prefer: &[Version],
+    ) -> Result<Selection, PortError> {
+        if self.local {
+            return self.uv_select(pkg, want, prefer);
+        }
+        let available = self.query_available(pkg, target)?;
+        Ok(Selection {
+            chosen: want.choose(&available, prefer),
+            available,
+        })
     }
 }
 
@@ -351,7 +514,290 @@ mod tests {
     }
 
     fn backend(runner: Arc<dyn CommandRunner>, fetcher: Arc<dyn HttpFetcher>) -> UvBackend {
-        UvBackend { runner, fetcher }
+        UvBackend {
+            runner,
+            fetcher,
+            local: true,
+            python: Arc::new(OnceLock::new()),
+        }
+    }
+
+    const COMPILE_HTTPIE: &str = include_str!("../tests/fixtures/uv/uv-compile-httpie.txt");
+    const COMPILE_ZOPE: &str = include_str!("../tests/fixtures/uv/uv-compile-zope.txt");
+    const COMPILE_UNSAT: &str = include_str!("../tests/fixtures/uv/uv-compile-unsat.stderr");
+    const COMPILE_OFFLINE: &str = include_str!("../tests/fixtures/uv/uv-compile-offline.stderr");
+    const PYTHON: &str =
+        "/home/u/.local/share/uv/python/cpython-3.14.2-linux-x86_64-gnu/bin/python3.14\n";
+
+    fn uv_fails(code: i32, stderr: &str) -> Output {
+        Output {
+            code: Some(code),
+            stdout: vec![],
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    fn pypi_want(range: &str) -> Want {
+        Want::of(bosun_core::VersRange::parse(range).unwrap())
+    }
+
+    fn select(b: &UvBackend, name: &str, range: &str, prefer: &[&str]) -> Selection {
+        let prefer: Vec<Version> = prefer.iter().map(|v| pep(v)).collect();
+        b.select(&reff(name), &Target::Any, &pypi_want(range), &prefer)
+            .unwrap()
+    }
+
+    #[test]
+    fn uv_resolves_the_range_against_the_interpreter_uv_tool_install_uses() {
+        let fake = Arc::new(
+            FakeCommandRunner::new()
+                .with_stdout(PYTHON)
+                .with_stdout(COMPILE_HTTPIE),
+        );
+        let b = backend(fake.clone(), Arc::new(FakeHttpFetcher::new()));
+        let got = select(&b, "httpie", "vers:pypi/>=3|<4", &[]);
+        assert_eq!(got.chosen, Some(pep("3.2.4")));
+        let calls = fake.calls();
+        assert_eq!(calls[0].program, "uv");
+        assert_eq!(calls[0].args, vec!["python", "find", "--system"]);
+        assert_eq!(calls[1].program, "uv");
+        assert_eq!(
+            calls[1].args,
+            vec![
+                "pip",
+                "compile",
+                "-",
+                "--no-deps",
+                "--no-header",
+                "--no-annotate",
+                "--quiet",
+                "--color",
+                "never",
+                "--python",
+                PYTHON.trim(),
+            ]
+        );
+        assert_eq!(calls[1].stdin.as_deref(), Some("httpie>=3,<4\n"));
+    }
+
+    #[test]
+    fn with_no_interpreter_found_uv_chooses_its_own() {
+        let fake = Arc::new(
+            FakeCommandRunner::new()
+                .with_output(uv_fails(2, "error: No interpreter found"))
+                .with_stdout(COMPILE_ZOPE)
+                .with_stdout(COMPILE_ZOPE),
+        );
+        let b = backend(fake.clone(), Arc::new(FakeHttpFetcher::new()));
+        assert_eq!(
+            select(&b, "zope.interface", "vers:pypi/*", &[]).chosen,
+            Some(pep("8.7"))
+        );
+        assert!(!fake.calls()[1].args.contains(&"--python".to_string()));
+        assert_eq!(fake.calls()[1].stdin.as_deref(), Some("zope.interface\n"));
+        // The interpreter is asked once.
+        select(&b, "zope.interface", "vers:pypi/*", &[]);
+        assert_eq!(fake.calls().len(), 3);
+        let blank = Arc::new(
+            FakeCommandRunner::new()
+                .with_stdout("\n")
+                .with_stdout(COMPILE_ZOPE),
+        );
+        let b = backend(blank.clone(), Arc::new(FakeHttpFetcher::new()));
+        select(&b, "zope.interface", "vers:pypi/*", &[]);
+        assert!(!blank.calls()[1].args.contains(&"--python".to_string()));
+        // A failing find names no interpreter, whatever it printed.
+        let failing = Arc::new(
+            FakeCommandRunner::new()
+                .with_output(Output {
+                    code: Some(2),
+                    stdout: PYTHON.as_bytes().to_vec(),
+                    stderr: vec![],
+                })
+                .with_stdout(COMPILE_ZOPE),
+        );
+        let b = backend(failing.clone(), Arc::new(FakeHttpFetcher::new()));
+        select(&b, "zope.interface", "vers:pypi/*", &[]);
+        assert!(!failing.calls()[1].args.contains(&"--python".to_string()));
+    }
+
+    #[test]
+    fn a_union_is_resolved_interval_by_interval_taking_the_newest() {
+        let fake = Arc::new(
+            FakeCommandRunner::new()
+                .with_stdout(PYTHON)
+                .with_stdout("httpie==1.0.3\n")
+                .with_output(uv_fails(1, COMPILE_UNSAT))
+                .with_stdout(COMPILE_HTTPIE),
+        );
+        let b = backend(fake.clone(), Arc::new(FakeHttpFetcher::new()));
+        let got = select(&b, "httpie", "vers:pypi/>=1|<1.5|>=2.0|<2.1|>=3|<4", &[]);
+        assert_eq!(got.chosen, Some(pep("3.2.4")));
+        let asked: Vec<String> = fake.calls()[1..]
+            .iter()
+            .map(|c| c.stdin.clone().unwrap())
+            .collect();
+        assert_eq!(
+            asked,
+            vec!["httpie>=1,<1.5\n", "httpie>=2.0,<2.1\n", "httpie>=3,<4\n"]
+        );
+    }
+
+    #[test]
+    fn nothing_uv_resolves_is_no_choice_listing_the_index() {
+        let fake = Arc::new(
+            FakeCommandRunner::new()
+                .with_stdout(PYTHON)
+                .with_output(uv_fails(1, COMPILE_UNSAT)),
+        );
+        let fetcher = Arc::new(
+            FakeHttpFetcher::new().with_body("https://pypi.org/pypi/httpie/json", PYPI_HTTPIE),
+        );
+        let got = select(&backend(fake, fetcher), "httpie", "vers:pypi/>=99", &[]);
+        assert_eq!(got.chosen, None);
+        assert_eq!(got.available.len(), 53);
+    }
+
+    #[test]
+    fn uv_failing_otherwise_is_an_error() {
+        let fake = Arc::new(
+            FakeCommandRunner::new()
+                .with_stdout(PYTHON)
+                .with_output(uv_fails(2, COMPILE_OFFLINE)),
+        );
+        let b = backend(fake, Arc::new(FakeHttpFetcher::new()));
+        let err = b
+            .select(
+                &reff("httpie"),
+                &Target::Any,
+                &pypi_want("vers:pypi/*"),
+                &[],
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, PortError::CommandFailed { code: Some(2), .. }),
+            "{err:?}"
+        );
+        for stdout in [
+            "",
+            "--index-url https://pypi.org/simple\n",
+            "httpie==not-a-version\n",
+        ] {
+            let fake = Arc::new(
+                FakeCommandRunner::new()
+                    .with_stdout(PYTHON)
+                    .with_stdout(stdout),
+            );
+            let b = backend(fake, Arc::new(FakeHttpFetcher::new()));
+            let err = b
+                .select(
+                    &reff("httpie"),
+                    &Target::Any,
+                    &pypi_want("vers:pypi/*"),
+                    &[],
+                )
+                .unwrap_err();
+            assert!(
+                matches!(err, PortError::CommandOutput { .. }),
+                "{stdout:?}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pin_with_a_marker_reads_as_its_version() {
+        let fake = Arc::new(
+            FakeCommandRunner::new()
+                .with_stdout(PYTHON)
+                .with_stdout("httpie==3.2.4 ; python_version >= '3.8'\n"),
+        );
+        let b = backend(fake, Arc::new(FakeHttpFetcher::new()));
+        assert_eq!(
+            select(&b, "httpie", "vers:pypi/*", &[]).chosen,
+            Some(pep("3.2.4"))
+        );
+    }
+
+    #[test]
+    fn a_uv_choice_outside_the_spec_is_refused() {
+        let fake = Arc::new(
+            FakeCommandRunner::new()
+                .with_stdout(PYTHON)
+                .with_stdout(COMPILE_HTTPIE),
+        );
+        let b = backend(fake, Arc::new(FakeHttpFetcher::new()));
+        let err = b
+            .select(
+                &reff("httpie"),
+                &Target::Any,
+                &pypi_want("vers:pypi/<3"),
+                &[],
+            )
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(crate::errmsg::TOOL_CHOICE_OUTSIDE_SPEC),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_locked_version_uv_still_resolves_is_kept_even_yanked() {
+        // PEP 592: an exact pin may install a yanked release, and uv does.
+        let fake = Arc::new(
+            FakeCommandRunner::new()
+                .with_stdout(PYTHON)
+                .with_stdout("httpie==2.0.0\n"),
+        );
+        let b = backend(fake.clone(), Arc::new(FakeHttpFetcher::new()));
+        let got = select(&b, "httpie", "vers:pypi/*", &["2.0.0"]);
+        assert_eq!(got.chosen, Some(pep("2.0.0")));
+        assert_eq!(fake.calls()[1].stdin.as_deref(), Some("httpie==2.0.0\n"));
+        // A lock the spec no longer admits is not asked about.
+        let fake = Arc::new(
+            FakeCommandRunner::new()
+                .with_stdout(PYTHON)
+                .with_stdout(COMPILE_HTTPIE),
+        );
+        let b = backend(fake.clone(), Arc::new(FakeHttpFetcher::new()));
+        assert_eq!(
+            select(&b, "httpie", "vers:pypi/>=3", &["2.0.0"]).chosen,
+            Some(pep("3.2.4"))
+        );
+        assert_eq!(fake.calls()[1].stdin.as_deref(), Some("httpie>=3\n"));
+        // One uv no longer resolves falls through to the range.
+        let fake = Arc::new(
+            FakeCommandRunner::new()
+                .with_stdout(PYTHON)
+                .with_output(uv_fails(1, COMPILE_UNSAT))
+                .with_stdout(COMPILE_HTTPIE),
+        );
+        let b = backend(fake.clone(), Arc::new(FakeHttpFetcher::new()));
+        assert_eq!(
+            select(&b, "httpie", "vers:pypi/*", &["3.2.3"]).chosen,
+            Some(pep("3.2.4"))
+        );
+    }
+
+    #[test]
+    fn the_remote_index_takes_the_newest_in_the_range_and_runs_nothing() {
+        let runner = Arc::new(FakeCommandRunner::new());
+        let fetcher = Arc::new(
+            FakeHttpFetcher::new().with_body("https://pypi.org/pypi/httpie/json", PYPI_HTTPIE),
+        );
+        let index = UvFactory::new(runner.clone(), fetcher)
+            .remote_index()
+            .expect("a remote index");
+        let got = index
+            .select(
+                &reff("httpie"),
+                &Target::Any,
+                &pypi_want("vers:pypi/<3"),
+                &[],
+            )
+            .unwrap();
+        assert_eq!(got.chosen, Some(pep("2.6.0")));
+        assert!(runner.calls().is_empty());
     }
 
     fn quiet() -> UvBackend {

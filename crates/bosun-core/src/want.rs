@@ -5,11 +5,17 @@
 //!
 //! A backend whose package manager ranks versions itself (apt's pin
 //! priorities, dnf's repo priorities) or resolves a range itself (npm, uv)
-//! reads the same [`Want`] and applies its own order; [`Want::choose`] is the
-//! rule for the rest.
+//! reads the same [`Want`] and applies its own order, the latter through its
+//! native range ([`Want::npm_range`], [`Want::pep440_sets`]);
+//! [`Want::choose`] is the rule for the rest.
+//!
+//! PyPI follows uv's default pre-release rule too (`if-necessary-or-explicit`):
+//! a pre-release is admissible when a set names one, or when every version
+//! available is a pre-release.
 
+use crate::native;
 use crate::vers::{VersOp, VersRange};
-use crate::version::Version;
+use crate::version::{Scheme, Version};
 
 /// The vers sets one package must satisfy together.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,10 +60,28 @@ impl Want {
         })
     }
 
+    /// Every set at once as one node-semver range, for npm to resolve.
+    pub fn npm_range(&self) -> String {
+        native::npm_intersection(&self.ranges)
+    }
+
+    /// Every set at once as PEP 440 specifier sets, any of which admits a
+    /// version, for uv to resolve.
+    pub fn pep440_sets(&self) -> Vec<String> {
+        native::pep440_intersection(&self.ranges)
+    }
+
+    /// Whether the sets are PyPI's, read under PEP 440.
+    fn is_pep440(&self) -> bool {
+        self.ranges.iter().all(|r| r.scheme() == Scheme::Pep440)
+    }
+
     /// The versions in `available` selection may take: wanted, and not a
-    /// pre-release unless some set names one.
+    /// pre-release unless some set names one (or, for PyPI, every version
+    /// available is one).
     pub fn admissible<'a>(&self, available: &'a [Version]) -> Vec<&'a Version> {
-        let allow_pre = self.names_prerelease();
+        let only_pre = !available.is_empty() && available.iter().all(Version::is_prerelease);
+        let allow_pre = self.names_prerelease() || (self.is_pep440() && only_pre);
         available
             .iter()
             .filter(|v| self.admits(v))
@@ -166,6 +190,49 @@ mod tests {
         assert!(!exact.names_exactly(&v[1]));
         assert!(!want(&["vers:deb/>=1.0-1"]).names_exactly(&v[0]));
         assert!(!want(&["vers:deb/1.0-1|1.0-2"]).names_exactly(&v[0]));
+    }
+
+    fn pep(raw: &[&str]) -> Vec<Version> {
+        raw.iter()
+            .map(|v| Version::parse(*v, Scheme::Pep440).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn pypi_admits_a_prerelease_when_every_version_is_one() {
+        let w = want(&["vers:pypi/>=1.0a1"]);
+        assert!(w.names_prerelease());
+        let plain = want(&["vers:pypi/*"]);
+        assert_eq!(
+            plain
+                .choose(&pep(&["1.0a1", "1.0b2"]), &[])
+                .unwrap()
+                .as_str(),
+            "1.0b2"
+        );
+        // A final release anywhere keeps pre-releases out, as uv does.
+        assert_eq!(
+            plain.choose(&pep(&["0.9", "1.0b2"]), &[]).unwrap().as_str(),
+            "0.9"
+        );
+        assert_eq!(
+            want(&["vers:pypi/>=1.0"]).choose(&pep(&["0.9", "1.0b2"]), &[]),
+            None
+        );
+        // Other schemes keep the guard alone.
+        let only_pre = sem(&["1.0.0-rc.1"]);
+        assert_eq!(want(&["vers:cargo/*"]).choose(&only_pre, &[]), None);
+        assert_eq!(plain.choose(&[], &[]), None);
+    }
+
+    #[test]
+    fn the_sets_read_as_npm_and_pep440_ranges() {
+        let npm = want(&["vers:npm/>=1.0.0|<2.0.0", "vers:npm/!=1.5.0"]);
+        assert_eq!(npm.npm_range(), "<0.0.0-0");
+        let npm = want(&["vers:npm/>=1.0.0|<2.0.0", "vers:npm/>=1.5.0"]);
+        assert_eq!(npm.npm_range(), ">=1.0.0 <2.0.0 >=1.5.0");
+        let pypi = want(&["vers:pypi/>=1.0|<2.0", "vers:pypi/>=1.5"]);
+        assert_eq!(pypi.pep440_sets(), vec![">=1.0,<2.0,>=1.5"]);
     }
 
     #[test]

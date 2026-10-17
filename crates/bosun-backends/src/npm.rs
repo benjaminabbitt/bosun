@@ -5,6 +5,15 @@
 //! reads the registry's abbreviated metadata over HTTP (the query side may run
 //! anywhere, §4.7).
 //!
+//! On this machine npm itself chooses the version within the spec (§5.6):
+//! `npm pack --dry-run --json <name>@<range>` resolves the spec, as a node-semver
+//! range, with npm's own picker (npm-pick-manifest: the `latest` dist-tag
+//! when it satisfies the range, then non-deprecated versions, then versions
+//! whose `engines` fit this Node and npm, newest first) against npm's own
+//! configured registry. It fetches the tarball into npm's cache, which the
+//! install then reuses. The remote index, with no npm to ask, takes the
+//! newest version in the range.
+//!
 //! Global installs go under npm's own global prefix (`npm prefix -g`): nvm's
 //! or fnm's Node directory, a configured `~/.npm-global`, `%APPDATA%\npm`, or
 //! a system Node's `/usr/local`. The prefix is read once, on first use, and
@@ -20,11 +29,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use bosun_core::{
-    BackendId, Capabilities, Installed, Os, Ref, Scheme, Scope, Source, Target, Version,
+    BackendId, Capabilities, Installed, Os, Ref, Scheme, Scope, Source, Target, Version, Want,
 };
 use bosun_ports::{
     Backend, BackendFactory, Command, CommandRunner, HostInfo, HttpFetcher, HttpRequest, Index,
-    Installer, PortError, Probe, Step, Steps, UserInstall, UserInstalls,
+    Installer, PortError, Probe, Selection, Step, Steps, UserInstall, UserInstalls,
 };
 use tracing::{debug, warn};
 
@@ -112,6 +121,7 @@ impl BackendFactory for NpmFactory {
             program: program(self.os),
             os: self.os,
             prefix: Arc::new(OnceLock::new()),
+            local: true,
         };
         Backend {
             index: Box::new(backend.clone()),
@@ -127,6 +137,7 @@ impl BackendFactory for NpmFactory {
             program: program(self.os),
             os: self.os,
             prefix: Arc::new(OnceLock::new()),
+            local: false,
         }))
     }
 }
@@ -139,6 +150,8 @@ struct NpmBackend {
     os: Os,
     /// npm's global prefix, asked on first use.
     prefix: Arc<OnceLock<Result<PathBuf, PortError>>>,
+    /// Whether npm is on this machine to choose versions itself.
+    local: bool,
 }
 
 fn argv(parts: &[&str]) -> Vec<String> {
@@ -256,6 +269,100 @@ impl NpmBackend {
     }
 }
 
+/// One package `npm pack --dry-run --json` resolved.
+#[derive(serde::Deserialize)]
+struct Packed {
+    version: String,
+}
+
+/// What `npm pack --json` prints when it fails.
+#[derive(serde::Deserialize)]
+struct PackFailure {
+    error: LsError,
+}
+
+/// npm's error codes for "no version matches" and "no such package".
+const NO_MATCH: [&str; 2] = ["ETARGET", "E404"];
+
+impl NpmBackend {
+    /// The version npm's own picker resolves `<name>@<spec>` to, or `None`
+    /// when nothing matches.
+    fn resolve(&self, name: &str, spec: &str) -> Result<Option<Version>, PortError> {
+        let at = format!("{name}@{spec}");
+        let out = self.runner.run(&Command::new(
+            self.program,
+            argv(&["pack", "--dry-run", "--json", &at]),
+        ))?;
+        if !out.success() {
+            return match serde_json::from_slice::<PackFailure>(&out.stdout) {
+                Ok(f) if NO_MATCH.contains(&f.error.code.as_str()) => Ok(None),
+                _ => Err(PortError::CommandFailed {
+                    program: self.program.to_string(),
+                    code: out.code,
+                    stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+                }),
+            };
+        }
+        let packed: Vec<Packed> =
+            serde_json::from_slice(&out.stdout).map_err(|e| PortError::CommandOutput {
+                detail: format!("npm pack --json for {at}: {e}"),
+            })?;
+        let Some(first) = packed.first() else {
+            return Err(PortError::CommandOutput {
+                detail: format!("npm pack --json for {at} named no package"),
+            });
+        };
+        Version::parse(&first.version, Scheme::Semver)
+            .map(Some)
+            .map_err(|e| PortError::CommandOutput {
+                detail: format!("npm pack version {:?} for {at}: {e}", first.version),
+            })
+    }
+
+    /// npm's own choice in `want` (module docs): a locked version npm still
+    /// resolves, else what npm resolves the range to.
+    fn npm_select(
+        &self,
+        pkg: &Ref,
+        want: &Want,
+        prefer: &[Version],
+    ) -> Result<Selection, PortError> {
+        let name = pkg.purl.native_id();
+        for locked in prefer {
+            if !want.admissible(std::slice::from_ref(locked)).is_empty()
+                && self.resolve(&name, locked.as_str())?.as_ref() == Some(locked)
+            {
+                return Ok(Selection {
+                    chosen: Some(locked.clone()),
+                    available: vec![locked.clone()],
+                });
+            }
+        }
+        let range = want.npm_range();
+        let Some(chosen) = self.resolve(&name, &range)? else {
+            debug!(message = logmsg::NPM_NO_MATCH, package = %name, range = %range);
+            return Ok(Selection {
+                chosen: None,
+                available: self.query_available(pkg, &Target::Any).unwrap_or_default(),
+            });
+        };
+        if !want.admits(&chosen) {
+            return Err(PortError::Backend {
+                detail: format!(
+                    "{kind}: npm chose {name}@{chosen} for {range}, outside {spec}",
+                    kind = crate::errmsg::TOOL_CHOICE_OUTSIDE_SPEC,
+                    spec = want.summary(),
+                ),
+            });
+        }
+        debug!(message = logmsg::NPM_CHOSEN, package = %name, range = %range, version = %chosen);
+        Ok(Selection {
+            chosen: Some(chosen.clone()),
+            available: vec![chosen],
+        })
+    }
+}
+
 #[derive(serde::Deserialize)]
 struct Packument {
     #[serde(default)]
@@ -293,6 +400,25 @@ impl Index for NpmBackend {
             .keys()
             .filter_map(|v| Version::parse(v, Scheme::Semver).ok())
             .collect())
+    }
+
+    /// On this machine npm resolves the range itself; the remote index
+    /// takes the newest version in it.
+    fn select(
+        &self,
+        pkg: &Ref,
+        target: &Target,
+        want: &Want,
+        prefer: &[Version],
+    ) -> Result<Selection, PortError> {
+        if self.local {
+            return self.npm_select(pkg, want, prefer);
+        }
+        let available = self.query_available(pkg, target)?;
+        Ok(Selection {
+            chosen: want.choose(&available, prefer),
+            available,
+        })
     }
 }
 
@@ -465,6 +591,7 @@ mod tests {
             program: "npm",
             os: Os::Linux,
             prefix: Arc::new(prefix),
+            local: true,
         }
     }
 
@@ -917,6 +1044,193 @@ mod tests {
             }),
             Err(PortError::CommandOutput { .. })
         ));
+    }
+
+    const PACK_YARN: &str = include_str!("../tests/fixtures/npm/npm-pack-yarn-star.json");
+    const PACK_ETARGET: &str = include_str!("../tests/fixtures/npm/npm-pack-yarn-etarget.json");
+    const PACK_E404: &str = include_str!("../tests/fixtures/npm/npm-pack-e404.json");
+    const PACK_TYPES: &str = include_str!("../tests/fixtures/npm/npm-pack-types-semver.json");
+
+    fn npm_want(range: &str) -> Want {
+        Want::of(bosun_core::VersRange::parse(range).unwrap())
+    }
+
+    fn select(b: &NpmBackend, purl: &str, range: &str, prefer: &[&str]) -> Selection {
+        let prefer: Vec<Version> = prefer.iter().map(|v| sem(v)).collect();
+        b.select(
+            &reff(purl),
+            &bosun_core::Target::Any,
+            &npm_want(range),
+            &prefer,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn npm_resolves_the_range_with_its_own_picker() {
+        // yarn's `latest` is 1.22.22 though 2.4.3 is published: npm takes
+        // the tag.
+        let fake = Arc::new(FakeCommandRunner::new().with_stdout(PACK_YARN));
+        let b = backend(fake.clone(), Arc::new(FakeHttpFetcher::new()));
+        let got = select(&b, "pkg:npm/yarn", "vers:npm/*", &[]);
+        assert_eq!(got.chosen, Some(sem("1.22.22")));
+        let calls = fake.calls();
+        assert_eq!(calls[0].program, "npm");
+        assert_eq!(calls[0].args, vec!["pack", "--dry-run", "--json", "yarn@*"]);
+    }
+
+    #[test]
+    fn the_range_npm_resolves_is_the_specs_node_semver_form() {
+        let fake = Arc::new(FakeCommandRunner::new().with_stdout(PACK_TYPES));
+        let b = backend(fake.clone(), Arc::new(FakeHttpFetcher::new()));
+        let got = select(
+            &b,
+            "pkg:npm/%40types/semver",
+            "vers:npm/>=7.5.0|<7.6.0",
+            &[],
+        );
+        assert_eq!(got.chosen, Some(sem("7.5.8")));
+        assert_eq!(fake.calls()[0].args[3], "@types/semver@>=7.5.0 <7.6.0");
+    }
+
+    #[test]
+    fn nothing_npm_matches_is_no_choice_listing_the_registry() {
+        for out in [PACK_ETARGET, PACK_E404] {
+            let fake = Arc::new(FakeCommandRunner::new().with_output(failed(1, out)));
+            let fetcher = Arc::new(
+                FakeHttpFetcher::new()
+                    .with_body("https://registry.npmjs.org/yarn", REGISTRY_COWSAY),
+            );
+            let got = select(
+                &backend(fake, fetcher),
+                "pkg:npm/yarn",
+                "vers:npm/>=99.0.0",
+                &[],
+            );
+            assert_eq!(got.chosen, None);
+            assert_eq!(got.available.len(), 21);
+        }
+        // The listing is only for the message: its failure leaves it empty.
+        let fake = Arc::new(FakeCommandRunner::new().with_output(failed(1, PACK_ETARGET)));
+        let got = select(
+            &backend(fake, Arc::new(FakeHttpFetcher::new())),
+            "pkg:npm/yarn",
+            "vers:npm/>=99.0.0",
+            &[],
+        );
+        assert_eq!(
+            got,
+            Selection {
+                chosen: None,
+                available: vec![]
+            }
+        );
+    }
+
+    #[test]
+    fn npm_failing_otherwise_is_an_error() {
+        for out in [
+            failed(1, ""),
+            failed(1, r#"{"error": {"code": "ECONNREFUSED"}}"#),
+        ] {
+            let fake = Arc::new(FakeCommandRunner::new().with_output(out));
+            let b = backend(fake, Arc::new(FakeHttpFetcher::new()));
+            let err = b
+                .select(
+                    &reff("pkg:npm/yarn"),
+                    &bosun_core::Target::Any,
+                    &npm_want("vers:npm/*"),
+                    &[],
+                )
+                .unwrap_err();
+            assert!(
+                matches!(err, PortError::CommandFailed { code: Some(1), .. }),
+                "{err:?}"
+            );
+        }
+        for stdout in ["[]", "{}", r#"[{"version": "one"}]"#] {
+            let fake = Arc::new(FakeCommandRunner::new().with_stdout(stdout));
+            let b = backend(fake, Arc::new(FakeHttpFetcher::new()));
+            let err = b
+                .select(
+                    &reff("pkg:npm/yarn"),
+                    &bosun_core::Target::Any,
+                    &npm_want("vers:npm/*"),
+                    &[],
+                )
+                .unwrap_err();
+            assert!(
+                matches!(err, PortError::CommandOutput { .. }),
+                "{stdout}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_choice_outside_the_spec_is_refused() {
+        let fake = Arc::new(FakeCommandRunner::new().with_stdout(PACK_YARN));
+        let b = backend(fake, Arc::new(FakeHttpFetcher::new()));
+        let err = b
+            .select(
+                &reff("pkg:npm/yarn"),
+                &bosun_core::Target::Any,
+                &npm_want("vers:npm/>=2.0.0"),
+                &[],
+            )
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(crate::errmsg::TOOL_CHOICE_OUTSIDE_SPEC),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_locked_version_npm_still_resolves_is_kept() {
+        let packed_1_22_19 = PACK_YARN.replace("1.22.22", "1.22.19");
+        let fake = Arc::new(FakeCommandRunner::new().with_stdout(packed_1_22_19));
+        let b = backend(fake.clone(), Arc::new(FakeHttpFetcher::new()));
+        let got = select(&b, "pkg:npm/yarn", "vers:npm/*", &["1.22.19"]);
+        assert_eq!(got.chosen, Some(sem("1.22.19")));
+        assert_eq!(fake.calls()[0].args[3], "yarn@1.22.19");
+        assert_eq!(fake.calls().len(), 1);
+        // A lock the spec no longer admits is not asked about.
+        let fake = Arc::new(FakeCommandRunner::new().with_stdout(PACK_YARN));
+        let b = backend(fake.clone(), Arc::new(FakeHttpFetcher::new()));
+        let got = select(&b, "pkg:npm/yarn", "vers:npm/<2.0.0", &["2.4.3"]);
+        assert_eq!(got.chosen, Some(sem("1.22.22")));
+        assert_eq!(fake.calls()[0].args[3], "yarn@<2.0.0");
+        // One npm no longer resolves falls through to the range.
+        let fake = Arc::new(
+            FakeCommandRunner::new()
+                .with_output(failed(1, PACK_ETARGET))
+                .with_stdout(PACK_YARN),
+        );
+        let b = backend(fake.clone(), Arc::new(FakeHttpFetcher::new()));
+        let got = select(&b, "pkg:npm/yarn", "vers:npm/*", &["1.22.20"]);
+        assert_eq!(got.chosen, Some(sem("1.22.22")));
+        assert_eq!(fake.calls().len(), 2);
+    }
+
+    #[test]
+    fn the_remote_index_takes_the_newest_in_the_range_and_runs_nothing() {
+        let runner = Arc::new(FakeCommandRunner::new());
+        let fetcher = Arc::new(
+            FakeHttpFetcher::new().with_body("https://registry.npmjs.org/cowsay", REGISTRY_COWSAY),
+        );
+        let index = NpmFactory::new(runner.clone(), fetcher, Os::Linux)
+            .remote_index()
+            .expect("a remote index");
+        let got = index
+            .select(
+                &reff("pkg:npm/cowsay"),
+                &bosun_core::Target::Any,
+                &npm_want("vers:npm/*"),
+                &[],
+            )
+            .unwrap();
+        assert_eq!(got.chosen, Some(sem("1.6.0")));
+        assert!(runner.calls().is_empty());
     }
 
     #[test]

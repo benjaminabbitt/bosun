@@ -73,6 +73,12 @@ pub const APT_NEWER_PASSED_OVER: &str =
 pub const APT_PINNED_AWAY_NAMED: &str =
     "the spec names a version apt's pins keep from installing; installing it as apt-get install pkg=version would";
 
+/// The version npm's own picker resolved the spec's range to.
+pub const NPM_CHOSEN: &str = "npm resolves the spec's range to this version";
+
+/// npm resolves no version in the spec's range (or knows no such package).
+pub const NPM_NO_MATCH: &str = "npm resolves no version in the spec's range";
+
 /// Where npm global installs go: npm's own global prefix (`npm prefix -g`).
 pub const NPM_PREFIX: &str = "npm installs globally under this prefix";
 
@@ -87,6 +93,18 @@ pub const NPM_BIN_NOT_ON_PATH: &str = "npm's global bin dir is not on PATH";
 /// A global package Node ships itself (npm, corepack), not one the user
 /// installed; it is left out of the export.
 pub const NPM_BUNDLED_LEFT_OUT: &str = "npm package Node ships left out of the export";
+
+/// The interpreter `uv tool install` would use, which uv resolves against.
+pub const UV_PYTHON: &str = "uv resolves for the interpreter uv tool install uses";
+
+/// uv finds no interpreter of its own; it resolves with whatever it picks.
+pub const UV_NO_PYTHON: &str = "uv found no interpreter; uv pip compile picks its own";
+
+/// The version uv resolved the spec to.
+pub const UV_CHOSEN: &str = "uv resolves the spec to this version";
+
+/// uv resolves no version in the spec.
+pub const UV_NO_MATCH: &str = "uv resolves no version in the spec";
 
 /// A uv tool installed from a path or URL, not PyPI, which bosun installs
 /// from; it is left out of the export.

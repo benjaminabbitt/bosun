@@ -440,6 +440,38 @@ Feature: real backends against a disposable container
     Then it succeeds
     And ~/.npm-global/bin/semver does not exist
 
+  # npm resolves the spec itself: yarn's `latest` dist-tag is 1.22.22 though
+  # 2.4.3 is published, and npm's picker prefers the tag.
+  @npm @useradd @runuser
+  Scenario: npm resolves the spec's range with its own picker
+    Given the manifest:
+      """
+      version: 2
+      packages:
+        - name: yarn
+          spec: "*"
+          install: {backend: npm}
+      """
+    And the non-root user's npm prefix is ~/.npm-global
+    And a non-root user owns the project
+    When the non-root user runs `bosun install . --yes`
+    Then it succeeds
+    And npm lists yarn 1.22.22 under ~/.npm-global
+    When the manifest becomes:
+      """
+      version: 2
+      packages:
+        - name: yarn
+          spec: ">=2.0.0"
+          install: {backend: npm}
+      """
+    And the non-root user runs `bosun install . --yes`
+    Then it succeeds
+    And npm lists yarn 2.4.3 under ~/.npm-global
+    When the manifest is deleted
+    And the non-root user runs `bosun prune --yes`
+    Then it succeeds
+
   @npm @useradd @runuser
   Scenario: npm under a system Node's prefix needs root, and bosun says so
     Given the manifest:
@@ -486,3 +518,24 @@ Feature: real backends against a disposable container
     And the non-root user runs `bosun prune --yes`
     Then it succeeds
     And the binary ruff does not exist
+
+  # uv resolves the spec itself, for the interpreter its tools use: under
+  # Python 3.9 black's newest release that still supports it, 25.11.0, though
+  # 26.x is published.
+  @uv @python3.9 @useradd @runuser
+  Scenario: uv resolves the spec for the interpreter its tools use
+    Given the manifest:
+      """
+      version: 2
+      packages:
+        - name: black
+          spec: "*"
+          install: {backend: uv}
+      """
+    And a non-root user owns the project
+    When the non-root user runs `bosun install . --yes`
+    Then it succeeds
+    And uv lists black 25.11.0
+    When the manifest is deleted
+    And the non-root user runs `bosun prune --yes`
+    Then it succeeds

@@ -5,6 +5,7 @@
 pub mod errmsg;
 pub mod manifest;
 pub mod model;
+pub mod native;
 pub mod platform;
 pub mod purl;
 pub mod record;

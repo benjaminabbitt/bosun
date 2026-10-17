@@ -1,0 +1,3 @@
+--index-url https://pypi.org/simple
+
+httpie==3.2.4

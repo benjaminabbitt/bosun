@@ -11,6 +11,7 @@ rust-version.workspace = true
 deb-version.workspace = true
 semver.workspace = true
 pep440_rs.workspace = true
+nodejs-semver.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 

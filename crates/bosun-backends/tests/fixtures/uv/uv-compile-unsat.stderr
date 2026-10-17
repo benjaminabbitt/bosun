@@ -1,0 +1,2 @@
+error: No solution found when resolving dependencies
+  cause: Because only httpie<=3.2.4 is available and you require httpie>=99, we can conclude that your requirements are unsatisfiable.

@@ -20,6 +20,8 @@ pub struct Command {
     /// Environment variables to set for this command (e.g.
     /// `DEBIAN_FRONTEND=noninteractive`), as `(name, value)` pairs.
     pub env: Vec<(String, String)>,
+    /// What to write to the command's standard input, if anything.
+    pub stdin: Option<String>,
 }
 
 impl Command {
@@ -30,7 +32,14 @@ impl Command {
             program: program.into(),
             args: args.into_iter().collect(),
             env: Vec::new(),
+            stdin: None,
         }
+    }
+
+    /// Give the command `input` on its standard input.
+    pub fn with_stdin(mut self, input: impl Into<String>) -> Command {
+        self.stdin = Some(input.into());
+        self
     }
 
     /// Set the environment for this command.
@@ -145,6 +154,16 @@ mod tests {
         assert_eq!(
             cmd.env,
             vec![("DEBIAN_FRONTEND".to_string(), "noninteractive".to_string())]
+        );
+    }
+
+    #[test]
+    fn with_stdin_attaches_the_input() {
+        let cmd = Command::new("uv", ["pip".to_string()]);
+        assert_eq!(cmd.stdin, None);
+        assert_eq!(
+            cmd.with_stdin("httpie\n").stdin.as_deref(),
+            Some("httpie\n")
         );
     }
 

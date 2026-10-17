@@ -54,6 +54,7 @@ impl<'a> StepExecutor<'a> {
                     program: program.clone(),
                     args: args.to_vec(),
                     env: env.clone(),
+                    stdin: None,
                 };
                 let out = self.runner.run(&command)?;
                 let ok_exit = ok_exits.iter().find(|e| out.code == Some(e.code));

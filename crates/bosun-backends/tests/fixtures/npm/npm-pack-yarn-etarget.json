@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "ETARGET",
+    "summary": "No matching version found for yarn@>=99.",
+    "detail": "In most cases you or one of your dependencies are requesting\na package version that doesn't exist."
+  }
+}

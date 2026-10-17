@@ -33,6 +33,8 @@ annals-yaml = { git = "https://github.com/benjaminabbitt/annals.git", rev = "24a
 deb-version = "0.1.1"
 semver = "1.0.28"
 pep440_rs = "0.7.3"
+# npm range evaluation by node-semver's own rules (pre-release admission).
+nodejs-semver = "7.0.0"
 
 # Serialization: JSON for lock/state, YAML for --format yaml output.
 serde = { version = "1.0.229", features = ["derive"] }

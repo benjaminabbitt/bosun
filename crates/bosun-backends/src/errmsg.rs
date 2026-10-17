@@ -48,6 +48,10 @@ pub const UNVERIFIED_ELEVATED: &str =
 /// The `unverified` option takes only `allow`.
 pub const UNVERIFIED_VALUE: &str = "unverified takes only `allow`, not";
 
+/// A package manager asked to resolve a spec chose a version outside it:
+/// the spec's native range and bosun's reading of it disagree.
+pub const TOOL_CHOICE_OUTSIDE_SPEC: &str = "the package manager chose a version outside the spec";
+
 /// A deb identity lacks the distro or release apt's remote index reads.
 pub const APT_NO_DISTRO: &str =
     "apt's remote index needs the distro, release and arch in the identity";
