@@ -495,7 +495,12 @@ fn compiled_in_factories(
         ),
         Box::new(DnfFactory::new(runner.clone())),
         Box::new(bosun_backends::ApkFactory::new(runner.clone())),
-        Box::new(CargoFactory::new(runner.clone(), fetcher.clone())),
+        Box::new(
+            CargoFactory::new(runner.clone(), fetcher.clone()).with_config(
+                std::env::current_dir().unwrap_or_default(),
+                cargo_home(home, std::env::var_os("CARGO_HOME")),
+            ),
+        ),
         Box::new(NpmFactory::new(runner.clone(), fetcher.clone(), os)),
         Box::new(UvFactory::new(runner.clone(), fetcher.clone())),
         Box::new(
@@ -690,6 +695,13 @@ fn user_bin_dir(home: &Path) -> PathBuf {
 }
 
 /// The user's home: `%USERPROFILE%` on Windows, `$HOME` elsewhere.
+/// cargo's home, where its own config lives: `$CARGO_HOME` (`var`), else
+/// `~/.cargo`.
+fn cargo_home(home: &Path, var: Option<std::ffi::OsString>) -> PathBuf {
+    var.filter(|v| !v.is_empty())
+        .map_or_else(|| home.join(".cargo"), PathBuf::from)
+}
+
 fn home_dir() -> PathBuf {
     let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
     std::env::var_os(var).map(PathBuf::from).unwrap_or_default()
@@ -1120,6 +1132,17 @@ mod tests {
         assert!(
             builtin.contains("github-release cannot be absent"),
             "{builtin}"
+        );
+    }
+
+    #[test]
+    fn cargo_home_is_its_variable_else_dot_cargo() {
+        let home = Path::new("/home/ben");
+        assert_eq!(cargo_home(home, None), home.join(".cargo"));
+        assert_eq!(cargo_home(home, Some("".into())), home.join(".cargo"));
+        assert_eq!(
+            cargo_home(home, Some("/opt/cargo".into())),
+            PathBuf::from("/opt/cargo")
         );
     }
 

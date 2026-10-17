@@ -58,6 +58,8 @@ zip = { version = "8.6.0", default-features = false, features = ["deflate-flate2
 lzma-rs = "0.3.0"
 ruzstd = "0.9.0"
 bzip2 = "0.6.1"
+# cargo's configuration (source replacement), read as cargo reads it.
+toml = { version = "=1.1.6", default-features = false, features = ["std", "parse", "serde"] }
 # github-release asset-name templates (strict undefined, built-in filters only).
 minijinja = { version = "=3.0.0", default-features = false, features = ["builtins"] }
 

@@ -14,6 +14,10 @@
 //! install then reuses. The remote index, with no npm to ask, takes the
 //! newest version in the range.
 //!
+//! The registry listed from is npm's own configured one on this machine
+//! (`npm config get registry`, or `@scope:registry` for a scoped package),
+//! and the public registry for the remote index.
+//!
 //! Global installs go under npm's own global prefix (`npm prefix -g`): nvm's
 //! or fnm's Node directory, a configured `~/.npm-global`, `%APPDATA%\npm`, or
 //! a system Node's `/usr/local`. The prefix is read once, on first use, and
@@ -25,8 +29,9 @@
 //! `npm -g` keeps no durable hold — a re-run re-asserts the exact version — so
 //! `hold` is a no-op and holds are not needed (§5.2).
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use bosun_core::{
     BackendId, Capabilities, Installed, Os, Ref, Scheme, Scope, Source, Target, Version, Want,
@@ -122,6 +127,7 @@ impl BackendFactory for NpmFactory {
             os: self.os,
             prefix: Arc::new(OnceLock::new()),
             local: true,
+            registries: Arc::default(),
         };
         Backend {
             index: Box::new(backend.clone()),
@@ -138,6 +144,7 @@ impl BackendFactory for NpmFactory {
             os: self.os,
             prefix: Arc::new(OnceLock::new()),
             local: false,
+            registries: Arc::default(),
         }))
     }
 }
@@ -152,16 +159,35 @@ struct NpmBackend {
     prefix: Arc<OnceLock<Result<PathBuf, PortError>>>,
     /// Whether npm is on this machine to choose versions itself.
     local: bool,
+    /// npm's configured registry per scope (`""` for unscoped), asked on
+    /// first use.
+    registries: Arc<Mutex<BTreeMap<String, String>>>,
 }
 
 fn argv(parts: &[&str]) -> Vec<String> {
     parts.iter().map(|s| s.to_string()).collect()
 }
 
-/// The registry URL for a package's metadata; a scope's `/` is escaped
+/// The public registry, npm's default.
+const PUBLIC_REGISTRY: &str = "https://registry.npmjs.org/";
+
+/// The URL for a package's metadata in `registry`; a scope's `/` is escaped
 /// (`@types/node` → `@types%2Fnode`), as npm itself asks.
-fn registry_url(name: &str) -> String {
-    format!("https://registry.npmjs.org/{}", name.replace('/', "%2F"))
+fn registry_url(registry: &str, name: &str) -> String {
+    format!(
+        "{}/{}",
+        registry.trim_end_matches('/'),
+        name.replace('/', "%2F")
+    )
+}
+
+/// The npm config key naming the registry for `name`: `@scope:registry`
+/// for a scoped package, else `registry`.
+fn registry_key(name: &str) -> String {
+    match name.split_once('/') {
+        Some((scope, _)) if scope.starts_with('@') => format!("{scope}:registry"),
+        _ => "registry".to_string(),
+    }
 }
 
 /// npm's global prefix, as `npm prefix -g` prints it: where `npm install -g`
@@ -285,6 +311,51 @@ struct PackFailure {
 const NO_MATCH: [&str; 2] = ["ETARGET", "E404"];
 
 impl NpmBackend {
+    /// The registry `name` is fetched from: npm's configured one for its
+    /// scope, else npm's default registry, on this machine; the public one
+    /// for the remote index (module docs).
+    fn registry(&self, name: &str) -> String {
+        if !self.local {
+            return PUBLIC_REGISTRY.to_string();
+        }
+        let key = registry_key(name);
+        let mut known = self.registries.lock().expect("registry cache");
+        if let Some(found) = known.get(&key) {
+            return found.clone();
+        }
+        let found = match self.config_get(&key) {
+            Ok(Some(url)) => url,
+            Ok(None) if key != "registry" => {
+                drop(known);
+                return self.registry("");
+            }
+            Ok(None) => PUBLIC_REGISTRY.to_string(),
+            Err(e) => {
+                warn!(message = logmsg::NPM_REGISTRY_UNREAD, key = %key, error = %e);
+                PUBLIC_REGISTRY.to_string()
+            }
+        };
+        debug!(message = logmsg::NPM_REGISTRY, key = %key, registry = %found);
+        known.insert(key, found.clone());
+        found
+    }
+
+    /// `npm config get <key>`, `None` when npm has no value for it.
+    fn config_get(&self, key: &str) -> Result<Option<String>, PortError> {
+        let out = self
+            .runner
+            .run(&Command::new(self.program, argv(&["config", "get", key])))?;
+        if !out.success() {
+            return Err(PortError::CommandFailed {
+                program: self.program.to_string(),
+                code: out.code,
+                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            });
+        }
+        let value = out.stdout_utf8().trim().to_string();
+        Ok((!value.is_empty() && value != "undefined" && value != "null").then_some(value))
+    }
+
     /// The version npm's own picker resolves `<name>@<spec>` to, or `None`
     /// when nothing matches.
     fn resolve(&self, name: &str, spec: &str) -> Result<Option<Version>, PortError> {
@@ -376,7 +447,8 @@ impl Index for NpmBackend {
     }
 
     fn query_available(&self, pkg: &Ref, _target: &Target) -> Result<Vec<Version>, PortError> {
-        let url = registry_url(&pkg.purl.native_id());
+        let name = pkg.purl.native_id();
+        let url = registry_url(&self.registry(&name), &name);
         let mut request = HttpRequest::get(&url);
         request
             .headers
@@ -592,6 +664,7 @@ mod tests {
             os: Os::Linux,
             prefix: Arc::new(prefix),
             local: true,
+            registries: Arc::default(),
         }
     }
 
@@ -1210,6 +1283,101 @@ mod tests {
         let got = select(&b, "pkg:npm/yarn", "vers:npm/*", &["1.22.20"]);
         assert_eq!(got.chosen, Some(sem("1.22.22")));
         assert_eq!(fake.calls().len(), 2);
+    }
+
+    #[test]
+    fn the_registry_is_npms_configured_one() {
+        let fake =
+            Arc::new(FakeCommandRunner::new().with_stdout("https://npm.example.com/repo/\n"));
+        let fetcher = Arc::new(
+            FakeHttpFetcher::new()
+                .with_body("https://npm.example.com/repo/cowsay", REGISTRY_COWSAY),
+        );
+        let b = backend(fake.clone(), fetcher.clone());
+        assert_eq!(
+            b.query_available(&reff("pkg:npm/cowsay"), &bosun_core::Target::Any)
+                .unwrap()
+                .len(),
+            21
+        );
+        assert_eq!(fake.calls()[0].args, vec!["config", "get", "registry"]);
+        // Asked once.
+        b.query_available(&reff("pkg:npm/cowsay"), &bosun_core::Target::Any)
+            .unwrap();
+        assert_eq!(fake.calls().len(), 1);
+    }
+
+    #[test]
+    fn a_scoped_package_uses_its_scopes_registry_else_the_default() {
+        let fake = Arc::new(
+            FakeCommandRunner::new()
+                .with_stdout("https://npm.corp.example/\n")
+                .with_stdout("undefined\n")
+                .with_stdout("https://registry.npmjs.org/\n"),
+        );
+        let body = r#"{"versions": {"1.0.0": {}}}"#;
+        let fetcher = Arc::new(
+            FakeHttpFetcher::new()
+                .with_body("https://npm.corp.example/@corp%2Ftool", body)
+                .with_body("https://registry.npmjs.org/@types%2Fsemver", body),
+        );
+        let b = backend(fake.clone(), fetcher);
+        let any = bosun_core::Target::Any;
+        assert_eq!(
+            b.query_available(&reff("pkg:npm/%40corp/tool"), &any)
+                .unwrap(),
+            vec![sem("1.0.0")]
+        );
+        assert_eq!(
+            b.query_available(&reff("pkg:npm/%40types/semver"), &any)
+                .unwrap(),
+            vec![sem("1.0.0")]
+        );
+        let asked: Vec<String> = fake.calls().iter().map(|c| c.args[2].clone()).collect();
+        assert_eq!(asked, vec!["@corp:registry", "@types:registry", "registry"]);
+    }
+
+    #[test]
+    fn npm_failing_to_name_its_registry_falls_back_to_the_public_one() {
+        let fake = Arc::new(FakeCommandRunner::new().with_output(failed(1, "")));
+        let fetcher = Arc::new(
+            FakeHttpFetcher::new().with_body("https://registry.npmjs.org/cowsay", REGISTRY_COWSAY),
+        );
+        let got = backend(fake, fetcher)
+            .query_available(&reff("pkg:npm/cowsay"), &bosun_core::Target::Any)
+            .unwrap();
+        assert_eq!(got.len(), 21);
+        for blank in ["\n", "null\n"] {
+            let fake = Arc::new(FakeCommandRunner::new().with_stdout(blank));
+            let fetcher = Arc::new(
+                FakeHttpFetcher::new()
+                    .with_body("https://registry.npmjs.org/cowsay", REGISTRY_COWSAY),
+            );
+            assert_eq!(
+                backend(fake.clone(), fetcher)
+                    .query_available(&reff("pkg:npm/cowsay"), &bosun_core::Target::Any)
+                    .unwrap()
+                    .len(),
+                21
+            );
+            // No value for the default registry is the public one, asked once.
+            assert_eq!(fake.calls().len(), 1, "{blank:?}");
+        }
+    }
+
+    #[test]
+    fn registry_keys_and_urls() {
+        assert_eq!(registry_key("cowsay"), "registry");
+        assert_eq!(registry_key("@types/node"), "@types:registry");
+        assert_eq!(registry_key("not/scoped"), "registry");
+        assert_eq!(
+            registry_url("https://r.example/x/", "@types/node"),
+            "https://r.example/x/@types%2Fnode"
+        );
+        assert_eq!(
+            registry_url("https://r.example", "jq"),
+            "https://r.example/jq"
+        );
     }
 
     #[test]

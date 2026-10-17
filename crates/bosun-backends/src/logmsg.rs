@@ -20,6 +20,13 @@ pub const FOREIGN_ARCH_LEFT_OUT: &str =
 /// installs only from untagged repositories, so it is left out.
 pub const TAGGED_LEFT_OUT: &str = "apk world entry from a tagged repository left out of the export";
 
+/// The sparse index cargo's configuration has crates.io crates come from.
+pub const CARGO_INDEX: &str = "cargo installs crates.io crates from this index";
+
+/// cargo's configuration names an index bosun cannot read.
+pub const CARGO_INDEX_UNREADABLE: &str =
+    "cargo's configured crates.io index is not one bosun can read";
+
 /// A crate cargo installed from a path or git, not crates.io, which bosun
 /// installs from; it is left out of the export.
 pub const NOT_FROM_CRATES_IO: &str = "cargo install not from crates.io left out of the export";
@@ -73,6 +80,13 @@ pub const APT_NEWER_PASSED_OVER: &str =
 pub const APT_PINNED_AWAY_NAMED: &str =
     "the spec names a version apt's pins keep from installing; installing it as apt-get install pkg=version would";
 
+/// The registry npm is configured to use for a package's scope.
+pub const NPM_REGISTRY: &str = "npm's configured registry";
+
+/// npm could not say which registry it uses; the public one is listed from.
+pub const NPM_REGISTRY_UNREAD: &str =
+    "could not read npm's configured registry; listing from the public registry";
+
 /// The version npm's own picker resolved the spec's range to.
 pub const NPM_CHOSEN: &str = "npm resolves the spec's range to this version";
 
@@ -103,7 +117,7 @@ pub const UV_NO_PYTHON: &str = "uv found no interpreter; uv pip compile picks it
 /// The version uv resolved the spec to.
 pub const UV_CHOSEN: &str = "uv resolves the spec to this version";
 
-/// uv resolves no version in the spec.
+/// uv resolves no version in the spec; its explanation follows.
 pub const UV_NO_MATCH: &str = "uv resolves no version in the spec";
 
 /// A uv tool installed from a path or URL, not PyPI, which bosun installs

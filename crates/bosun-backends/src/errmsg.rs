@@ -52,6 +52,11 @@ pub const UNVERIFIED_VALUE: &str = "unverified takes only `allow`, not";
 /// the spec's native range and bosun's reading of it disagree.
 pub const TOOL_CHOICE_OUTSIDE_SPEC: &str = "the package manager chose a version outside the spec";
 
+/// cargo's configuration replaces crates.io with an index bosun cannot read
+/// (git, a local registry, a vendored directory) or does not parse.
+pub const CARGO_INDEX_UNREADABLE: &str =
+    "cargo's configured crates.io source is not a sparse index bosun can read";
+
 /// A deb identity lacks the distro or release apt's remote index reads.
 pub const APT_NO_DISTRO: &str =
     "apt's remote index needs the distro, release and arch in the identity";

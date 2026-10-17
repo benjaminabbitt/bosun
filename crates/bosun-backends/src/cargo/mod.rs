@@ -2,11 +2,14 @@
 //! installs any version from crates.io. Mutations are step lists
 //! (`cargo install --locked name@ver`); `verify_installed` reads
 //! `cargo install --list`; `query_available` reads the crates.io sparse index
-//! over HTTP (the query side may run anywhere, §4.7).
+//! over HTTP (the query side may run anywhere, §4.7). On this machine that
+//! is the index cargo's configuration replaces crates.io with, if any
+//! ([`registry`]); the remote index reads crates.io's.
 //!
 //! Language backends have no durable hold — a re-run just re-asserts the exact
 //! version — so `hold` is a no-op and `supports_hold` is false (§5.2).
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use bosun_core::{BackendId, Capabilities, Installed, Ref, Scheme, Scope, Source, Target, Version};
@@ -18,18 +21,49 @@ use tracing::debug;
 
 use crate::logmsg;
 
+mod registry;
+
 const BACKEND: &str = "cargo";
 
 /// Builds the cargo backend when `cargo` is present.
 pub struct CargoFactory {
     runner: Arc<dyn CommandRunner>,
     fetcher: Arc<dyn HttpFetcher>,
+    config: Option<(PathBuf, PathBuf)>,
 }
 
 impl CargoFactory {
     /// Construct with the command runner and HTTP fetcher the backend uses.
     pub fn new(runner: Arc<dyn CommandRunner>, fetcher: Arc<dyn HttpFetcher>) -> CargoFactory {
-        CargoFactory { runner, fetcher }
+        CargoFactory {
+            runner,
+            fetcher,
+            config: None,
+        }
+    }
+
+    /// Read cargo's configuration as `cargo install` run in `cwd` would,
+    /// with `cargo_home` its `$CARGO_HOME`, for the index the built backend
+    /// lists from (the remote index keeps crates.io's).
+    pub fn with_config(mut self, cwd: PathBuf, cargo_home: PathBuf) -> CargoFactory {
+        self.config = Some((cwd, cargo_home));
+        self
+    }
+
+    /// The index cargo's configuration names, or why bosun cannot read it.
+    fn configured_index(&self) -> Result<String, PortError> {
+        let Some((cwd, cargo_home)) = &self.config else {
+            return Ok(registry::CRATES_IO.to_string());
+        };
+        let files = registry::config_files(cwd, cargo_home);
+        let found = registry::read(&files).and_then(|tables| registry::crates_io_index(&tables));
+        match &found {
+            Ok(index) => debug!(message = logmsg::CARGO_INDEX, index = %index),
+            Err(why) => debug!(message = logmsg::CARGO_INDEX_UNREADABLE, why = %why),
+        }
+        found.map_err(|why| PortError::Backend {
+            detail: format!("{}: {why}", crate::errmsg::CARGO_INDEX_UNREADABLE),
+        })
     }
 }
 
@@ -66,6 +100,7 @@ impl BackendFactory for CargoFactory {
             runner: self.runner.clone(),
             fetcher: self.fetcher.clone(),
             _version: Some(probe.version),
+            index: self.configured_index(),
         };
         Backend {
             index: Box::new(backend.clone()),
@@ -79,6 +114,7 @@ impl BackendFactory for CargoFactory {
             runner: self.runner.clone(),
             fetcher: self.fetcher.clone(),
             _version: None,
+            index: Ok(registry::CRATES_IO.to_string()),
         }))
     }
 }
@@ -115,6 +151,8 @@ struct CargoBackend {
     runner: Arc<dyn CommandRunner>,
     fetcher: Arc<dyn HttpFetcher>,
     _version: Option<Version>,
+    /// The sparse index crates are listed from, or why it cannot be read.
+    index: Result<String, PortError>,
 }
 
 fn argv(parts: &[&str]) -> Vec<String> {
@@ -133,10 +171,8 @@ impl Index for CargoBackend {
     }
 
     fn query_available(&self, pkg: &Ref, _target: &Target) -> Result<Vec<Version>, PortError> {
-        let url = format!(
-            "https://index.crates.io/{}",
-            sparse_path(&pkg.purl.native_id())
-        );
+        let index = self.index.as_ref().map_err(Clone::clone)?;
+        let url = format!("{index}/{}", sparse_path(&pkg.purl.native_id()));
         let resp = self.fetcher.fetch(&HttpRequest::get(&url))?;
         if resp.status == 404 {
             return Ok(vec![]); // unknown crate
@@ -315,6 +351,7 @@ mod tests {
             runner,
             fetcher,
             _version: Some(sem("1.96.1")),
+            index: Ok(registry::CRATES_IO.to_string()),
         }
     }
 
@@ -508,6 +545,72 @@ mod tests {
         };
         let probe = factory.probe(&host).unwrap().unwrap();
         assert_eq!(probe.version, sem("1.96.1"));
+    }
+
+    const RG: &str = r#"{"name":"ripgrep","vers":"14.1.1","yanked":false}"#;
+
+    /// The cargo backend built on a machine whose cargo config in `cwd`
+    /// (and an empty `$CARGO_HOME`) says `config`.
+    fn built_with_config(config: &str, fetcher: Arc<dyn HttpFetcher>) -> Backend {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(cwd.join(".cargo")).unwrap();
+        std::fs::write(cwd.join(".cargo/config.toml"), config).unwrap();
+        CargoFactory::new(Arc::new(FakeCommandRunner::new()), fetcher)
+            .with_config(cwd, dir.path().join("cargo-home"))
+            .build(Probe {
+                backend: BackendId::new("cargo"),
+                version: sem("1.96.1"),
+            })
+    }
+
+    #[test]
+    fn the_index_is_the_one_cargos_config_replaces_crates_io_with() {
+        let fetcher = Arc::new(
+            FakeHttpFetcher::new().with_body("https://mirror.example/index/ri/pg/ripgrep", RG),
+        );
+        let built = built_with_config(
+            "[source.crates-io]\nreplace-with = \"m\"\n[source.m]\nregistry = \"sparse+https://mirror.example/index/\"\n",
+            fetcher,
+        );
+        let rg = Ref::new("pkg:cargo/ripgrep".parse().unwrap());
+        assert_eq!(
+            built.index.query_available(&rg, &Target::Any).unwrap(),
+            vec![sem("14.1.1")]
+        );
+    }
+
+    #[test]
+    fn an_index_bosun_cannot_read_fails_the_query_naming_it() {
+        let built = built_with_config(
+            "[source.crates-io]\nreplace-with = \"v\"\n[source.v]\ndirectory = \"vendor\"\n",
+            Arc::new(FakeHttpFetcher::new()),
+        );
+        let rg = Ref::new("pkg:cargo/ripgrep".parse().unwrap());
+        let err = built.index.query_available(&rg, &Target::Any).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(crate::errmsg::CARGO_INDEX_UNREADABLE)
+                && err.to_string().contains("directory"),
+            "{err}"
+        );
+        let unparsable = built_with_config("[source\n", Arc::new(FakeHttpFetcher::new()));
+        assert!(unparsable.index.query_available(&rg, &Target::Any).is_err());
+    }
+
+    #[test]
+    fn with_no_config_read_the_built_backend_lists_crates_io() {
+        let fetcher =
+            Arc::new(FakeHttpFetcher::new().with_body("https://index.crates.io/ri/pg/ripgrep", RG));
+        let built = CargoFactory::new(Arc::new(FakeCommandRunner::new()), fetcher).build(Probe {
+            backend: BackendId::new("cargo"),
+            version: sem("1.96.1"),
+        });
+        let rg = Ref::new("pkg:cargo/ripgrep".parse().unwrap());
+        assert_eq!(
+            built.index.query_available(&rg, &Target::Any).unwrap(),
+            vec![sem("14.1.1")]
+        );
     }
 
     #[test]
