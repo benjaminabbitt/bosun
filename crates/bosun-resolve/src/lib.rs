@@ -521,6 +521,8 @@ fn choose_backend<'b>(
 /// - `github`: `pkg:github/<owner>/<repo>?binary=<logical>` — the package id
 ///   is `owner/repo`; the `binary` qualifier defaults to the entry's logical
 ///   name so `- name: ltk` with `package: owner/repo` selects the `ltk` binary.
+/// - `npm`: `pkg:npm/%40<scope>/<name>` for `@scope/name` — the scope,
+///   `@` and all, is the namespace — else `pkg:npm/<name>`.
 /// - anything else: `pkg:<type>/<name>` (cargo, generic, …).
 ///
 /// `qualifiers` are the chosen backend's options, without its package, kept
@@ -581,6 +583,13 @@ fn build_purl(
             qualifiers.insert("binary".to_string(), name.to_string());
             Purl::from_components("github", Some(owner), repo, None, qualifiers, None)
                 .map_err(bad_purl)
+        }
+        "npm" => {
+            let (scope, bare) = match native.split_once('/') {
+                Some((scope, bare)) if scope.starts_with('@') => (Some(scope), bare),
+                _ => (None, native),
+            };
+            Purl::from_components("npm", scope, bare, None, qualifiers, None).map_err(bad_purl)
         }
         other => {
             Purl::from_components(other, None, native, None, qualifiers, None).map_err(bad_purl)
@@ -1401,6 +1410,31 @@ mod tests {
 
         let (queried, _) = index.last.borrow().clone().unwrap();
         assert_eq!(queried.purl.to_string(), "pkg:cargo/duf-cli");
+    }
+
+    #[test]
+    fn an_npm_scope_is_the_purls_namespace_and_named_with_it_again() {
+        for (native, want, namespace, name) in [
+            (
+                "@biomejs/biome",
+                "pkg:npm/%40biomejs/biome",
+                Some("@biomejs"),
+                "biome",
+            ),
+            ("cowsay", "pkg:npm/cowsay", None, "cowsay"),
+        ] {
+            let purl = build_purl("x", "npm", native, BTreeMap::new(), &any_host()).unwrap();
+            assert_eq!(purl.to_string(), want);
+            assert_eq!(purl.namespace(), namespace);
+            assert_eq!(purl.name(), name);
+            assert_eq!(purl.native_id(), native);
+            let parsed: Purl = want.parse().unwrap();
+            assert_eq!(parsed, purl);
+        }
+        // Only an `@` names a scope: any other slash stays in the name.
+        let unscoped = build_purl("x", "npm", "a/b", BTreeMap::new(), &any_host()).unwrap();
+        assert_eq!(unscoped.namespace(), None);
+        assert_eq!(unscoped.name(), "a/b");
     }
 
     #[test]
