@@ -33,3 +33,23 @@ pub const FIRST_USE_CHECKSUM: &str =
 /// install unheld (each plan says so) until the plugin is installed.
 pub const DNF_NO_VERSIONLOCK: &str =
     "dnf has no versionlock command, so dnf packages cannot be held; install python3-dnf-plugin-versionlock";
+
+/// apt's remote index trusts a release file's hashes without checking its
+/// OpenPGP signature (§4.7): the package indexes are checked against it, but
+/// it is only as trustworthy as the HTTPS connection it came over.
+pub const APT_SIGNATURE_NOT_VERIFIED: &str =
+    "the apt release file's signature is not verified; its package index hashes are trusted as fetched over HTTPS";
+
+/// A release's mirror could not be reached, so the release file fetched
+/// earlier is used.
+pub const APT_STALE_RELEASE: &str =
+    "could not fetch the apt release file; using the one fetched earlier";
+
+/// A release file fetched within the cache's freshness window is reused.
+pub const APT_RELEASE_CACHED: &str = "using the cached apt release file";
+
+/// An optional suite (updates, security) is not on the mirror; skipped.
+pub const APT_SUITE_ABSENT: &str = "apt suite not on the mirror; skipped";
+
+/// A suite lists no package index for a component and arch; skipped.
+pub const APT_NO_INDEX_LISTED: &str = "apt suite lists no package index for it; skipped";

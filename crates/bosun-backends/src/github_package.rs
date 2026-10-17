@@ -144,17 +144,28 @@ impl BackendFactory for GithubPackageFactory {
     }
 
     fn build(&self, probe: Probe) -> Backend {
-        let backend = GithubPackageBackend {
+        let backend = self.backend(Some(probe.version));
+        Backend {
+            index: Box::new(backend.clone()),
+            installer: Box::new(backend),
+        }
+    }
+
+    fn remote_index(&self) -> Option<Box<dyn Index>> {
+        // The release's packages and checksums come from GitHub's API.
+        Some(Box::new(self.backend(None)))
+    }
+}
+
+impl GithubPackageFactory {
+    fn backend(&self, version: Option<Version>) -> GithubPackageBackend {
+        GithubPackageBackend {
             kind: self.kind,
             runner: self.runner.clone(),
             releases: ReleaseLookup::new(self.fetcher.clone(), self.os, self.arch)
                 .with_libc(self.libc),
             cache_dir: self.cache_dir.clone(),
-            _version: probe.version,
-        };
-        Backend {
-            index: Box::new(backend.clone()),
-            installer: Box::new(backend),
+            _version: version,
         }
     }
 }
@@ -175,8 +186,9 @@ struct GithubPackageBackend {
     runner: Arc<dyn CommandRunner>,
     releases: ReleaseLookup,
     cache_dir: PathBuf,
-    // Recorded for future per-version flag gating (Appendix B #224).
-    _version: Version,
+    // Recorded for future per-version flag gating (Appendix B #224); none
+    // for a remote index, which runs no package manager.
+    _version: Option<Version>,
 }
 
 fn argv(parts: &[&str]) -> Vec<String> {
@@ -401,7 +413,7 @@ mod tests {
             runner: Arc::new(runner),
             releases: ReleaseLookup::new(fetcher, Os::Linux, Arch::Amd64),
             cache_dir: PathBuf::from("/var/cache/bosun"),
-            _version: Version::parse("2.6.1", Scheme::Generic).unwrap(),
+            _version: Some(Version::parse("2.6.1", Scheme::Generic).unwrap()),
         }
     }
 
@@ -750,5 +762,31 @@ mod tests {
             meta.option_keys,
             &["asset", "tag", "package_name", "unverified"]
         );
+    }
+
+    #[test]
+    fn a_remote_index_reads_the_release_list_and_runs_nothing() {
+        let runner = Arc::new(FakeCommandRunner::new());
+        let list = "https://api.github.com/repos/o/r/releases?per_page=100&page=1";
+        let fetcher = Arc::new(
+            FakeHttpFetcher::new().with_body(list, r#"[{"tag_name":"v2.0.0","assets":[]}]"#),
+        );
+        let index = GithubPackageFactory::new(
+            PackageKind::Deb,
+            runner.clone(),
+            fetcher,
+            PathBuf::from("/c"),
+            Os::Linux,
+            Arch::Amd64,
+        )
+        .remote_index()
+        .expect("a remote index");
+        let pkg = Ref::new("pkg:github/o/r".parse().unwrap());
+        let versions = index.query_available(&pkg, &Target::Any).unwrap();
+        assert_eq!(
+            versions,
+            vec![Version::parse("2.0.0", Scheme::Semver).unwrap()]
+        );
+        assert!(runner.calls().is_empty());
     }
 }

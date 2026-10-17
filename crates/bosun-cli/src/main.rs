@@ -41,6 +41,11 @@ fn main() {
 
 /// Run the selected command, render its value, and return the exit code.
 fn dispatch(cli: &Cli, format: Format) -> Result<i32, CliError> {
+    // render may be for another machine, so it probes this one only when the
+    // target is this machine (§4.7).
+    if let Command::Render { style } = &cli.command {
+        return render_command(style, &cli.installer);
+    }
     let env = env::assemble()?;
     let pref = commands::preference(&env, &cli.installer)?;
     let mut out = std::io::stdout().lock();
@@ -192,25 +197,7 @@ fn dispatch(cli: &Cli, format: Format) -> Result<i32, CliError> {
                 &mut out,
             )
         }
-        Command::Render { style } => {
-            // The output style is the subcommand's, whatever `--format` says:
-            // `$(bosun render args)` is piped, which would otherwise mean JSON.
-            let text = match style {
-                RenderStyle::Args(t) => {
-                    let (target, rendered) = render::this_machine(&env, t.path.clone())?;
-                    rendered.build_args(&target)
-                }
-                RenderStyle::Env(t) => {
-                    let (target, rendered) = render::this_machine(&env, t.path.clone())?;
-                    rendered.env_lines(&target)
-                }
-                RenderStyle::Json(t) => {
-                    render::json(&render::this_machine(&env, t.path.clone())?.1)
-                }
-            };
-            writeln!(out, "{text}").map_err(io_err)?;
-            Ok(0)
-        }
+        Command::Render { .. } => unreachable!("render is dispatched before the host is probed"),
         Command::Prune { plan, scope, yes } => {
             let built = commands::prune_plan(&env)?;
             run_mutation(
@@ -227,6 +214,41 @@ fn dispatch(cli: &Cli, format: Format) -> Result<i32, CliError> {
             )
         }
     }
+}
+
+/// `bosun render` (§8.3). The output style is the subcommand's, whatever
+/// `--format` says: `$(bosun render args)` is piped, which would otherwise
+/// mean JSON.
+fn render_command(style: &RenderStyle, installer: &[String]) -> Result<i32, CliError> {
+    let one = |t: &cli::RenderTarget| render::Request {
+        path: t.path.clone(),
+        targets: t.target.iter().cloned().collect(),
+        distro: t.machine.distro.clone(),
+        libc: t.machine.libc.clone(),
+        installer: installer.to_vec(),
+    };
+    let text = match style {
+        RenderStyle::Args(t) => {
+            let (targets, rendered) = render::rendered(one(t))?;
+            rendered.build_args(&targets[0])
+        }
+        RenderStyle::Env(t) => {
+            let (targets, rendered) = render::rendered(one(t))?;
+            rendered.env_lines(&targets[0])
+        }
+        RenderStyle::Json(t) => {
+            let req = render::Request {
+                path: t.path.clone(),
+                targets: t.targets.clone(),
+                distro: t.machine.distro.clone(),
+                libc: t.machine.libc.clone(),
+                installer: installer.to_vec(),
+            };
+            render::json(&render::rendered(req)?.1)
+        }
+    };
+    writeln!(std::io::stdout().lock(), "{text}").map_err(io_err)?;
+    Ok(0)
 }
 
 /// Render `value` and return its exit code.

@@ -210,6 +210,15 @@ impl Env {
 /// back to real host state — and prints a one-line stderr warning while active.
 /// With neither set, it probes the real host.
 pub fn assemble() -> Result<Env, CliError> {
+    match seam()? {
+        Some((fixture, state_dir)) => from_fixture(&fixture, &state_dir),
+        None => from_host(),
+    }
+}
+
+/// The test seam's fixture and state dir when it is active, said on stderr;
+/// one variable without the other is an error.
+fn seam() -> Result<Option<(String, String)>, CliError> {
     let fixture = std::env::var("BOSUN_FIXTURE").ok();
     let state_dir = std::env::var("BOSUN_STATE_DIR").ok();
     match (fixture, state_dir) {
@@ -217,14 +226,211 @@ pub fn assemble() -> Result<Env, CliError> {
             eprintln!(
                 "bosun: test fixture active (BOSUN_FIXTURE={fixture}), not touching the real host"
             );
-            from_fixture(&fixture, &state_dir)
+            Ok(Some((fixture, state_dir)))
         }
         (Some(_), None) | (None, Some(_)) => Err(CliError::Environment(
             "the test seam needs both BOSUN_FIXTURE and BOSUN_STATE_DIR; set both or neither"
                 .to_string(),
         )),
-        (None, None) => from_host(),
+        (None, None) => Ok(None),
     }
+}
+
+/// This machine's OS and architecture, without probing anything else.
+pub fn this_platform() -> Result<(Os, Arch), CliError> {
+    match seam()? {
+        Some((fixture, _)) => {
+            let fx = read_fixture(&fixture)?;
+            fixture_platform(&fx)
+        }
+        None => Ok((host_os(), detect_arch().map_err(env_err)?)),
+    }
+}
+
+/// One backend's query side for a machine bosun isn't running on (§4.7).
+pub struct RemoteBackend {
+    /// The backend id.
+    pub id: BackendId,
+    /// The purl type for identity (§5.6).
+    pub purl_type: String,
+    /// The vers type for comparison (§6).
+    pub vers_type: String,
+    /// Whether it resolves under `any` (§4.7).
+    pub platform_independent: bool,
+    /// The remote index.
+    pub index: Box<dyn Index>,
+}
+
+/// What resolving for a machine bosun isn't running on has (§4.7, §8.3): each
+/// compiled-in backend's remote index, where it has one, built for that
+/// machine's platform. Nothing here runs a program or reads this machine's
+/// state.
+pub struct RemoteEnv {
+    /// The backends with a remote index, in registration order.
+    pub backends: Vec<RemoteBackend>,
+    option_keys: bosun_io::BackendOptionKeys,
+}
+
+impl RemoteEnv {
+    /// The backends as [`ResolvableBackend`]s borrowing the owned indexes.
+    pub fn resolvables(&self) -> Vec<ResolvableBackend<'_>> {
+        self.backends
+            .iter()
+            .map(|b| ResolvableBackend {
+                id: b.id.clone(),
+                purl_type: b.purl_type.clone(),
+                vers_type: b.vers_type.clone(),
+                platform_independent: b.platform_independent,
+                index: b.index.as_ref(),
+            })
+            .collect()
+    }
+
+    /// The options each known backend declares, for checking a manifest.
+    pub fn option_keys(&self) -> &bosun_io::BackendOptionKeys {
+        &self.option_keys
+    }
+}
+
+/// A runner that runs nothing: the remote side never asks this machine.
+struct NoPrograms;
+
+impl CommandRunner for NoPrograms {
+    fn run(&self, command: &bosun_ports::Command) -> Result<bosun_ports::Output, PortError> {
+        Err(PortError::CommandNotFound {
+            program: command.program.clone(),
+        })
+    }
+}
+
+/// The remote indexes for a machine of `os`, `arch` and `libc` (§4.7): over
+/// HTTPS on a real host, over the fixture's canned HTTP under the test seam.
+pub fn remote(os: Os, arch: Arch, libc: Option<LibcFamily>) -> Result<RemoteEnv, CliError> {
+    match seam()? {
+        Some((fixture, state_dir)) => remote_from_fixture(&fixture, &state_dir, os, arch, libc),
+        None => {
+            let fetcher: Arc<dyn HttpFetcher> = Arc::new(UreqHttpFetcher::new());
+            let bin_dir = user_bin_dir(&home_dir());
+            let factories = compiled_in_factories(
+                Arc::new(NoPrograms),
+                fetcher,
+                bin_dir,
+                os,
+                arch,
+                libc,
+                &host_cache()?,
+            );
+            Ok(remote_env(&factories))
+        }
+    }
+}
+
+/// Each factory's remote index, where it has one.
+fn remote_env(factories: &[Box<dyn BackendFactory>]) -> RemoteEnv {
+    let backends = factories
+        .iter()
+        .filter_map(|f| {
+            let meta = f.meta();
+            f.remote_index().map(|index| RemoteBackend {
+                id: f.id(),
+                purl_type: meta.purl_type.to_string(),
+                vers_type: meta.vers_type.to_string(),
+                platform_independent: meta.platform_independent,
+                index,
+            })
+        })
+        .collect();
+    RemoteEnv {
+        backends,
+        option_keys: factory_option_keys(factories),
+    }
+}
+
+/// The remote indexes under the test seam: the compiled-in ones over the
+/// fixture's canned HTTP, with each fake platform-independent backend's
+/// index (a registry, not this machine's package manager) in place of the
+/// compiled-in one of its id.
+fn remote_from_fixture(
+    path: &str,
+    state_dir: &str,
+    os: Os,
+    arch: Arch,
+    libc: Option<LibcFamily>,
+) -> Result<RemoteEnv, CliError> {
+    let fx = read_fixture(path)?;
+    let factories = compiled_in_factories(
+        Arc::new(NoPrograms),
+        canned_fetcher(&fx.http)?,
+        user_bin_dir(&PathBuf::from(state_dir).join("home")),
+        os,
+        arch,
+        libc,
+        &PathBuf::from(state_dir).join("cache"),
+    );
+    let mut env = remote_env(&factories);
+    for b in fx
+        .backends
+        .into_iter()
+        .filter(|b| b.platform_independent && !b.real)
+    {
+        env.option_keys.entry(b.id.clone()).or_default();
+        let fake = RemoteBackend {
+            id: BackendId::new(b.id),
+            purl_type: b.purl_type,
+            vers_type: b.vers_type.clone(),
+            platform_independent: true,
+            index: Box::new(FixtureIndex::new(b.vers_type, b.available, b.checksums)),
+        };
+        match env.backends.iter_mut().find(|r| r.id == fake.id) {
+            Some(slot) => *slot = fake,
+            None => env.backends.push(fake),
+        }
+    }
+    Ok(env)
+}
+
+/// The fixture at `path`.
+fn read_fixture(path: &str) -> Result<Fixture, CliError> {
+    let text = fs::read_to_string(path).map_err(|e| CliError::Io {
+        path: PathBuf::from(path),
+        detail: e.to_string(),
+    })?;
+    serde_json::from_str(&text).map_err(|e| CliError::Parse {
+        what: "fixture".to_string(),
+        detail: e.to_string(),
+    })
+}
+
+/// The fixture machine's OS and architecture.
+fn fixture_platform(fx: &Fixture) -> Result<(Os, Arch), CliError> {
+    let os = fx
+        .os
+        .parse::<Os>()
+        .map_err(|e| env_err(format!("fixture os: {e}")))?;
+    let arch = fx
+        .arch
+        .parse::<Arch>()
+        .map_err(|e| env_err(format!("fixture arch: {e}")))?;
+    Ok((os, arch))
+}
+
+/// The fixture's canned HTTP: each URL answers 200 with its file's bytes; any
+/// other URL fails.
+fn canned_fetcher(http: &BTreeMap<String, PathBuf>) -> Result<Arc<dyn HttpFetcher>, CliError> {
+    let mut canned = bosun_ports::testing::FakeHttpFetcher::new();
+    for (url, file) in http {
+        let body = fs::read(file).map_err(|e| CliError::Io {
+            path: file.clone(),
+            detail: e.to_string(),
+        })?;
+        canned = canned.with_body(url.clone(), body);
+    }
+    Ok(Arc::new(canned))
+}
+
+/// bosun's cache directory on this host (§4.7).
+fn host_cache() -> Result<PathBuf, CliError> {
+    bosun_io::paths::cache_dir().map_err(env_err)
 }
 
 fn state_paths_at(dir: &str) -> (PathBuf, PathBuf) {
@@ -258,7 +464,8 @@ fn system_cache() -> PathBuf {
 }
 
 /// Every compiled-in backend factory, built (not probed). The schemes map is
-/// taken from these so a backend absent this run is still known (§6).
+/// taken from these so a backend absent this run is still known (§6). `cache`
+/// is where remote indexes keep what they fetch (§4.7).
 fn compiled_in_factories(
     runner: Arc<dyn CommandRunner>,
     fetcher: Arc<dyn HttpFetcher>,
@@ -266,6 +473,7 @@ fn compiled_in_factories(
     os: Os,
     arch: Arch,
     libc: Option<LibcFamily>,
+    cache: &Path,
 ) -> Vec<Box<dyn BackendFactory>> {
     let package = |kind| {
         Box::new(
@@ -281,7 +489,9 @@ fn compiled_in_factories(
         ) as Box<dyn BackendFactory>
     };
     vec![
-        Box::new(AptFactory::new(runner.clone())),
+        Box::new(
+            AptFactory::new(runner.clone()).with_remote_index(fetcher.clone(), cache.join("apt")),
+        ),
         Box::new(DnfFactory::new(runner.clone())),
         Box::new(bosun_backends::ApkFactory::new(runner.clone())),
         Box::new(CargoFactory::new(runner.clone(), fetcher.clone())),
@@ -408,6 +618,7 @@ fn from_host() -> Result<Env, CliError> {
         os,
         arch,
         libc.as_ref().map(|l| l.family),
+        &host_cache()?,
     );
     // §6: the version scheme for a backend comes from its factory metadata and
     // must be known for every compiled-in backend — not only those present this
@@ -487,22 +698,8 @@ fn scope_of(raw: Option<&str>) -> Scope {
 }
 
 fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
-    let text = fs::read_to_string(path).map_err(|e| CliError::Io {
-        path: PathBuf::from(path),
-        detail: e.to_string(),
-    })?;
-    let fx: Fixture = serde_json::from_str(&text).map_err(|e| CliError::Parse {
-        what: "fixture".to_string(),
-        detail: e.to_string(),
-    })?;
-    let os = fx
-        .os
-        .parse::<Os>()
-        .map_err(|e| env_err(format!("fixture os: {e}")))?;
-    let arch = fx
-        .arch
-        .parse::<Arch>()
-        .map_err(|e| env_err(format!("fixture arch: {e}")))?;
+    let fx = read_fixture(path)?;
+    let (os, arch) = fixture_platform(&fx)?;
     let distro = fx.distro.map(|d| Distro {
         id: d.id,
         id_like: d.id_like,
@@ -530,15 +727,7 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
 
     let (system, user) = state_paths_at(state_dir);
     // Canned HTTP and a scratch bin dir for real backends (github-release).
-    let mut canned = bosun_ports::testing::FakeHttpFetcher::new();
-    for (url, file) in &fx.http {
-        let body = fs::read(file).map_err(|e| CliError::Io {
-            path: file.clone(),
-            detail: e.to_string(),
-        })?;
-        canned = canned.with_body(url.clone(), body);
-    }
-    let fetcher: Arc<dyn HttpFetcher> = Arc::new(canned);
+    let fetcher = canned_fetcher(&fx.http)?;
     let home = fx
         .home
         .clone()
@@ -614,11 +803,12 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
         os,
         arch,
         family,
+        &cache_dir,
     ));
     for b in &backends {
         option_keys.entry(b.id.as_str().to_string()).or_default();
     }
-    let skipped = absent_backends(&fx.absent, fetcher.clone(), &bin_dir, os, arch)?;
+    let skipped = absent_backends(&fx.absent, fetcher.clone(), &bin_dir, &cache_dir, os, arch)?;
     let store = FileStateStore::new(system.clone(), user.clone(), schemes.clone());
     let lock_dir = bosun_io::paths::locks_beside(&user);
     let machine = FakeMachine {
@@ -661,6 +851,7 @@ fn absent_backends(
     absent: &[String],
     fetcher: Arc<dyn HttpFetcher>,
     bin_dir: &Path,
+    cache: &Path,
     os: Os,
     arch: Arch,
 ) -> Result<Vec<Skipped>, CliError> {
@@ -673,6 +864,7 @@ fn absent_backends(
         os,
         arch,
         None,
+        cache,
     )
     .into_iter()
     .filter(|f| absent.iter().any(|id| id == f.id().as_str()))
@@ -835,6 +1027,7 @@ mod tests {
             Os::Linux,
             Arch::Amd64,
             None,
+            Path::new("/tmp/cache"),
         );
         let schemes = factory_schemes(&factories);
         assert_eq!(schemes.get("apt"), Some(&Scheme::Debian));
@@ -855,6 +1048,7 @@ mod tests {
             Os::Linux,
             Arch::Amd64,
             None,
+            Path::new("/tmp/cache"),
         );
         let keys = factory_option_keys(&factories);
         assert_eq!(

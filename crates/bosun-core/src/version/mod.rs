@@ -89,6 +89,9 @@ enum Parsed {
     Alpine,
 }
 
+/// What follows a `~` in a Debian version that names a pre-release.
+const DEBIAN_PRERELEASE_TAGS: [&str; 5] = ["alpha", "beta", "rc", "pre", "dev"];
+
 impl Version {
     /// Parse `raw` under `scheme`. Debian and Generic accept any non-empty
     /// string (their grammars are permissive); SemVer and Alpine are
@@ -126,13 +129,22 @@ impl Version {
     }
 
     /// Whether this version is a pre-release of its final form: a SemVer
-    /// pre-release segment, a Debian/RPM/generic `~` chunk (which sorts below
-    /// the release), or an Alpine `_alpha`/`_beta`/`_pre`/`_rc` suffix.
-    /// Selection never picks one unless a spec names it (§5.6).
+    /// pre-release segment, a Debian `~` before a pre-release tag (`~rc1`,
+    /// `~beta2`), an RPM/generic `~` chunk (which sorts below the release),
+    /// or an Alpine `_alpha`/`_beta`/`_pre`/`_rc` suffix. Debian's other uses
+    /// of `~` (`~deb12u1` stable updates, `~bpo12+1` backports, Ubuntu's
+    /// `~24.04.1`) build the release itself. Selection never picks a
+    /// pre-release unless a spec names it (§5.6).
     pub fn is_prerelease(&self) -> bool {
         match &self.parsed {
             Parsed::Semver(v) => !v.pre.is_empty(),
-            Parsed::Debian | Parsed::Rpm(_) => self.raw.contains('~'),
+            Parsed::Debian => self.raw.split('~').skip(1).any(|after| {
+                let after = after.to_ascii_lowercase();
+                DEBIAN_PRERELEASE_TAGS
+                    .iter()
+                    .any(|tag| after.starts_with(tag))
+            }),
+            Parsed::Rpm(_) => self.raw.contains('~'),
             Parsed::Generic(segs) => segs.iter().any(|s| matches!(s, Segment::Tilde)),
             Parsed::Alpine => alpine::is_prerelease(&self.raw),
         }
@@ -215,6 +227,35 @@ mod tests {
         assert_ne!(rpm("1.0-1"), rpm("1.0-2"));
         assert_eq!(rpm("2:4.15.1-12.fc41").as_str(), "2:4.15.1-12.fc41");
         assert_eq!(Version::parse("", Scheme::Rpm), Err(VersionError::Empty));
+    }
+
+    #[test]
+    fn a_debian_prerelease_is_a_tilde_before_a_prerelease_tag() {
+        for pre in [
+            "1.0~rc1-1",
+            "2:1.0~beta2",
+            "1.0~RC1",
+            "3.12.0~alpha1-1",
+            "1.0~pre3-2",
+            "1.0~dev5",
+        ] {
+            assert!(deb(pre).is_prerelease(), "{pre}");
+        }
+        // A tilde that marks a stable update, backport or PPA build of the
+        // release is not a pre-release of it: Debian 12's openssl and
+        // ca-certificates (a native package), a backport, Ubuntu updates.
+        for release in [
+            "3.0.22-1~deb12u1",
+            "20250419~deb12u1",
+            "1:2.39.2-1~bpo12+1",
+            "2.0.12-1~ubuntu24.04.1",
+            "5.15.0-1~22.04",
+            "1.0-1~ppa1",
+            "1.6-2.1+deb12u3",
+            "1.0~",
+        ] {
+            assert!(!deb(release).is_prerelease(), "{release}");
+        }
     }
 
     #[test]

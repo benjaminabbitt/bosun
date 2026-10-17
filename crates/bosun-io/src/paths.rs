@@ -75,6 +75,21 @@ pub fn config_path() -> Result<PathBuf, IoError> {
     Ok(xdg()?.config_dir().join("bosun").join("config.yaml"))
 }
 
+/// The Windows cache directory, `%LOCALAPPDATA%\bosun\cache`.
+pub fn windows_cache_dir(env: impl Fn(&str) -> Option<String>) -> Result<PathBuf, IoError> {
+    known_folder("LOCALAPPDATA", "cache", env)
+}
+
+/// Where bosun caches what it fetched (§4.7: remote package indexes):
+/// `$XDG_CACHE_HOME/bosun` (default `~/.cache/bosun`), `%LOCALAPPDATA%\bosun\cache`
+/// on Windows ([`windows_cache_dir`]).
+pub fn cache_dir() -> Result<PathBuf, IoError> {
+    if cfg!(windows) {
+        return windows_cache_dir(env_var);
+    }
+    Ok(xdg()?.cache_dir().join("bosun"))
+}
+
 /// Where a user's locks live (§4.5): `locks/` in the directory holding their
 /// machine state file. A lock is the machine's own, so it is never in the
 /// project; under `sudo` the user state is root's, so an elevated
@@ -183,6 +198,18 @@ mod tests {
         let name = a.file_name().unwrap().to_string_lossy().to_string();
         assert_eq!(name.len(), "0123456789abcdef.json".len(), "{name}");
         assert!(name.ends_with(".json"));
+    }
+
+    #[test]
+    fn the_cache_is_bosun_under_the_cache_dir() {
+        assert!(cache_dir().unwrap().ends_with("bosun"));
+        assert_eq!(
+            windows_cache_dir(windows_env).unwrap(),
+            PathBuf::from(r"C:\Users\ben\AppData\Local")
+                .join("bosun")
+                .join("cache")
+        );
+        assert!(windows_cache_dir(|_| None).is_err());
     }
 
     #[test]

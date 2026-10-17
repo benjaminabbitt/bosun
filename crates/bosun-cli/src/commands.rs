@@ -20,22 +20,40 @@ use crate::output::Render;
 /// flag, `BOSUN_INSTALLER`, the user config, then the built-in order. The
 /// manifest says only which backends are acceptable, never in what order.
 pub fn preference(env: &Env, flag: &[String]) -> Result<Vec<BackendId>, CliError> {
-    let config = match bosun_io::paths::config_path() {
-        Ok(path) => config_installer(&path)?,
-        // No home directory: no user config to read.
-        Err(_) => Vec::new(),
-    };
     let registered: Vec<(BackendId, Scope)> = env
         .resolvables()
         .iter()
         .filter_map(|b| env.installer_for(&b.id).map(|i| (b.id.clone(), i.scope())))
         .collect();
+    configured_order(flag, &registered)
+}
+
+/// The installer preference order (§5.3) for a machine bosun isn't running on:
+/// the flag, `BOSUN_INSTALLER` and the user config as here, then `ids` (the
+/// backends with a remote index) in registration order, since a backend's
+/// install scope is known only from a probe.
+pub fn remote_preference(flag: &[String], ids: &[BackendId]) -> Result<Vec<BackendId>, CliError> {
+    let registered: Vec<(BackendId, Scope)> =
+        ids.iter().map(|id| (id.clone(), Scope::User)).collect();
+    configured_order(flag, &registered)
+}
+
+/// [`preference_order`] over the flag, `BOSUN_INSTALLER` and the user config.
+fn configured_order(
+    flag: &[String],
+    registered: &[(BackendId, Scope)],
+) -> Result<Vec<BackendId>, CliError> {
+    let config = match bosun_io::paths::config_path() {
+        Ok(path) => config_installer(&path)?,
+        // No home directory: no user config to read.
+        Err(_) => Vec::new(),
+    };
     let from_env = std::env::var("BOSUN_INSTALLER").ok();
     Ok(preference_order(
         flag,
         from_env.as_deref(),
         &config,
-        &registered,
+        registered,
     ))
 }
 
@@ -113,6 +131,14 @@ pub(crate) fn manifest_file(path: Option<PathBuf>) -> Result<PathBuf, CliError> 
 /// Load the manifest at `file` and check its backend options against the
 /// backends this build has (§5.4).
 pub(crate) fn load(env: &Env, file: &Path) -> Result<Manifest, CliError> {
+    load_checked(env.option_keys(), file)
+}
+
+/// Load the manifest at `file`, checking its backend options against `keys`.
+pub(crate) fn load_checked(
+    keys: &bosun_io::BackendOptionKeys,
+    file: &Path,
+) -> Result<Manifest, CliError> {
     let text = fs::read_to_string(file).map_err(|e| CliError::Io {
         path: file.to_path_buf(),
         detail: e.to_string(),
@@ -122,8 +148,7 @@ pub(crate) fn load(env: &Env, file: &Path) -> Result<Manifest, CliError> {
         detail,
     };
     let manifest = load_manifest(&text, file).map_err(|e| parse_err(e.to_string()))?;
-    check_options(&manifest, env.option_keys())
-        .map_err(|e| parse_err(format!("{}: {e}", file.display())))?;
+    check_options(&manifest, keys).map_err(|e| parse_err(format!("{}: {e}", file.display())))?;
     Ok(manifest)
 }
 

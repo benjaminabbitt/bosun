@@ -11,30 +11,48 @@
 //! without --allow-change-held-packages"), so every version change and
 //! removal releases the hold first; `unhold` of an unheld package exits 0.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use bosun_core::{
     BackendId, Capabilities, Installed, Os, Ref, Scheme, Scope, Source, Target, Version,
 };
 use bosun_ports::{
-    Backend, BackendFactory, Command, CommandRunner, HostInfo, Index, Installer, PortError, Probe,
-    Step, Steps, UserInstall, UserInstalls,
+    Backend, BackendFactory, Command, CommandRunner, HostInfo, HttpFetcher, Index, Installer,
+    PortError, Probe, Step, Steps, UserInstall, UserInstalls,
 };
 use tracing::debug;
 
 use crate::logmsg;
+
+pub mod remote;
 
 const BACKEND: &str = "apt";
 
 /// Builds the apt backend when `apt-get` is present (§5.3).
 pub struct AptFactory {
     runner: Arc<dyn CommandRunner>,
+    remote: Option<(Arc<dyn HttpFetcher>, PathBuf)>,
 }
 
 impl AptFactory {
     /// Construct with the command runner the built backend will use.
     pub fn new(runner: Arc<dyn CommandRunner>) -> AptFactory {
-        AptFactory { runner }
+        AptFactory {
+            runner,
+            remote: None,
+        }
+    }
+
+    /// Give it a remote index (§4.7): distro mirrors read through `fetcher`,
+    /// cached under `cache`.
+    pub fn with_remote_index(
+        mut self,
+        fetcher: Arc<dyn HttpFetcher>,
+        cache: PathBuf,
+    ) -> AptFactory {
+        self.remote = Some((fetcher, cache));
+        self
     }
 }
 
@@ -77,6 +95,14 @@ impl BackendFactory for AptFactory {
             index: Box::new(backend.clone()),
             installer: Box::new(backend),
         }
+    }
+
+    fn remote_index(&self) -> Option<Box<dyn Index>> {
+        let (fetcher, cache) = self.remote.as_ref()?;
+        Some(Box::new(remote::RemoteAptIndex::new(
+            fetcher.clone(),
+            cache.clone(),
+        )))
     }
 }
 
@@ -702,5 +728,32 @@ mod tests {
         assert!(caps.supports_exact_version && caps.supports_downgrade);
         assert_eq!(caps.hold, bosun_core::HoldSupport::Supported);
         assert_eq!(b.scope(), Scope::System);
+    }
+
+    #[test]
+    fn a_remote_index_reads_the_mirror_and_runs_nothing() {
+        let runner = Arc::new(FakeCommandRunner::new());
+        let plain = AptFactory::new(runner.clone());
+        assert!(plain.remote_index().is_none());
+        let dir = tempfile::tempdir().unwrap();
+        let factory = plain.with_remote_index(
+            Arc::new(bosun_ports::testing::FakeHttpFetcher::new()),
+            dir.path().to_path_buf(),
+        );
+        let index = factory.remote_index().expect("a remote index");
+        let jq = Ref::new(
+            "pkg:deb/debian/jq?arch=amd64&distro=bookworm"
+                .parse()
+                .unwrap(),
+        );
+        let err = index
+            .query_available(&jq, &Target::Any)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("https://deb.debian.org/debian/dists/bookworm/InRelease"),
+            "{err}"
+        );
+        assert!(runner.calls().is_empty());
     }
 }

@@ -1,0 +1,46 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA256
+
+Origin: Debian
+Label: Debian
+Suite: oldstable-updates
+Version: 12-updates
+Codename: bookworm-updates
+Date: Fri, 16 Oct 2026 20:10:58 UTC
+Acquire-By-Hash: yes
+No-Support-for-Architecture-all: Packages
+Architectures: all amd64 arm64 armel armhf i386 mips64el mipsel ppc64el s390x
+Components: main contrib non-free-firmware non-free
+Description: Debian 12 - Updates
+SHA256:
+ 68c934cec4bab45d82213a75e19f0d09e5a429e4abe5971a352a80caddf41d3d     1345 main/binary-amd64/Packages
+ 44c43de26ac00edac331233eff53c0c0f8cc652b6eb6fa7f1509181a3d28cd86      852 main/binary-amd64/Packages.xz
+ 5dfd52317071685ad6e58c4ef0720128b7db68624079f83be02bdf55f07ac070     6936 main/binary-arm64/Packages.xz
+-----BEGIN PGP SIGNATURE-----
+
+iQIzBAEBCAAdFiEETLUBkCB7R1ij9zp5btDnuCZD4TEFAmrShOcACgkQbtDnuCZD
+4TEGFw//T2AVqt6l72vQs9TPlylnbkTx9legcbcTNTqfHsdtMSRaFsLpHfLDTqoa
+7Rfs0jH6O7tYiLb/5/N+KwkK0aZiT5XldsD/IqICfMRtULe6jGNpU5gqjgleJFb6
+OA9CUPKC/I32tvoOr57LYMwuWRII6prlTdpC80GuFU22WVBnxnDPCUZ+pWc/nOPP
+TrdDETbFYtdV07F7lUegNyCUJW/MpTugDeW5KCkoMF8Uo7kZl02kP/H5mdumQlcY
+jXb1gVZ4EJjuXCS7K5KdZVeajJYHwvAiDubC4S7/x2sGg6aq+t6BTb2GfsrODn9P
+lYAZOnofPj4JiVaId1v9fxOcWibT+AOIb+Hm7KQrdk2rcy9OMV3u2BqanPVsxspG
+geEs3j6I5uTdGOlmFlVpOq+BGmsbtTpRRkqx9D8uWvDNTUAK/OBSSyxLCXrcCotE
+1AKmLaPhOQpd/AGcACIg1osph+LKIAQxKpz8uvN4dPPecL2KrIab825YRX+FRh8Q
+pOQbO9oOu0BHJ70MbxfYL1ymuRGYo7jR3sXXFz8F9m9iDR4rzQ8jzyHmL0u7CEnM
+Tn+j0vB0BBVIbXYWrrC4AJptVzVe+Tru5EqiUwJCyUAlChso4tNaD7k4xeoxSggH
+KsTspyC5jgT9VvU61GE10nHd1q8QJJaNxCaj9zzziQtbJE/jgfSJAjMEAQEIAB0W
+IQS45fExdtKnp1IgAoB426O8R+8iZQUCatKE/AAKCRB426O8R+8iZa5ND/996+A1
+53fZrX0MUXYj8bw9DZ2oYWW89B2vO9W3SkWHQCpS9IX6k2WBXMUqiE9dG4zO5rQg
+pwCPPwxioR1oN7iS8KKN21GGRt4sYt14EigU33oH+kGYEsDGNUh5jhC7SxlLZsg7
+2mY6NYqUruWivmV1BUFVSJ6GOMj5O97bC6SjUGR4cjCRkVuXKEQVor8xR/1Xdt3A
+jQiWka2l07nF+EnfS7D5ubHUFvlgJC0qwZiiFp4hqGBXMmxyuZUlTVK1Ev4WAjKV
+7rZb3c0avcWTnht1QFsJOWAok3IlTWFZUIPPSD8IIkS89gqzkS0PeBUrq8drAgZe
+m6+MlKzGxJp295Nrhxt3O6Ao4ndzjzdmo0YHBBu4HwbeLUT2+WWPoePA/TUoUp5q
+G/jbNVPSvMsZPRknpPSH+91rNEzRh3Bjfe45hPEtfVDe792xvui/H8KkB8Re8zG9
+5htzOA0QEZbskf01f+NsjqVDk12zOB/mLPOFY+rReqt7KJA4HARoQrM6lIEwYDHS
+irHIuXFG/cJVI53PamXxCdKi6Jl31k3mW0KOrWljzlLFb7fYrItemK2xhDmXeHqP
+i+ej1a8YRmMugQTr8ryPcMi8ZM1RlVnYYeztDzbVLCfartIQdhXQ75Y/xehM0Md/
+20qz29JGTxH3r2z89j4p0TqOZcGdbCc+yWiJnA==
+=nV0t
+-----END PGP SIGNATURE-----

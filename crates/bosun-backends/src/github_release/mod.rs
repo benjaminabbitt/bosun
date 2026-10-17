@@ -104,17 +104,28 @@ impl BackendFactory for GithubReleaseFactory {
         if needs_path_warning(&self.bin_dir, &path_var, self.os) {
             warn!(message = logmsg::BIN_DIR_NOT_ON_PATH, bin_dir = %self.bin_dir.display());
         }
-        let backend = GithubReleaseBackend {
+        let backend = self.backend();
+        Backend {
+            index: Box::new(backend.clone()),
+            installer: Box::new(backend),
+        }
+    }
+
+    fn remote_index(&self) -> Option<Box<dyn Index>> {
+        // The release list and checksums come from GitHub's API wherever it runs.
+        Some(Box::new(self.backend()))
+    }
+}
+
+impl GithubReleaseFactory {
+    fn backend(&self) -> GithubReleaseBackend {
+        GithubReleaseBackend {
             fetcher: self.fetcher.clone(),
             bin_dir: self.bin_dir.clone(),
             os: self.os,
             arch: self.arch,
             libc: self.libc,
             token: std::env::var("GITHUB_TOKEN").ok(),
-        };
-        Backend {
-            index: Box::new(backend.clone()),
-            installer: Box::new(backend),
         }
     }
 }
@@ -1521,5 +1532,30 @@ mod tests {
             b.install_exact(&pkg, &sem("0.6.4")).unwrap()
         );
         assert_eq!(b.downgrade(&pkg, &sem("0.6.4")).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_remote_index_reads_the_release_list() {
+        let list = "https://api.github.com/repos/casey/just/releases?per_page=100&page=1";
+        let fetcher = Arc::new(
+            FakeHttpFetcher::new().with_body(list, r#"[{"tag_name":"1.40.0","assets":[]}]"#),
+        );
+        let index = GithubReleaseFactory::new(fetcher, PathBuf::from("/b"), Os::Linux, Arch::Arm64)
+            .remote_index()
+            .expect("a remote index");
+        let just = Ref::new("pkg:github/casey/just".parse().unwrap());
+        let versions = index
+            .query_available(
+                &just,
+                &Target::Platform {
+                    os: Os::Linux,
+                    arch: Arch::Arm64,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            versions,
+            vec![Version::parse("1.40.0", Scheme::Semver).unwrap()]
+        );
     }
 }

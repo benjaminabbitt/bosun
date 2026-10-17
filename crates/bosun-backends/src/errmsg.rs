@@ -47,3 +47,33 @@ pub const UNVERIFIED_ELEVATED: &str =
     "the release publishes no checksum for it, and it would install as root or Administrator";
 /// The `unverified` option takes only `allow`.
 pub const UNVERIFIED_VALUE: &str = "unverified takes only `allow`, not";
+
+/// A deb identity lacks the distro or release apt's remote index reads.
+pub const APT_NO_DISTRO: &str =
+    "apt's remote index needs the distro, release and arch in the identity";
+
+/// apt's remote index knows no mirror for the distro.
+pub const APT_NO_MIRROR: &str = "no apt mirror is known for distro";
+
+/// The release's own suite is not on its mirror.
+pub const APT_NO_RELEASE: &str = "no such apt release";
+
+/// A release file names another suite than the one fetched.
+pub const APT_RELEASE_MISMATCH: &str = "the apt release file is for another suite";
+
+/// A release file bosun could not read.
+pub const APT_BAD_RELEASE: &str = "malformed apt release file";
+
+/// A fetched package index does not match the size and SHA256 its release
+/// file lists.
+pub const APT_HASH_MISMATCH: &str =
+    "the apt package index does not match the hash its release file lists";
+
+/// No suite of a release lists a package index for the arch.
+pub const APT_NO_INDEX: &str = "the apt release lists no package index";
+
+/// A package index would not decompress.
+pub const APT_DECOMPRESS: &str = "could not decompress the apt package index";
+
+/// The apt index cache could not be read or written.
+pub const APT_CACHE: &str = "apt index cache";

@@ -1,0 +1,46 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA256
+
+Origin: Debian
+Label: Debian-Security
+Suite: oldstable-security
+Version: 12
+Codename: bookworm-security
+Date: Fri, 16 Oct 2026 21:02:20 UTC
+Valid-Until: Fri, 23 Oct 2026 21:02:20 UTC
+Acquire-By-Hash: yes
+Architectures: amd64 arm64 armhf i386 ppc64el
+Components: updates/main updates/contrib updates/non-free-firmware updates/non-free
+Description: Debian 12 - Security Updates
+SHA256:
+ 401d4d1683b811319ce58e02ed65ccce54a30a5dcdf76274e9edd69ee197f950     2290 main/binary-amd64/Packages
+ 62fd1c1efd20051cd467e7450fc7f76502edf1efbec4b59c62257140f08cc04f     1092 main/binary-amd64/Packages.xz
+ 49882d0d6976e1928c1b55d7c6fcaea4efafacd791842a2b44db55b25587698f   350692 main/binary-arm64/Packages.xz
+-----BEGIN PGP SIGNATURE-----
+
+iQIzBAEBCAAdFiEE7VQTEqM/ESjxCxxsVEBHYru26FMFAmrSkN4ACgkQVEBHYru2
+6FO42w/9GEDQZCpiHMe2yvgAAKw2hITtdy9qgA7xrWlHm2nJRG0HYcejZQEfIqhF
+vwsV6qbfMXTXN4qv1MAimezTfjRLQLqbnhOOD9u2j1tOg0nUqjFJAI0VfIh5VKe0
+zcGVblhvL4xnYCt19syUFPg4R6n5PgNi/D121n6KexqIVqBHAhSTypOwKmvCgzzS
+2L5qm5D48dfbR71cl8R1QMrR0vmVsHyCx/PoqSAasT24T96wGbSYRGfLoB8ZJmL8
+YjelBopv9OGXWfYXZwWtJFOyxhOweYtTKFpJMnQ6ErGV0+/VyN1QK69/4RKz6Il0
+N+yUgq7OMxi1JCdggtyS8AX6ePYk5kc6pSeA/7j7EKVR8fgLT38oMgV7kx+TT7dY
+p46Xq0M+A/uaX/lTiIvCImvjcAWx2pUDCg2W935NUp+51Cm5s0E0VDOFVpA+FxXy
+fQmzdz8OtJBR0ho6ohnflzw7vxsBaUyjZov7vnfGOrIG8WxO/bZiQqZu4XMYX51p
+uOuj8fKKXZkgBdaXd0jH3tAjIKVRD+yML71SdZYCaZUBu4W/SGPNygN4xmQBg0I9
+oKt+QPVn9FhpXQZ9zByen2c6smUn4cC4n8E6yHpF570QNmqxttDizQOPwCGCrylG
+vtER1JNqf46Ssry11ElYfhVpTvZFpRfTDLgPi85OBzWxJpIE5waJAjMEAQEIAB0W
+IQSwyrkmbow5KXmLPu695tK5IW7HqAUCatKQ3gAKCRC95tK5IW7HqGbfEACgs71h
+SjGe8OCbeIls6CnN8rf5mDkuiCYo31NQA1o9ep4gHB1QwaksIDHeUN2SpcjDCgJv
+BKJkHUbKMNnfxX3pXU/hXYW6xNUGe+nJ5MlewBz00hKjH4dVQLvVKIj4piIbQIul
+llAHoTNcESoddapkJLsUtjmyK8UEMtvenCtwm87fzQpxZsFJvsWO+DsKDRG9dZNf
+G82LtZlgOqEMY5qWXGLGF19MMG3U5qSYvB+9B4QGEqY3z7Cjpweq5rFA/CnReC9M
+HLldqkCcApK6aWkoAVZ9MXenazUPZ44h7cVoV8e+VXoCPk3PkG9L8HUxpMTTt/4d
+8WeETjBllYMz5UaY3qbio7RNEkEWsD2JQukMGEXXRcgH9gALxwd1MxRpBOmkU4Gh
+PFJhhQ85aqP4KPFaY9vxTFnjjIEgh2mtKHvg5J5GTwyWQgE4QZ3xcdz1AQnyMEyp
+jb4WEi22hSKjPHVzJ8B2ZqP2EQk+ReJnZF2YP2veO55oK+hnOcYcZoRcdMyZ5LHY
+bO61a6CYs/i7Ujnq7KFNctjvlauevwiR0XfCeoXFhe1zE+pUbPNH0j7hHEU9UuWx
+n8r4bf0DruHnYbHtnASykeRY/HaZqAhNlj5R/3yvjIWr4oEYP/gYM1xjkz7U3Dyh
+RML85KoXw1t1D9n7b5l5FfiGmOU2cO5WdJK/fQ==
+=OaEp
+-----END PGP SIGNATURE-----

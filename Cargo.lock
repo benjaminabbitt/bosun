@@ -145,6 +145,8 @@ version = "0.0.0"
 dependencies = [
  "bosun-core",
  "bosun-ports",
+ "flate2",
+ "lzma-rs",
  "minijinja",
  "serde",
  "serde_json",

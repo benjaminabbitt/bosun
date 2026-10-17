@@ -65,12 +65,21 @@ impl BackendFactory for CargoFactory {
         let backend = CargoBackend {
             runner: self.runner.clone(),
             fetcher: self.fetcher.clone(),
-            _version: probe.version,
+            _version: Some(probe.version),
         };
         Backend {
             index: Box::new(backend.clone()),
             installer: Box::new(backend),
         }
+    }
+
+    fn remote_index(&self) -> Option<Box<dyn Index>> {
+        // crates.io's sparse index is the query side wherever it runs.
+        Some(Box::new(CargoBackend {
+            runner: self.runner.clone(),
+            fetcher: self.fetcher.clone(),
+            _version: None,
+        }))
     }
 }
 
@@ -105,7 +114,7 @@ fn sparse_path(name: &str) -> String {
 struct CargoBackend {
     runner: Arc<dyn CommandRunner>,
     fetcher: Arc<dyn HttpFetcher>,
-    _version: Version,
+    _version: Option<Version>,
 }
 
 fn argv(parts: &[&str]) -> Vec<String> {
@@ -305,7 +314,7 @@ mod tests {
         CargoBackend {
             runner,
             fetcher,
-            _version: sem("1.96.1"),
+            _version: Some(sem("1.96.1")),
         }
     }
 
@@ -499,5 +508,21 @@ mod tests {
         };
         let probe = factory.probe(&host).unwrap().unwrap();
         assert_eq!(probe.version, sem("1.96.1"));
+    }
+
+    #[test]
+    fn a_remote_index_reads_crates_io_and_runs_nothing() {
+        let runner = Arc::new(FakeCommandRunner::new());
+        let fetcher = Arc::new(FakeHttpFetcher::new().with_body(
+            "https://index.crates.io/ri/pg/ripgrep",
+            r#"{"vers":"14.1.1","yanked":false}"#,
+        ));
+        let index = CargoFactory::new(runner.clone(), fetcher)
+            .remote_index()
+            .expect("a remote index");
+        let rg = Ref::new("pkg:cargo/ripgrep".parse().unwrap());
+        let versions = index.query_available(&rg, &Target::Any).unwrap();
+        assert_eq!(versions, vec![sem("14.1.1")]);
+        assert!(runner.calls().is_empty());
     }
 }

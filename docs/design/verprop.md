@@ -116,7 +116,7 @@ real to check later):
 | `lock` | resolve the manifest for this machine (its platform, plus platform-independent `any` entries) and write this machine's lock for it, keeping each version it already pins while that still fits (§4.5, §7). Warns when an older bosun's `bosun.lock` sits beside the manifest: it is no longer read |
 | `migrate [path] [--plan] [--yes]` | rewrite an older-version manifest as the current version (loading migrates in memory anyway; this writes it, so `add` / `remove` can edit it). annals edits only the entries the migration changes (`Loader::upgrade_keeping`), so comments elsewhere stay; when it can't edit in place it writes the whole file and says comments are not kept. It shows the result and confirms first (§4.8), and keeps the original as `<file>.v<N>` |
 | `install --frozen` | install exactly what this machine's lock records; never re-resolves, never writes the lock; errors when there is no lock for this manifest, or the manifest changed since it was locked (§7) |
-| `render args\|env\|json` | versions for a target platform as build args, env lines, or a JSON versions file (§8.3) |
+| `render args\|env [path] [--target <platform>]` / `render json [path] [--targets a,b]`, with `[--distro <id>@<release>] [--libc <family>]` | versions for a target platform as build args, env lines, or a JSON versions file (§8.3): this machine's from its lock, another machine's resolved through remote indexes (§4.7) |
 | `backends` | registered backends, their versions, and why others were skipped (§5.3) |
 
 ### 4.3 Output format
@@ -362,14 +362,59 @@ writes an exact spec.
 manifest (not just its comments) makes it stale, and `install --frozen` refuses a stale or
 missing lock.
 
-**Later: remote indexes**, added backend by backend, so one machine can resolve for another
-platform (for `render --target`, §8.3, and container builds). Resolution is already split from
+**Remote indexes (apt built; the rest backend by backend)**, so one machine can resolve for
+another (`render --target`, §8.3, and container builds). Resolution is already split from
 installation for this:
 
 - **`Index`** (query side): answers "which versions exist for this target" from each source's
   index over HTTP: Homebrew's formula API, the winget-pkgs repo, scoop bucket repos, apt
   `Packages` / dnf repodata files, crates.io, the npm registry, PyPI. Runs anywhere.
 - **`Installer`** (mutation side): runs the local package manager. Runs only on a matching host.
+
+A `BackendFactory` offers its remote index through `remote_index()`, built for the platform the
+factory was made for, with no probe and no local program (`None`: it can only ask a local
+package manager). cargo (crates.io's sparse index), github-release, github-deb and github-rpm
+(GitHub's API) return the index they always use; apt returns its remote index. Resolving for
+another machine runs every factory with a command runner that runs nothing, so it cannot touch
+this machine's package managers.
+
+**apt's remote index (DECIDED, built).** The release comes from the identity: the deb purl's
+namespace is the distro, its `distro` qualifier the codename, its `arch` the architecture.
+
+- **Sources:** what a stock container image of the release lists. Debian: `main` of
+  `<codename>` and `<codename>-updates` from `deb.debian.org/debian` and `<codename>-security`
+  from `deb.debian.org/debian-security` (checked against `debian:12` and `debian:13`). Ubuntu:
+  `main restricted universe multiverse` of `<codename>`, `-updates` and `-security`, from
+  `archive.ubuntu.com/ubuntu` and `security.ubuntu.com/ubuntu` on amd64 and
+  `ports.ubuntu.com/ubuntu-ports` on arm64. Backports are left out (apt never picks them unless
+  asked). The release's own suite missing is an error naming it; a missing `-updates` or
+  `-security` suite (sid has neither) is skipped. Any other distro is an error: bosun knows no
+  mirror for it. There is no mirror override yet.
+- **Versions** are every version of the package in those suites, as `apt-cache madison` lists
+  them; selection takes the highest in the spec as everywhere (§7), which with every suite at
+  priority 500 is apt's candidate.
+- **Integrity: the hash chain, not the signature.** Each suite's `InRelease` is fetched over
+  HTTPS; each component's package index (`Packages.gz`, else `Packages.xz`: Ubuntu writes its xz
+  indexes as two streams, which the pure-Rust xz decoder doesn't read, and Debian's security
+  suite lists only xz) is fetched by hash when the release offers `Acquire-By-Hash`, and refused
+  unless its size and SHA256 are the ones the `InRelease` lists. A release file must name the
+  suite asked for (its `Suite` or `Codename`). The `InRelease`'s OpenPGP signature is **not**
+  verified: which keyrings to trust (the distros' archive keys, shipped how, rotated how) is an
+  open decision (§11). The seam is `ReleaseSignature` in `bosun_backends::apt::remote`; its only
+  implementation, `UncheckedSignatures`, reports the release as not checked, and the index warns
+  once per run that the release file's signature is not verified. `Valid-Until` is not checked
+  either: without a verified signature it proves nothing.
+- **Cache and freshness:** under the user cache directory (`$XDG_CACHE_HOME/bosun/apt`,
+  default `~/.cache/bosun/apt`; `%LOCALAPPDATA%\bosun\cache\apt` on Windows), one directory per
+  mirror and suite. An `InRelease` is reused for an hour (`RELEASE_TTL`) and then fetched again;
+  apt has no time-to-live (it fetches on `apt-get update`, with If-Modified-Since), but bosun's
+  HTTP port carries no response headers, and an hour keeps a render close to what a fresh
+  `apt-get update` sees while sparing the mirror a fetch per run. A package index is reused for
+  as long as its hash is the one the current `InRelease` lists, so a new index is downloaded only
+  when the release changes. When the mirror can't be reached, the `InRelease` fetched before is
+  used, with a warning. `Index::refresh` fetches every `InRelease` again.
+- **Checked** against `apt-cache policy` after `apt-get update` in `debian:12`, `debian:13` and
+  `ubuntu:24.04` containers (2026-10-16): 14, 15 and 14 packages, every candidate the same.
 
 ### 4.8 Plan and apply
 
@@ -884,7 +929,11 @@ always inside what was written.
   Because selection takes the highest, write an upper bound to stay close to a version.
 - **Pre-releases:** they are *in* a vers set by plain ordering, but selection never picks
   one unless some constraint version is itself a pre-release (the SemVer convention, §12
-  item 3), or the spec is a bare pre-release version.
+  item 3), or the spec is a bare pre-release version. A Debian version is a pre-release when a
+  `~` in it comes before a pre-release tag (`~alpha`, `~beta`, `~rc`, `~pre`, `~dev`): Debian
+  and Ubuntu use `~` for much else, stable updates (`3.0.22-1~deb12u1`, and in native
+  packages `20250419~deb12u1`), backports (`~bpo12+1`) and Ubuntu updates (`~24.04.1`), which
+  are the release itself and what apt installs.
 - Reproducibility comes from the lockfile and `install --frozen` (§7), not from a policy.
 
 **Conformance:** bosun's purl and vers code must pass the official JSON suites from both repos,
@@ -970,8 +1019,9 @@ image builds are the same mechanism. Both of the first two shapes are supported 
   base as a named build context. A tool bump rebuilds only the tool layer, not the base.
   Rendering needs the base image's distro (for selectors and purl namespace): declared per
   target (`--distro debian@bookworm`, §5.4), or read once from the image's `/etc/os-release`.
-  Versions for a platform other than the rendering machine's need remote indexes (§4.7);
-  until then this is rendered inside the base image, or from exact specs.
+  Versions for a platform other than the rendering machine's come from remote indexes (§4.7;
+  apt so far), as `render --target` resolves them (§8.3); a backend without one is rendered
+  inside the base image, or from exact specs.
 - **in-build execution inside that layer** is the alternative when the distro can't be known
   ahead of time: the generated layer `COPY`s the static bosun binary and runs
   `bosun install --yes`, which reads the real base's os-release.
@@ -1034,6 +1084,21 @@ RUN apt-get install -y "${FD_PACKAGE}=${FD_VERSION}"
 - **Versions come from this machine's lock** for this machine's platform (§4.5); a stale or
   missing lock is an error naming `bosun lock`. Another platform's versions are resolved
   through remote indexes when the backend has one (§4.7), else rendering for it is an error.
+- **Another machine (DECIDED, built):** a target is another machine when its platform isn't
+  this machine's, or when `--distro` or `--libc` describes it (even on this platform: the
+  flags say the machine isn't this one). It is resolved fresh, the newest version each spec
+  allows, through each backend's remote index (§4.7); this machine's package managers and
+  lock are never read, and nothing is written. Its facts come from the flags only:
+  `--distro <id>[@<release>]` in selector form, the release spelled as the purl `distro`
+  qualifier (`debian@bookworm`, `ubuntu@noble`, `fedora@fedora-41`), with `ID_LIKE` from a
+  small table of known distros (Ubuntu is like Debian; Mint and Pop!_OS like Ubuntu and
+  Debian; RHEL, CentOS, Rocky, Alma and Amazon Linux like Fedora); `--libc <gnu|musl>[@<version>]`.
+  Without `--libc`, libc selectors don't match, and without `--distro` distro selectors don't;
+  each is a warning when the manifest has such selectors, and an apt entry with no distro is an
+  error saying to pass `--distro`. An entry whose acceptable backends have no remote index, or
+  with nothing in its spec, is an error naming them. The installer preference is this machine's
+  flag, `BOSUN_INSTALLER` and config, then the backends with a remote index in registration
+  order (a backend's scope is known only from a probe).
 
 Future driver: CI.
 
@@ -1125,13 +1190,19 @@ Future driver: CI.
 
 ## 11. Open questions
 
-None open. Settled here last:
+- **Signatures of apt release files (§4.7):** the remote apt index trusts an `InRelease` as
+  fetched over HTTPS and checks every package index against it, but does not verify its
+  OpenPGP signature. Verifying needs the distros' archive keyrings (ship them in bosun, read
+  them from the user, or fetch them), an OpenPGP crate, and a rotation story. The seam is
+  `ReleaseSignature`; until it is decided, bosun warns.
+
+Settled here last:
 
 - **Name:** `bosun` stays. The crates.io name is taken, which doesn't matter while bosun ships
   only as release binaries (§3.1).
 - **Remote indexes (§4.7):** built right after Linux breadth (release selectors, libc, dnf,
-  apk). `render` for another platform, `Containerfile.bosun` with versions decided ahead of
-  the build, and the ctxloom dev container dogfood (§12) wait on it; apt `Packages` first.
+  apk), apt `Packages` first (built: §4.7, `render --target`, §8.3). `Containerfile.bosun` with
+  versions decided ahead of the build and the ctxloom dev container dogfood (§12) build on it.
 - **The rest of the ctxloom family (§12):** ltk, taskloom, harp and reprise stay out of the
   dogfood manifest, published or not.
 
@@ -1333,13 +1404,14 @@ committed; the real host install is the user's to run (`bosun install`, then
 
 **Since M1** (the M2 and M3 slices below): manifest version 2, the per-machine lock, `add` /
 `remove` / `migrate` / `upgrade` / `export`, more github release kinds, Windows (hermetic only),
-apply without a terminal, claims in `status`, and Linux breadth: release selectors and libc
-(§5.4), dnf and apk. `just test` runs 722 tests and 158 scenarios.
+apply without a terminal, claims in `status`, Linux breadth: release selectors and libc
+(§5.4), dnf and apk, and `render` (§8.3) with apt's remote index (§4.7). `just test` runs 793
+tests and 184 scenarios.
 
 **Next, in order.**
 
-1. **Containers and language backends:** the remote apt `Index` (§4.7), then `render` and
-   `Containerfile.bosun` (§8), npm and uv.
+1. **Containers and language backends:** `Containerfile.bosun` (§8.2) on `render`'s
+   resolution, npm and uv (and their remote indexes); dnf's and apk's remote indexes.
 2. **macOS, and Windows on a real host:** the macOS machine, brew (research first), and
    verifying scoop, winget, choco and github-installer on Windows.
 
@@ -1398,6 +1470,8 @@ under a pty on Unix only.
 | M3-2 | winget (user), scoop (user), choco (system) backends; probe only on Windows | landed hermetically (argv and output parsing unit-tested, fixture scenarios); **unverified on a real Windows host** |
 | M3-3 | github-installer: a release's `.msi` (`msiexec /i … /qn /norestart`) or `.exe` (manifest `silent_args`, required); found in the Uninstall registry keys (`reg query`, three views) by `display_name` (`*` suffix = prefix); uninstall `msiexec /x {ProductCode}` or the entry's quiet/plain uninstaller; msiexec's 3010 (reboot required) is success, reported; system scope, no hold, no downgrade | landed (unit tests); **unverified on a real Windows host**; no fixture scenario (the seam has no registry) |
 | M3-4 | `bosun render args\|env\|json [path]` for this machine, from its lock (missing or stale: an error naming `bosun lock`); variable stems from the logical name or the entry's `var` (manifest key, checked at load), clashes and digit-led stems refused; the build-args driver is `bosun_apply::render` | landed |
+| M3-5 | apt's remote index (§4.7): a release's suites from its mirror over HTTPS (Debian and Ubuntu defaults, as stock images list them), `InRelease` → package index hash chain (by hash), signature not verified (seam `ReleaseSignature`, warned), cached under the user cache dir (`InRelease` an hour, indexes while their hash holds); `BackendFactory::remote_index` (apt, cargo, github-release, github-deb, github-rpm) | landed; unit tests over trimmed real Debian 12 captures; same candidates as `apt-cache policy` in `debian:12`, `debian:13` and `ubuntu:24.04` |
+| M3-6 | `render args\|env --target <platform>`, `render json --targets a,b`, `--distro <id>[@<release>]`, `--libc <family>[@<version>]`: another machine is resolved fresh through remote indexes with a runner that runs nothing; a backend without one is an error naming it; missing distro or libc facts are warned about. Debian pre-releases are `~` before a pre-release tag (`~deb12u1`, `~bpo`, `~24.04.1` are releases) | landed |
 | M2-10 | with no terminal, every confirm (install, uninstall, prune, remove, migrate) applies, still printing what it applies to stderr; `--yes` only skips a terminal's prompt | landed |
 | M2-11 | `status [path]` lists every claim on each package (manifest, spec, user, whether the manifest still exists); with no path, everything bosun manages on the machine; `install` records a `claim` on a package bosun installed for another project | landed |
 | M2-12 | release selectors `linux:<distro>@<release>`: the release is the purl `distro` value a block's backend gives this machine (deb codename, rpm `<ID>-<VERSION_ID>`); exact `ID` only | landed; checked in Debian 12/13 and Ubuntu 22.04/24.04 containers |

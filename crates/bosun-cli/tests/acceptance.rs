@@ -154,6 +154,8 @@ struct BosunWorld {
     fail_step: Option<String>,
     /// GitHub releases by `(owner/repo, tag)`.
     releases: BTreeMap<(String, String), Release>,
+    /// What distro mirrors list, by `(distro, suite, arch)`: package and version.
+    apt_mirror: BTreeMap<(String, String, String), Vec<(String, String)>>,
     /// Seeded state packages per scope (`system` / `user`).
     seeded: BTreeMap<String, Vec<Value>>,
     /// The manifest as the scenario wrote it.
@@ -293,7 +295,66 @@ impl BosunWorld {
                 Value::Array(list).to_string().as_bytes(),
             );
         }
+        for (url, body) in self.apt_mirror_files() {
+            serve(url, &body);
+        }
         http
+    }
+
+    /// The release files and package indexes of each distro release a step
+    /// listed packages for: its own, updates and security suites, each with
+    /// a `main` index per arch named (empty where no step listed any), at the
+    /// URLs apt's remote index reads them from.
+    fn apt_mirror_files(&self) -> Vec<(String, Vec<u8>)> {
+        let mut releases: BTreeMap<(&str, &str), Vec<&str>> = BTreeMap::new();
+        for (distro, suite, arch) in self.apt_mirror.keys() {
+            let codename = suite.split('-').next().unwrap();
+            let arches = releases.entry((distro, codename)).or_default();
+            if !arches.contains(&arch.as_str()) {
+                arches.push(arch);
+            }
+        }
+        let mut files = Vec::new();
+        for ((distro, codename), arches) in releases {
+            for suffix in ["", "-updates", "-security"] {
+                let suite = format!("{codename}{suffix}");
+                // One release file per mirror, listing each arch's index.
+                let mut listed: BTreeMap<&str, String> = BTreeMap::new();
+                for arch in &arches {
+                    let mut packages = String::new();
+                    let key = (distro.to_string(), suite.clone(), arch.to_string());
+                    for (pkg, version) in self.apt_mirror.get(&key).into_iter().flatten() {
+                        packages.push_str(&format!(
+                            "Package: {pkg}\nVersion: {version}\nArchitecture: {arch}\n\n"
+                        ));
+                    }
+                    let xz = compressed("xz", packages.as_bytes());
+                    let sha: String = Sha256::digest(&xz)
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect();
+                    let mirror = apt_mirror_url(distro, suffix, arch);
+                    listed.entry(mirror).or_default().push_str(&format!(
+                        " {sha} {} main/binary-{arch}/Packages.xz\n",
+                        xz.len()
+                    ));
+                    files.push((
+                        format!("{mirror}/dists/{suite}/main/binary-{arch}/by-hash/SHA256/{sha}"),
+                        xz,
+                    ));
+                }
+                for (mirror, sums) in listed {
+                    let release = format!(
+                        "Suite: {suite}\nCodename: {suite}\nAcquire-By-Hash: yes\nSHA256:\n{sums}"
+                    );
+                    files.push((
+                        format!("{mirror}/dists/{suite}/InRelease"),
+                        release.into_bytes(),
+                    ));
+                }
+            }
+        }
+        files
     }
 
     fn release_mut(&mut self, repo: &str, tag: &str) -> &mut Release {
@@ -333,6 +394,18 @@ impl BosunWorld {
         let text = fs::read_to_string(file).expect("read the lock");
         let doc = serde_json::from_str(&text).expect("the lock is JSON");
         (text, doc)
+    }
+}
+
+/// The mirror a stock image of `distro` reads the suite with `suffix` from.
+fn apt_mirror_url(distro: &str, suffix: &str, arch: &str) -> &'static str {
+    match (distro, suffix, arch) {
+        ("debian", "-security", _) => "https://deb.debian.org/debian-security",
+        ("debian", _, _) => "https://deb.debian.org/debian",
+        ("ubuntu", _, "arm64") => "https://ports.ubuntu.com/ubuntu-ports",
+        ("ubuntu", "-security", _) => "https://security.ubuntu.com/ubuntu",
+        ("ubuntu", _, _) => "https://archive.ubuntu.com/ubuntu",
+        _ => panic!("no apt mirror for {distro}"),
     }
 }
 
@@ -1333,6 +1406,23 @@ fn lock_checksum(world: &mut BosunWorld, checksum: String) {
 }
 
 // ---- render -----------------------------------------------------------------
+
+/// A distro mirror's suite lists a package in its `main` index for an arch.
+#[given(regex = r"^(Debian|Ubuntu) (\S+) lists (\S+) (\S+) for (amd64|arm64)$")]
+fn mirror_lists(
+    world: &mut BosunWorld,
+    distro: String,
+    suite: String,
+    pkg: String,
+    version: String,
+    arch: String,
+) {
+    world
+        .apt_mirror
+        .entry((distro.to_lowercase(), suite, arch))
+        .or_default()
+        .push((pkg, version));
+}
 
 #[then("it prints:")]
 fn prints(world: &mut BosunWorld, step: &Step) {

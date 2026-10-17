@@ -165,4 +165,12 @@ pub trait BackendFactory: Send + Sync {
     fn probe(&self, host: &HostInfo) -> Result<Option<Probe>, PortError>;
     /// Build the backend from a successful probe. Called only when present.
     fn build(&self, probe: Probe) -> Backend;
+
+    /// The query side for a machine bosun is not running on (§4.7): an index
+    /// that reads the backend's registry or mirror over HTTP, for the platform
+    /// this factory was made for, with no probe and no local program. `None`
+    /// when the backend can only ask a local package manager.
+    fn remote_index(&self) -> Option<Box<dyn Index>> {
+        None
+    }
 }

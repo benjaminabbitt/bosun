@@ -206,12 +206,44 @@ pub enum RenderStyle {
     /// `NAME=value` lines, for an env file.
     Env(RenderTarget),
     /// A JSON versions file shaped like the lock, per target platform.
-    Json(RenderTarget),
+    Json(RenderTargets),
 }
 
-/// What `render` renders.
+/// What `render args` and `render env` render, and for which machine.
 #[derive(clap::Args)]
 pub struct RenderTarget {
     /// The manifest directory or file (default: current directory).
     pub path: Option<PathBuf>,
+    /// The target platform (`linux/arm64`; default: this machine's).
+    #[arg(long)]
+    pub target: Option<String>,
+    #[command(flatten)]
+    pub machine: RenderMachine,
+}
+
+/// What `render json` renders, and for which platforms.
+#[derive(clap::Args)]
+pub struct RenderTargets {
+    /// The manifest directory or file (default: current directory).
+    pub path: Option<PathBuf>,
+    /// The target platforms, comma-separated (`linux/amd64,linux/arm64`;
+    /// default: this machine's).
+    #[arg(long, value_delimiter = ',')]
+    pub targets: Vec<String>,
+    #[command(flatten)]
+    pub machine: RenderMachine,
+}
+
+/// The facts of a target machine bosun isn't running on. Either one makes
+/// the target another machine, resolved through remote indexes.
+#[derive(clap::Args)]
+pub struct RenderMachine {
+    /// The target's distro and release, in selector form (`debian@bookworm`,
+    /// `ubuntu@noble`, `fedora@fedora-41`).
+    #[arg(long)]
+    pub distro: Option<String>,
+    /// The target's C library (`gnu`, `musl`, `gnu@2.36`); without it, libc
+    /// selectors don't match.
+    #[arg(long)]
+    pub libc: Option<String>,
 }

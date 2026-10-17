@@ -10,6 +10,8 @@ rust-version.workspace = true
 [dependencies]
 bosun-core.workspace = true
 bosun-ports.workspace = true
+flate2.workspace = true
+lzma-rs.workspace = true
 minijinja.workspace = true
 serde.workspace = true
 serde_json.workspace = true
