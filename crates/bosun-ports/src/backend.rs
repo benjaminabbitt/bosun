@@ -7,7 +7,7 @@
 //! anywhere; [`Installer`] (mutation side) runs only on a matching host.
 
 use bosun_core::{
-    BackendId, Capabilities, Checksum, Distro, Installed, Ref, Scope, Source, Target, Version,
+    BackendId, Capabilities, Checksum, Distro, Installed, Ref, Scope, Source, Target, Version, Want,
 };
 
 use crate::error::PortError;
@@ -23,6 +23,27 @@ pub trait Index {
     /// (callers order with bosun-core's `Version`).
     fn query_available(&self, pkg: &Ref, target: &Target) -> Result<Vec<Version>, PortError>;
 
+    /// The version to install for `pkg` on `target` among those `want`
+    /// admits, chosen as this backend's package manager would choose it
+    /// (§5.6). `prefer` lists versions a lock already chose, best first; the
+    /// first the manager still offers and `want` admits wins (lockfiles
+    /// advise). The default takes [`Want::choose`] over
+    /// [`query_available`](Index::query_available): the highest admissible
+    /// version.
+    fn select(
+        &self,
+        pkg: &Ref,
+        target: &Target,
+        want: &Want,
+        prefer: &[Version],
+    ) -> Result<Selection, PortError> {
+        let available = self.query_available(pkg, target)?;
+        Ok(Selection {
+            chosen: want.choose(&available, prefer),
+            available,
+        })
+    }
+
     /// The checksum to record for `pkg` at `version` on `target`, when the
     /// backend enforces one (§12). github-release reads it from the release's
     /// `checksums.txt`; backends with nothing to record (apt, cargo) keep the
@@ -35,6 +56,17 @@ pub trait Index {
     ) -> Result<Option<Checksum>, PortError> {
         Ok(None)
     }
+}
+
+/// What [`Index::select`] found: the version to install, or `None` when
+/// nothing offered is wanted, and the versions it considered, for the
+/// diagnostic that names them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Selection {
+    /// The version to install.
+    pub chosen: Option<Version>,
+    /// The versions considered, in no particular order.
+    pub available: Vec<Version>,
 }
 
 /// Mutation side: install, verify, hold, downgrade, uninstall (§5.1). Runs on
@@ -172,5 +204,53 @@ pub trait BackendFactory: Send + Sync {
     /// when the backend can only ask a local package manager.
     fn remote_index(&self) -> Option<Box<dyn Index>> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bosun_core::{Scheme, VersRange};
+
+    struct Listing(Vec<&'static str>);
+
+    impl Index for Listing {
+        fn refresh(&self) -> Result<(), PortError> {
+            Ok(())
+        }
+        fn query_available(&self, _: &Ref, _: &Target) -> Result<Vec<Version>, PortError> {
+            Ok(self.0.iter().map(|v| sem(v)).collect())
+        }
+    }
+
+    fn sem(v: &str) -> Version {
+        Version::parse(v, Scheme::Semver).unwrap()
+    }
+
+    fn select(listing: &[&'static str], range: &str, prefer: &[&str]) -> Selection {
+        let pkg = Ref::new("pkg:cargo/ripgrep".parse().unwrap());
+        let want = Want::of(VersRange::parse(range).unwrap());
+        let prefer: Vec<Version> = prefer.iter().map(|v| sem(v)).collect();
+        Listing(listing.to_vec())
+            .select(&pkg, &Target::Any, &want, &prefer)
+            .unwrap()
+    }
+
+    #[test]
+    fn the_default_selection_is_the_highest_wanted_version_listed() {
+        let got = select(&["14.0.0", "14.1.1", "15.0.0"], "vers:cargo/<15.0.0", &[]);
+        assert_eq!(got.chosen, Some(sem("14.1.1")));
+        assert_eq!(
+            got.available,
+            vec![sem("14.0.0"), sem("14.1.1"), sem("15.0.0")]
+        );
+    }
+
+    #[test]
+    fn the_default_selection_keeps_a_listed_locked_version() {
+        let got = select(&["14.0.0", "14.1.1"], "vers:cargo/<15.0.0", &["14.0.0"]);
+        assert_eq!(got.chosen, Some(sem("14.0.0")));
+        let none = select(&["14.0.0"], "vers:cargo/>=15.0.0", &[]);
+        assert_eq!(none.chosen, None);
     }
 }

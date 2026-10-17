@@ -48,6 +48,19 @@ pub const APT_SUITE_ABSENT: &str = "apt suite not on the mirror; skipped";
 /// A suite lists no package index for a component and arch; skipped.
 pub const APT_NO_INDEX_LISTED: &str = "apt suite lists no package index for it; skipped";
 
+/// The version apt's pin priorities choose among those the spec admits.
+pub const APT_CHOSEN: &str = "apt's pin priorities choose this version within the spec";
+
+/// A newer version the spec admits was passed over: apt gives it a lower pin
+/// priority (a backports suite, a pin) or it is behind the installed one.
+pub const APT_NEWER_PASSED_OVER: &str =
+    "a newer version the spec admits was passed over by apt's pin priorities";
+
+/// The spec names exactly a version apt's pins keep from installing
+/// (priority 0 or below); apt installs it when named, so bosun does.
+pub const APT_PINNED_AWAY_NAMED: &str =
+    "the spec names a version apt's pins keep from installing; installing it as apt-get install pkg=version would";
+
 /// Where npm global installs go: npm's own global prefix (`npm prefix -g`).
 pub const NPM_PREFIX: &str = "npm installs globally under this prefix";
 

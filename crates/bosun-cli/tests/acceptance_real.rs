@@ -221,9 +221,30 @@ fn local_apt_repo(w: &mut RealWorld, pkg: String, old: String, new: String) {
     assert_eq!(code, 0, "apt-get update failed: {out}");
 }
 
+/// The apt preferences file a scenario pins the local repository's packages
+/// in; it goes with the repository.
+const LOCAL_PIN: &str = "/etc/apt/preferences.d/bosun-probe";
+
+/// Pin `version` of `pkg` at `priority` (100 is what a NotAutomatic suite
+/// such as backports gets; below 0 keeps apt from choosing it), and show
+/// apt's resulting policy in the scenario's output.
+#[given(regex = r"^apt pins (\S+) (\S+) at priority (-?\d+)$")]
+fn apt_pin(w: &mut RealWorld, pkg: String, version: String, priority: i32) {
+    w.local_repo = true;
+    fs::write(
+        LOCAL_PIN,
+        format!("Package: {pkg}\nPin: version {version}\nPin-Priority: {priority}\n"),
+    )
+    .unwrap();
+    let (code, out) = run("apt-cache", &["policy", &pkg]);
+    assert_eq!(code, 0, "apt-cache policy: {out}");
+    eprintln!("{out}");
+}
+
 /// Remove the local apt repository, its source and the index apt fetched
 /// from it, so apt no longer offers its packages.
 fn remove_local_repo() {
+    let _ = fs::remove_file(LOCAL_PIN);
     let _ = fs::remove_file(LOCAL_SOURCE);
     let _ = fs::remove_dir_all(LOCAL_REPO);
     let lists = Path::new("/var/lib/apt/lists");

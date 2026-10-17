@@ -1,0 +1,8 @@
+jq:
+  Installed: (none)
+  Candidate: (none)
+  Version table:
+     1.6-2.1+deb12u3 -10
+        500 http://deb.debian.org/debian-security bookworm-security/main amd64 Packages
+     1.6-2.1+deb12u2 -10
+        500 http://deb.debian.org/debian bookworm/main amd64 Packages

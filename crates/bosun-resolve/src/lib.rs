@@ -32,8 +32,8 @@ use std::collections::BTreeMap;
 use bosun_core::manifest::{Backends, InstallBlock, Manifest, ManifestEntry, PACKAGE_OPTION};
 use bosun_core::platform::{Arch, Distro, Libc, Os, Selector, Target};
 use bosun_core::record::{LockDocument, LockLeaf, LockPackage, Package, Placement};
-use bosun_core::spec::{SelectError, Spec, SpecError};
-use bosun_core::{BackendId, Claim, Purl, PurlError, Ref, Version};
+use bosun_core::spec::{Spec, SpecError};
+use bosun_core::{BackendId, Claim, Purl, PurlError, Ref, Version, Want};
 use bosun_ports::backend::Index;
 use bosun_ports::error::PortError;
 
@@ -301,29 +301,36 @@ fn resolve_entry(
         }
     };
 
-    // §7: highest available version in the spec's set.
-    let available = chosen
+    // §7: the version the backend's package manager would choose in the
+    // spec's set, keeping a pin that still fits.
+    let pin = pinned
+        .and_then(|p| p.targets.get(&target))
+        .filter(|leaf| leaf.placement.backend == chosen.id && leaf.placement.purl == purl);
+    let prefer: Vec<Version> = pin.iter().map(|leaf| leaf.resolved.clone()).collect();
+    let selection = chosen
         .index
-        .query_available(&Ref::new(purl.clone()), &target)
+        .select(
+            &Ref::new(purl.clone()),
+            &target,
+            &Want::of(spec.range().clone()),
+            &prefer,
+        )
         .map_err(|source| ResolveError::Query {
             name: entry.name.clone(),
             source,
         })?;
-    let version = match spec.select(&available) {
-        Ok(version) => version,
-        Err(SelectError::Unsatisfiable { spec, available }) => {
-            return Ok((Outcome::Unsatisfiable { spec, available }, None));
-        }
+    let Some(version) = selection.chosen else {
+        let mut available = selection.available;
+        available.sort_by(|a, b| b.cmp(a)); // newest first
+        return Ok((
+            Outcome::Unsatisfiable {
+                spec: spec.canonical(),
+                available: versions_summary(&available),
+            },
+            None,
+        ));
     };
-
-    // §7: a pin that still fits is kept, with the checksum recorded for it.
-    let kept = pinned.and_then(|p| p.targets.get(&target)).filter(|leaf| {
-        leaf.placement.backend == chosen.id
-            && leaf.placement.purl == purl
-            && available.contains(&leaf.resolved)
-            && spec.range().contains(&leaf.resolved)
-    });
-    let version = kept.map_or(version, |leaf| leaf.resolved.clone());
+    let kept = pin.filter(|leaf| leaf.resolved == version);
     // §12: the checksum recorded for a kept pin stands; otherwise record the
     // backend's (github-release: the published one, else the download's on
     // first use; apt/cargo have none).
@@ -629,6 +636,9 @@ pub enum ClaimError {
         /// The versions that were considered.
         available: String,
     },
+    /// Asking the backend's index for the claims' version failed.
+    #[error("{kind}: {0}", kind = errmsg::QUERY_FAILED)]
+    Query(#[source] PortError),
     /// A lockfile's pinned version is excluded by another claim's spec, so
     /// `--frozen` cannot honour the lock without breaking that claim (§7).
     #[error("{kind}: {locked} excluded by {clashes}", kind = errmsg::FROZEN_CLASH)]
@@ -674,7 +684,9 @@ fn versions_summary(available: &[Version]) -> String {
 
 /// Select one version for a package claimed by several manifests in one install
 /// scope (§4.6). One scope holds one version, so every claim's vers set must
-/// admit it; the highest available version in the intersection wins, except a
+/// admit it; within the intersection the backend's package manager chooses
+/// ([`Index::select`]: apt by pin priority, npm and uv by resolving it
+/// themselves, the rest the highest available version), except a
 /// version some lockfile already chose is preferred when every claim admits it
 /// (`lock_preference`, the current project's lock first — lockfiles advise,
 /// specs decide). Claims from other OS users in system state are just more
@@ -683,33 +695,23 @@ fn versions_summary(available: &[Version]) -> String {
 pub fn select_across_claims(
     claims: &[Claim],
     vers_type: &str,
-    available: &[Version],
+    index: &dyn Index,
+    pkg: &Ref,
+    target: &Target,
     lock_preference: &[Version],
 ) -> Result<Version, ClaimError> {
     let specs = parse_claims(claims, vers_type)?;
-    // The §7 pre-release guard, across claims: admit pre-releases only when some
-    // claim's range names one.
-    let allow_pre = specs.iter().any(|s| s.range().mentions_prerelease());
-    let admissible = |v: &Version| {
-        (allow_pre || !v.is_prerelease()) && specs.iter().all(|s| s.range().contains(v))
-    };
-
-    // Lockfiles advise: hold to a lock-chosen version every claim admits, the
-    // current project's first, so switching projects does not flip the install.
-    for preferred in lock_preference {
-        if available.contains(preferred) && admissible(preferred) {
-            return Ok(preferred.clone());
-        }
-    }
-    // Specs decide: otherwise the highest available version in the intersection.
-    available
-        .iter()
-        .filter(|v| admissible(v))
-        .max()
-        .cloned()
+    let want = Want::new(specs.iter().map(|s| s.range().clone()).collect());
+    // Lockfiles advise, specs decide; the backend's package manager orders
+    // what the intersection admits (§5.6).
+    let selection = index
+        .select(pkg, target, &want, lock_preference)
+        .map_err(ClaimError::Query)?;
+    selection
+        .chosen
         .ok_or_else(|| ClaimError::EmptyIntersection {
             claims: claims_summary(claims),
-            available: versions_summary(available),
+            available: versions_summary(&selection.available),
         })
 }
 
@@ -1101,6 +1103,122 @@ mod tests {
         .unwrap();
         let leaf = &r.lock.packages[0].targets[&Target::Any];
         assert_eq!(leaf.checksum, Some(Checksum("sha256:pinned".into())));
+    }
+
+    /// An index whose package manager chooses a fixed version, recording
+    /// what it was asked to choose within and to prefer.
+    struct ChoosingIndex {
+        chooses: Option<&'static str>,
+        asked: RefCell<Option<(Want, Vec<Version>)>>,
+    }
+    impl Index for ChoosingIndex {
+        fn refresh(&self) -> Result<(), PortError> {
+            Ok(())
+        }
+        fn query_available(&self, _: &Ref, _: &Target) -> Result<Vec<Version>, PortError> {
+            unreachable!("selection goes through select")
+        }
+        fn select(
+            &self,
+            _: &Ref,
+            _: &Target,
+            want: &Want,
+            prefer: &[Version],
+        ) -> Result<bosun_ports::Selection, PortError> {
+            *self.asked.borrow_mut() = Some((want.clone(), prefer.to_vec()));
+            let sem = |v: &str| Version::parse(v, Scheme::Semver).unwrap();
+            Ok(bosun_ports::Selection {
+                chosen: self.chooses.map(sem),
+                available: vec![sem("14.1.1"), sem("14.0.0"), sem("15.0.0")],
+            })
+        }
+    }
+
+    fn choosing(chooses: Option<&'static str>) -> ChoosingIndex {
+        ChoosingIndex {
+            chooses,
+            asked: RefCell::new(None),
+        }
+    }
+
+    #[test]
+    fn the_backends_own_choice_is_resolved_and_a_fitting_pin_offered_to_it() {
+        let index = choosing(Some("14.0.0"));
+        let locked = ripgrep_locked("pkg:cargo/ripgrep", "14.0.0", Some("sha256:pinned"));
+        let r = resolve_with_lock(
+            &ripgrep_manifest(">=14.0.0|<15.0.0", None),
+            "h",
+            &any_host(),
+            &[cargo_backend(&index)],
+            &[],
+            Some(&locked),
+        )
+        .unwrap();
+        assert_eq!(resolved_version(&r), "14.0.0");
+        let leaf = &r.lock.packages[0].targets[&Target::Any];
+        assert_eq!(leaf.checksum, Some(Checksum("sha256:pinned".into())));
+        let (want, prefer) = index.asked.borrow().clone().unwrap();
+        assert_eq!(want.summary(), "vers:cargo/>=14.0.0|<15.0.0");
+        assert_eq!(
+            prefer,
+            vec![Version::parse("14.0.0", Scheme::Semver).unwrap()]
+        );
+    }
+
+    #[test]
+    fn a_choice_other_than_the_pin_drops_the_pins_checksum() {
+        let index = choosing(Some("14.1.1"));
+        let locked = ripgrep_locked("pkg:cargo/ripgrep", "14.0.0", Some("sha256:pinned"));
+        let r = resolve_with_lock(
+            &ripgrep_manifest(">=14.0.0|<15.0.0", None),
+            "h",
+            &any_host(),
+            &[cargo_backend(&index)],
+            &[],
+            Some(&locked),
+        )
+        .unwrap();
+        assert_eq!(resolved_version(&r), "14.1.1");
+        assert_eq!(r.lock.packages[0].targets[&Target::Any].checksum, None);
+    }
+
+    #[test]
+    fn a_pin_for_another_identity_is_not_offered() {
+        let index = choosing(Some("14.1.1"));
+        let locked = ripgrep_locked("pkg:cargo/ripgrep-fork", "14.0.0", None);
+        resolve_with_lock(
+            &ripgrep_manifest(">=14.0.0|<15.0.0", None),
+            "h",
+            &any_host(),
+            &[cargo_backend(&index)],
+            &[],
+            Some(&locked),
+        )
+        .unwrap();
+        assert_eq!(
+            index.asked.borrow().as_ref().unwrap().1,
+            Vec::<Version>::new()
+        );
+    }
+
+    #[test]
+    fn nothing_chosen_is_unsatisfiable_listing_what_was_considered_newest_first() {
+        let index = choosing(None);
+        let r = resolve(
+            &ripgrep_manifest(">=16.0.0", None),
+            "h",
+            &any_host(),
+            &[cargo_backend(&index)],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            r.outcomes[0].outcome,
+            Outcome::Unsatisfiable {
+                spec: "vers:cargo/>=16.0.0".to_string(),
+                available: "15.0.0, 14.1.1, 14.0.0".to_string(),
+            }
+        );
     }
 
     /// An index that reports a checksum for every version.
@@ -2632,6 +2750,35 @@ mod tests {
         raw.iter().map(|v| deb(v)).collect()
     }
 
+    /// [`select_across_claims`] over an index offering `available`.
+    fn across(
+        claims: &[Claim],
+        available: &[Version],
+        lock_preference: &[Version],
+    ) -> Result<Version, ClaimError> {
+        let index = FakeIndex {
+            versions: available.to_vec(),
+            last: RefCell::new(None),
+        };
+        let pkg = Ref::new("pkg:deb/debian/jq".parse().unwrap());
+        let target = Target::Platform {
+            os: Os::Linux,
+            arch: Arch::Amd64,
+        };
+        let chosen = select_across_claims(claims, "deb", &index, &pkg, &target, lock_preference);
+        assert_eq!(*index.last.borrow(), Some((pkg, target)));
+        chosen
+    }
+
+    #[test]
+    fn select_across_claims_reports_a_failing_index() {
+        let claims = [claim("/w/a/bosun.yaml", ">=1.7", None)];
+        let pkg = Ref::new("pkg:deb/debian/jq".parse().unwrap());
+        let err =
+            select_across_claims(&claims, "deb", &FailIndex, &pkg, &Target::Any, &[]).unwrap_err();
+        assert!(matches!(err, ClaimError::Query(_)), "{err:?}");
+    }
+
     #[test]
     fn select_across_claims_takes_the_highest_in_the_intersection() {
         let claims = [
@@ -2641,7 +2788,7 @@ mod tests {
         let available = deb_versions(&["1.7.0-1", "1.7.1-3", "1.7.1-4", "1.8.0-1"]);
         // 1.8.0-1 is in A but not B; 1.7.0-1 is in A but not B; so the
         // intersection is {1.7.1-3, 1.7.1-4} and the highest is 1.7.1-4.
-        let chosen = select_across_claims(&claims, "deb", &available, &[]).unwrap();
+        let chosen = across(&claims, &available, &[]).unwrap();
         assert_eq!(chosen.as_str(), "1.7.1-4");
     }
 
@@ -2653,7 +2800,7 @@ mod tests {
         ];
         let available = deb_versions(&["1.7.1-3", "1.7.1-4"]);
         // Both admissible; the lock pins 1.7.1-3, so it wins over the higher one.
-        let chosen = select_across_claims(&claims, "deb", &available, &[deb("1.7.1-3")]).unwrap();
+        let chosen = across(&claims, &available, &[deb("1.7.1-3")]).unwrap();
         assert_eq!(chosen.as_str(), "1.7.1-3");
     }
 
@@ -2666,7 +2813,7 @@ mod tests {
         let available = deb_versions(&["1.7.1-3", "1.7.1-4", "1.8.0-1"]);
         // The lock pins 1.8.0-1, which B excludes: fall back to the highest
         // version the intersection admits.
-        let chosen = select_across_claims(&claims, "deb", &available, &[deb("1.8.0-1")]).unwrap();
+        let chosen = across(&claims, &available, &[deb("1.8.0-1")]).unwrap();
         assert_eq!(chosen.as_str(), "1.7.1-4");
     }
 
@@ -2678,7 +2825,7 @@ mod tests {
             claim("/w/b/bosun.yaml", "1.7.1-4", None),
         ];
         let available = deb_versions(&["1.7.1-3", "1.7.1-4"]);
-        let err = select_across_claims(&claims, "deb", &available, &[]).unwrap_err();
+        let err = across(&claims, &available, &[]).unwrap_err();
         match err {
             ClaimError::EmptyIntersection { claims, available } => {
                 assert!(
@@ -2703,11 +2850,10 @@ mod tests {
         let babbitt = claim("/home/babbitt/w/bosun.yaml", ">=1.7", Some("babbitt"));
         let alice = claim("/home/alice/w/bosun.yaml", "<1.7.1", Some("alice"));
 
-        let with_alice =
-            select_across_claims(&[babbitt.clone(), alice], "deb", &available, &[]).unwrap();
+        let with_alice = across(&[babbitt.clone(), alice], &available, &[]).unwrap();
         assert_eq!(with_alice.as_str(), "1.7.0-1");
         // Without alice's claim, babbitt alone would take the higher version.
-        let alone = select_across_claims(&[babbitt], "deb", &available, &[]).unwrap();
+        let alone = across(&[babbitt], &available, &[]).unwrap();
         assert_eq!(alone.as_str(), "1.7.1-3");
     }
 

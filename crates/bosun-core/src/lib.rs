@@ -11,6 +11,7 @@ pub mod record;
 pub mod spec;
 pub mod vers;
 pub mod version;
+pub mod want;
 
 pub use manifest::{Backends, InstallBlock, Manifest, ManifestEntry, Options, PACKAGE_OPTION};
 pub use model::{
@@ -27,3 +28,4 @@ pub use record::{
 pub use spec::{default_spec, Entry, SelectError, Spec, SpecError};
 pub use vers::{VersConstraint, VersError, VersOp, VersRange};
 pub use version::{Scheme, Segment, Version, VersionError};
+pub use want::Want;

@@ -1096,15 +1096,14 @@ fn managed_from_resolution<'a>(
                     let index = env.index_for(backend).ok_or_else(|| {
                         CliError::Environment(format!("no index for {}", backend.as_str()))
                     })?;
-                    let available = index
-                        .query_available(&Ref::new(purl.clone()), target)
-                        .map_err(|e| CliError::Resolve(e.to_string()))?;
                     // Lockfiles advise, specs decide (§4.6): this project's
                     // locked version, when every claim admits it.
                     select_across_claims(
                         &claims,
                         &vers_type,
-                        &available,
+                        index,
+                        &Ref::new(purl.clone()),
+                        target,
                         std::slice::from_ref(version),
                     )
                     .map_err(|e| CliError::Resolve(e.to_string()))?

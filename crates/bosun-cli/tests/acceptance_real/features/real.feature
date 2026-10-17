@@ -81,6 +81,80 @@ Feature: real backends against a disposable container
     And dpkg reports bosun-probe not installed
     And apt-mark reports bosun-probe not held
 
+  # Within a spec, apt's pin priorities choose, as its candidate is chosen: a
+  # version at priority 100 (what a backports suite gets) loses to the
+  # release's 500 unless the spec admits only it.
+  @apt-get
+  Scenario: apt's pin priorities choose the version within the spec
+    Given the system state is clean
+    And a local apt repository offers bosun-probe 1.0-1 and 2.0-1
+    And apt pins bosun-probe 2.0-1 at priority 100
+    And the manifest:
+      """
+      version: 2
+      packages:
+        - name: bosun-probe
+          spec: "*"
+          install:
+            linux:debian: {backend: apt}
+      """
+    When I run `bosun install . --yes --scope system`
+    Then it succeeds
+    And dpkg reports bosun-probe at 1.0-1
+    When the manifest becomes:
+      """
+      version: 2
+      packages:
+        - name: bosun-probe
+          spec: ">=2.0"
+          install:
+            linux:debian: {backend: apt}
+      """
+    And I run `bosun install . --yes --scope system`
+    Then it succeeds
+    And dpkg reports bosun-probe at 2.0-1
+    When the manifest is deleted
+    And I run `bosun prune --yes --scope system`
+    Then it succeeds
+    And dpkg reports bosun-probe not installed
+
+  # A version pinned below 0 is never apt's candidate; only a spec naming it
+  # exactly installs it, as `apt-get install pkg=version` does.
+  @apt-get
+  Scenario: apt never takes a version pinned away unless the spec names it
+    Given the system state is clean
+    And a local apt repository offers bosun-probe 1.0-1 and 2.0-1
+    And apt pins bosun-probe 2.0-1 at priority -1
+    And the manifest:
+      """
+      version: 2
+      packages:
+        - name: bosun-probe
+          spec: ">=2.0"
+          install:
+            linux:debian: {backend: apt}
+      """
+    When I run `bosun lock .`
+    Then it fails
+    And it reports "unsatisfiable"
+    When the manifest becomes:
+      """
+      version: 2
+      packages:
+        - name: bosun-probe
+          spec: "2.0-1"
+          install:
+            linux:debian: {backend: apt}
+      """
+    And I run `bosun install . --yes --scope system`
+    Then it succeeds
+    And it warns "the spec names a version apt's pins keep from installing"
+    And dpkg reports bosun-probe at 2.0-1
+    When the manifest is deleted
+    And I run `bosun prune --yes --scope system`
+    Then it succeeds
+    And dpkg reports bosun-probe not installed
+
   # github-deb holds the release .deb it installs through apt, so it too
   # releases the hold before it moves the package to another release.
   @apt-get

@@ -15,16 +15,17 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use bosun_core::{
-    BackendId, Capabilities, Installed, Os, Ref, Scheme, Scope, Source, Target, Version,
+    BackendId, Capabilities, Installed, Os, Ref, Scheme, Scope, Source, Target, Version, Want,
 };
 use bosun_ports::{
     Backend, BackendFactory, Command, CommandRunner, HostInfo, HttpFetcher, Index, Installer,
-    PortError, Probe, Step, Steps, UserInstall, UserInstalls,
+    PortError, Probe, Selection, Step, Steps, UserInstall, UserInstalls,
 };
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::logmsg;
 
+mod policy;
 pub mod remote;
 
 const BACKEND: &str = "apt";
@@ -242,23 +243,60 @@ impl Index for AptBackend {
     }
 
     fn query_available(&self, pkg: &Ref, _target: &Target) -> Result<Vec<Version>, PortError> {
-        // `apt-cache madison <pkg>` lists `pkg | version | source` per line.
-        let out = self.runner.run(&Command::new(
-            "apt-cache",
-            argv(&["madison", &pkg.purl.native_id()]),
-        ))?;
-        if !out.success() {
-            return Ok(vec![]); // unknown package → no versions
-        }
-        let mut versions = Vec::new();
-        for line in out.stdout_utf8().lines() {
-            if let Some(field) = line.split('|').nth(1) {
-                if let Ok(v) = Version::parse(field.trim(), Scheme::Debian) {
-                    versions.push(v);
-                }
+        Ok(self.policy(pkg)?.offered())
+    }
+
+    /// apt's own choice in `want`: by pin priority, as its candidate is
+    /// chosen ([`policy`]).
+    fn select(
+        &self,
+        pkg: &Ref,
+        _target: &Target,
+        want: &Want,
+        prefer: &[Version],
+    ) -> Result<Selection, PortError> {
+        let policy = self.policy(pkg)?;
+        let chosen = policy.choose(want, prefer);
+        let name = pkg.purl.native_id();
+        if let Some(v) = &chosen {
+            let priority = policy.priority(v);
+            debug!(message = logmsg::APT_CHOSEN, package = %name, version = %v, priority);
+            if policy.pinned_away(v) {
+                warn!(message = logmsg::APT_PINNED_AWAY_NAMED, package = %name, version = %v, priority);
+            }
+            if let Some(newer) = policy.passed_over(want, v) {
+                debug!(
+                    message = logmsg::APT_NEWER_PASSED_OVER,
+                    package = %name,
+                    newer = %newer,
+                    priority = policy.priority(&newer),
+                );
             }
         }
-        Ok(versions)
+        Ok(Selection {
+            chosen,
+            available: policy.offered(),
+        })
+    }
+}
+
+impl AptBackend {
+    /// `apt-cache policy <pkg>`: apt's version table with each version's
+    /// pin priority. Under `LC_ALL=C`, so its layout reads the same in every
+    /// locale.
+    fn policy(&self, pkg: &Ref) -> Result<policy::Policy, PortError> {
+        let out = self.runner.run(
+            &Command::new("apt-cache", argv(&["policy", &pkg.purl.native_id()]))
+                .with_env(vec![("LC_ALL".to_string(), "C".to_string())]),
+        )?;
+        if !out.success() {
+            return Err(PortError::CommandFailed {
+                program: "apt-cache".to_string(),
+                code: out.code,
+                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            });
+        }
+        policy::parse(&out.stdout_utf8())
     }
 }
 
@@ -567,15 +605,54 @@ mod tests {
         );
     }
 
+    const BACKPORTS: &str =
+        include_str!("../../tests/fixtures/apt/bookworm-policy-curl-backports.txt");
+
     #[test]
-    fn query_available_parses_madison() {
-        let madison = " fd-find | 9.0.0-1 | http://deb.debian.org bookworm/main amd64\n \
-                        fd-find | 8.7.0-1 | http://deb.debian.org bookworm/main amd64\n";
-        let fake = Arc::new(FakeCommandRunner::new().with_stdout(madison));
-        let got = backend(fake)
-            .query_available(&reff("fd-find"), &"linux/amd64".parse().unwrap())
+    fn query_available_lists_what_apt_cache_policy_offers() {
+        let fake = Arc::new(FakeCommandRunner::new().with_stdout(BACKPORTS));
+        let got = backend(fake.clone())
+            .query_available(&reff("curl"), &"linux/amd64".parse().unwrap())
             .unwrap();
-        assert_eq!(got, vec![deb("9.0.0-1"), deb("8.7.0-1")]);
+        assert_eq!(
+            got,
+            vec![
+                deb("8.14.1-2+deb13u2~bpo13+1"),
+                deb("7.88.1-10+deb12u15"),
+                deb("7.88.1-10+deb12u5")
+            ]
+        );
+        let calls = fake.calls();
+        assert_eq!(calls[0].program, "apt-cache");
+        assert_eq!(calls[0].args, vec!["policy", "curl"]);
+        assert_eq!(calls[0].env, vec![("LC_ALL".to_string(), "C".to_string())]);
+    }
+
+    #[test]
+    fn select_takes_apt_s_candidate_not_the_newest_version() {
+        let fake = Arc::new(FakeCommandRunner::new().with_stdout(BACKPORTS));
+        let want = Want::of(bosun_core::VersRange::parse("vers:deb/*").unwrap());
+        let got = backend(fake)
+            .select(&reff("curl"), &"linux/amd64".parse().unwrap(), &want, &[])
+            .unwrap();
+        assert_eq!(got.chosen, Some(deb("7.88.1-10+deb12u15")));
+        assert_eq!(got.available.len(), 3);
+    }
+
+    #[test]
+    fn apt_cache_failing_is_an_error_not_no_versions() {
+        let fake = Arc::new(FakeCommandRunner::new().with_output(Output {
+            code: Some(100),
+            stdout: vec![],
+            stderr: b"E: could not open lock".to_vec(),
+        }));
+        let err = backend(fake)
+            .query_available(&reff("curl"), &"linux/amd64".parse().unwrap())
+            .unwrap_err();
+        assert!(
+            matches!(err, PortError::CommandFailed { ref program, code: Some(100), .. } if program == "apt-cache"),
+            "{err:?}"
+        );
     }
 
     #[test]

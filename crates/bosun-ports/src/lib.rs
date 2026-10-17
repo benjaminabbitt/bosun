@@ -24,8 +24,8 @@ pub mod step;
 pub mod testing;
 
 pub use backend::{
-    Backend, BackendFactory, BackendMeta, HostInfo, Index, Installer, Probe, UserInstall,
-    UserInstalls,
+    Backend, BackendFactory, BackendMeta, HostInfo, Index, Installer, Probe, Selection,
+    UserInstall, UserInstalls,
 };
 pub use error::PortError;
 pub use exec::{Command, CommandRunner, HttpFetcher, HttpRequest, HttpResponse, Output};

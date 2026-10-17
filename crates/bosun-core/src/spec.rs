@@ -13,6 +13,7 @@
 use crate::errmsg;
 use crate::vers::{VersError, VersOp, VersRange};
 use crate::version::{Scheme, Version};
+use crate::want::Want;
 
 /// A version spec: the written string plus its parsed vers set. The vers type
 /// (and thus the §6 comparison scheme) comes from the written `vers:<type>/`
@@ -115,13 +116,8 @@ impl Spec {
     /// pre-releases unless the spec names one. Errors when nothing is in the
     /// set, naming the spec and what was available.
     pub fn select(&self, available: &[Version]) -> Result<Version, SelectError> {
-        let allow_pre = self.range.mentions_prerelease();
-        available
-            .iter()
-            .filter(|v| self.range.contains(v))
-            .filter(|v| allow_pre || !v.is_prerelease())
-            .max()
-            .cloned()
+        Want::of(self.range.clone())
+            .choose(available, &[])
             .ok_or_else(|| {
                 // Newest first, so the diagnostic reads naturally.
                 let mut sorted: Vec<&Version> = available.iter().collect();

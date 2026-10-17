@@ -1,0 +1,10 @@
+curl:
+  Installed: (none)
+  Candidate: 7.88.1-10+deb12u5
+  Version table:
+     8.14.1-2+deb13u2~bpo13+1 100
+        100 http://deb.debian.org/debian bookworm-backports/main amd64 Packages
+     7.88.1-10+deb12u15 500
+        500 http://deb.debian.org/debian bookworm/main amd64 Packages
+     7.88.1-10+deb12u5 1001
+        500 http://deb.debian.org/debian-security bookworm-security/main amd64 Packages
