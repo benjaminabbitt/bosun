@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use bosun_core::record::{LockDocument, LockLeaf, LockPackage, Package, StateDocument, StateLeaf};
 use bosun_core::{BackendId, Libc, Manifest, Os, Scope, Spec};
 use bosun_io::{check_options, load_manifest, lock, manifest_hash};
-use bosun_ports::{Installer, StateStore};
+use bosun_ports::Installer;
 use bosun_resolve::{resolve, resolve_with_lock, NotApplicable, Outcome, Resolution};
 use serde::Serialize;
 
@@ -332,14 +332,8 @@ pub fn status(env: &Env, path: PathBuf, pref: &[BackendId]) -> Result<StatusOutp
     let resolution = resolve(&manifest, &hash, &env.host(), &env.resolvables(), pref)
         .map_err(|e| CliError::Resolve(e.to_string()))?;
 
-    let system = env
-        .state
-        .read(Scope::System)
-        .map_err(|e| CliError::Environment(e.to_string()))?;
-    let user = env
-        .state
-        .read(Scope::User)
-        .map_err(|e| CliError::Environment(e.to_string()))?;
+    let system = read_state(env, Scope::System)?;
+    let user = read_state(env, Scope::User)?;
 
     let mut packages = Vec::new();
     let mut diagnostics = Vec::new();
@@ -350,6 +344,9 @@ pub fn status(env: &Env, path: PathBuf, pref: &[BackendId]) -> Result<StatusOutp
                 backend,
                 version,
             } => {
+                if in_hidden_scope(env, backend) {
+                    continue;
+                }
                 // bosun state is authoritative for what it manages; a package it
                 // does not record is checked live on the machine (§4.6 A).
                 let leaf = managed_leaf(&[&system, &user], &entry.name);
@@ -388,6 +385,15 @@ pub fn status(env: &Env, path: PathBuf, pref: &[BackendId]) -> Result<StatusOutp
         libc: libc_info(env.machine().libc()),
         os: env.machine().os(),
     })
+}
+
+/// Whether `backend` installs into a scope this run leaves out
+/// ([`Env::visible_state`]).
+fn in_hidden_scope(env: &Env, backend: &BackendId) -> bool {
+    env.system_hidden()
+        && env
+            .installer_for(backend)
+            .is_some_and(|i| i.scope() == Scope::System)
 }
 
 /// Whether a package absent from bosun state is nonetheless present on the
@@ -471,10 +477,7 @@ struct ManagedStatus {
 pub fn machine_status(env: &Env) -> Result<MachineStatus, CliError> {
     let mut packages = Vec::new();
     for scope in [Scope::System, Scope::User] {
-        let doc = env
-            .state
-            .read(scope)
-            .map_err(|e| CliError::Environment(e.to_string()))?;
+        let doc = read_state(env, scope)?;
         for pkg in &doc.packages {
             for (target, leaf) in &pkg.targets {
                 packages.push(ManagedStatus {
@@ -1011,8 +1014,8 @@ pub fn install_plan(
 /// only when a system-scope package needs it.
 struct ScopeCache<'a> {
     env: &'a Env,
-    sys: Option<StateDocument>,
-    usr: Option<StateDocument>,
+    sys: Option<Option<StateDocument>>,
+    usr: Option<Option<StateDocument>>,
 }
 
 impl<'a> ScopeCache<'a> {
@@ -1023,15 +1026,17 @@ impl<'a> ScopeCache<'a> {
             usr: None,
         }
     }
-    fn get(&mut self, scope: Scope) -> Result<&StateDocument, CliError> {
+    /// `scope`'s state, or `None` when this run leaves it out
+    /// ([`Env::visible_state`]).
+    fn get(&mut self, scope: Scope) -> Result<Option<&StateDocument>, CliError> {
         let slot = match scope {
             Scope::System => &mut self.sys,
             Scope::User => &mut self.usr,
         };
         if slot.is_none() {
-            *slot = Some(read_state(self.env, scope)?);
+            *slot = Some(self.env.visible_state(scope)?);
         }
-        Ok(slot.as_ref().expect("just populated"))
+        Ok(slot.as_ref().and_then(Option::as_ref))
     }
 }
 
@@ -1083,8 +1088,10 @@ fn managed_from_resolution<'a>(
                 })?;
                 let vers_type = env.vers_type(backend).unwrap_or("generic").to_string();
                 let purl = leaf.placement.purl.clone();
-                let scope = installer.scope();
-                let doc = state.get(scope)?;
+                // A scope this run leaves out is not planned for (§4.6).
+                let Some(doc) = state.get(installer.scope())? else {
+                    continue;
+                };
                 let claims = claims_for(manifest_path, &entry.name, &pkg.meta.canonical(), doc);
                 // §4.6 A: a package not in bosun state is checked on the machine
                 // (accepted if present), so one installed outside bosun is never
@@ -1161,8 +1168,10 @@ fn managed_from_lock<'a>(
             CliError::Environment(format!("no installer for {}", backend.as_str()))
         })?;
         let vers_type = env.vers_type(backend).unwrap_or("generic").to_string();
-        let scope = installer.scope();
-        let doc = state.get(scope)?;
+        // A scope this run leaves out is not planned for (§4.6).
+        let Some(doc) = state.get(installer.scope())? else {
+            continue;
+        };
         let purl = leaf.placement.purl.clone();
         let claims = claims_for(manifest_path, &pkg.name, &pkg.meta.canonical(), doc);
         // §7 --frozen: refuse if another claim's spec excludes the locked version.
@@ -1288,10 +1297,13 @@ fn claims_for(manifest_path: &Path, name: &str, spec: &str, doc: &StateDocument)
     claims
 }
 
+/// `scope`'s machine state; empty when this run leaves it out
+/// ([`Env::visible_state`]).
 fn read_state(env: &Env, scope: Scope) -> Result<StateDocument, CliError> {
-    env.state
-        .read(scope)
-        .map_err(|e| CliError::Environment(e.to_string()))
+    Ok(env.visible_state(scope)?.unwrap_or_else(|| StateDocument {
+        state_version: bosun_io::state::STATE_VERSION,
+        packages: Vec::new(),
+    }))
 }
 
 pub(crate) fn combined_state(env: &Env) -> Result<StateDocument, CliError> {

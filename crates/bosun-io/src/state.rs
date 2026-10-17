@@ -282,19 +282,50 @@ impl StateStore for FileStateStore {
 
     fn read(&self, scope: Scope) -> Result<StateDocument, PortError> {
         let path = self.path(scope);
-        if !path.exists() {
-            return Ok(empty_state());
+        match path.try_exists() {
+            Ok(true) => {}
+            Ok(false) => return Ok(empty_state()),
+            Err(source) => return Err(read_error(path, source).into()),
         }
         let lock_path = path.with_extension("lock");
-        let lock = File::create(&lock_path).map_err(|source| IoError::Lock {
-            path: lock_path.clone(),
-            source,
-        })?;
+        let lock = open_for_shared_lock(&lock_path)?;
         lock.lock_shared().map_err(|source| IoError::Lock {
             path: lock_path,
             source,
         })?;
         Ok(read_or_empty(path, &self.schemes)?)
+    }
+}
+
+/// Open the lock file for a shared lock: read-only, since an elevated run
+/// leaves it writable only by root while every user may read the state
+/// (§4.6). Created only when missing.
+fn open_for_shared_lock(lock_path: &Path) -> Result<File, IoError> {
+    let opened = match File::open(lock_path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => File::create(lock_path),
+        other => other,
+    };
+    opened.map_err(|source| match source.kind() {
+        std::io::ErrorKind::PermissionDenied => IoError::Denied {
+            path: lock_path.to_path_buf(),
+        },
+        _ => IoError::Lock {
+            path: lock_path.to_path_buf(),
+            source,
+        },
+    })
+}
+
+/// A failure reading `path`: [`IoError::Denied`] when this user may not.
+fn read_error(path: &Path, source: std::io::Error) -> IoError {
+    match source.kind() {
+        std::io::ErrorKind::PermissionDenied => IoError::Denied {
+            path: path.to_path_buf(),
+        },
+        _ => IoError::Read {
+            path: path.to_path_buf(),
+            source,
+        },
     }
 }
 
@@ -342,10 +373,7 @@ fn read_or_empty(path: &Path, schemes: &BackendSchemes) -> Result<StateDocument,
     match fs::read_to_string(path) {
         Ok(text) => from_json(&text, path, schemes),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(empty_state()),
-        Err(source) => Err(IoError::Read {
-            path: path.to_path_buf(),
-            source,
-        }),
+        Err(source) => Err(read_error(path, source)),
     }
 }
 
@@ -568,5 +596,107 @@ mod tests {
         txn1.commit(sample()).unwrap();
         let txn2 = store.try_begin(Scope::User).unwrap().expect("lock is free");
         assert_eq!(txn2.state(), &sample());
+    }
+
+    /// Whether file modes bind this process: not for root, which reads and
+    /// writes regardless.
+    #[cfg(unix)]
+    fn modes_bind(dir: &Path) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        let probe = dir.join("probe");
+        fs::write(&probe, "x").unwrap();
+        fs::set_permissions(&probe, fs::Permissions::from_mode(0o000)).unwrap();
+        let binds = fs::read(&probe).is_err();
+        fs::remove_file(&probe).unwrap();
+        binds
+    }
+
+    /// The user state committed, then its lock and state file set to `lock`
+    /// and `state` modes, as an elevated run leaves the system state.
+    #[cfg(unix)]
+    fn committed_with_modes(tmp: &tempfile::TempDir, lock: u32, state: u32) -> FileStateStore {
+        use std::os::unix::fs::PermissionsExt;
+        let store = store(tmp);
+        store.begin(Scope::User).unwrap().commit(sample()).unwrap();
+        let path = store.path(Scope::User).to_path_buf();
+        fs::set_permissions(
+            path.with_extension("lock"),
+            fs::Permissions::from_mode(lock),
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(state)).unwrap();
+        store
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_takes_its_shared_lock_through_a_lock_file_it_may_not_write() {
+        let tmp = tempfile::tempdir().unwrap();
+        if !modes_bind(tmp.path()) {
+            return;
+        }
+        let store = committed_with_modes(&tmp, 0o444, 0o444);
+        assert_eq!(store.read(Scope::User).unwrap(), sample());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_of_state_this_user_may_not_read_is_denied_naming_the_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        if !modes_bind(tmp.path()) {
+            return;
+        }
+        let store = committed_with_modes(&tmp, 0o444, 0o000);
+        let path = store.path(Scope::User).display().to_string();
+        assert_eq!(
+            store.read(Scope::User).unwrap_err(),
+            PortError::StateDenied { path }
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_of_a_lock_this_user_may_not_open_is_denied_naming_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        if !modes_bind(tmp.path()) {
+            return;
+        }
+        let store = committed_with_modes(&tmp, 0o000, 0o444);
+        let path = store
+            .path(Scope::User)
+            .with_extension("lock")
+            .display()
+            .to_string();
+        assert_eq!(
+            store.read(Scope::User).unwrap_err(),
+            PortError::StateDenied { path }
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_inside_a_directory_this_user_may_not_search_is_denied() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        if !modes_bind(tmp.path()) {
+            return;
+        }
+        let store = committed_with_modes(&tmp, 0o644, 0o644);
+        let dir = store.path(Scope::User).parent().unwrap().to_path_buf();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o000)).unwrap();
+        let err = store.read(Scope::User).unwrap_err();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(matches!(err, PortError::StateDenied { .. }), "{err}");
+    }
+
+    #[test]
+    fn read_creates_a_missing_lock_beside_existing_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = store(&tmp);
+        store.begin(Scope::User).unwrap().commit(sample()).unwrap();
+        let lock = store.path(Scope::User).with_extension("lock");
+        fs::remove_file(&lock).unwrap();
+        assert_eq!(store.read(Scope::User).unwrap(), sample());
+        assert!(lock.exists());
     }
 }

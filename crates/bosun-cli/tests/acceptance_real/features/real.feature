@@ -398,6 +398,43 @@ Feature: real backends against a disposable container
     Then it succeeds
     And rpm reports tree not installed
 
+  # An elevated run leaves the system state root's: every user reads it,
+  # under a shared lock taken through a lock file opened read-only. State a
+  # user may not read is left out, said once, and never touched.
+  @apt-get @useradd @runuser
+  Scenario: a run without elevation reads the system state an elevated run left, or leaves it out
+    Given the apt index is refreshed
+    And the system state is clean
+    And the manifest:
+      """
+      version: 2
+      packages:
+        - name: hello
+          spec: "*"
+          install:
+            linux:debian: {backend: apt}
+      """
+    When I run `bosun install . --yes --scope system`
+    Then it succeeds
+    Given a non-root user owns the project
+    When the non-root user runs `bosun prune --yes`
+    Then it succeeds
+    And dpkg reports hello installed
+    When the non-root user runs `bosun --format text status .`
+    Then it succeeds
+    And it says "(up to date)"
+    And it does not warn "system state is not readable"
+    When the system state is made readable only by root
+    And the non-root user runs `bosun prune --yes`
+    Then it succeeds
+    And it warns "system state is not readable by this user"
+    And the system state is unchanged
+    And dpkg reports hello installed
+    When the manifest is deleted
+    And I run `bosun prune --yes --scope system`
+    Then it succeeds
+    And dpkg reports hello not installed
+
   # github-release is user scope, so it runs as a non-root user (§5.5).
   @useradd @runuser
   Scenario: github-release verifies the checksum and installs an executable

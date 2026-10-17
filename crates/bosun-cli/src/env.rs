@@ -3,7 +3,7 @@
 //! host (§5.3), or, when the test seam is active (`BOSUN_FIXTURE` +
 //! `BOSUN_STATE_DIR`, both required), from a fixture ([`crate::fixture`]).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -17,6 +17,7 @@ use bosun_backends::{
     GithubPackageFactory, GithubReleaseFactory, NpmFactory, PackageKind, ScoopFactory, UvFactory,
     WingetFactory,
 };
+use bosun_core::record::StateDocument;
 use bosun_core::vers::scheme_for_type;
 use bosun_core::version::Scheme;
 use bosun_core::{Arch, BackendId, Distro, Libc, LibcFamily, Os, Scope, Target, Version};
@@ -28,6 +29,7 @@ use bosun_host::{
 };
 use bosun_io::FileStateStore;
 use bosun_ports::backend::{Index, Installer};
+use bosun_ports::StateStore;
 use bosun_ports::{
     Backend, BackendFactory, CommandRunner, Elevation, HostInfo, HttpFetcher, Machine, PortError,
     Privilege, StepRunner, User,
@@ -94,9 +96,35 @@ pub struct Env {
     lock_dir: PathBuf,
     machine: Box<dyn Machine>,
     exec: Exec,
+    /// Whether this run found the system state unreadable and left it out.
+    system_hidden: Cell<bool>,
 }
 
 impl Env {
+    /// `scope`'s machine state, or `None` when this run leaves it out: a run
+    /// without elevation that may not read the system state (root's, left by
+    /// an elevated run) skips it and its packages, said once, and never
+    /// touches it (§4.6). An elevated run, or the user scope, fails instead.
+    pub fn visible_state(&self, scope: Scope) -> Result<Option<StateDocument>, CliError> {
+        match self.state.read(scope) {
+            Ok(doc) => Ok(Some(doc)),
+            Err(PortError::StateDenied { path })
+                if scope == Scope::System && self.machine.privilege() != Privilege::Elevated =>
+            {
+                if !self.system_hidden.replace(true) {
+                    tracing::warn!(message = crate::logmsg::SYSTEM_STATE_HIDDEN, path = %path);
+                }
+                Ok(None)
+            }
+            Err(e) => Err(CliError::Environment(e.to_string())),
+        }
+    }
+
+    /// Whether this run left the system state out (see [`Env::visible_state`]).
+    pub fn system_hidden(&self) -> bool {
+        self.system_hidden.get()
+    }
+
     /// The host facts resolution matches selectors and builds identities against.
     pub fn host(&self) -> Host<'_> {
         Host {
@@ -734,6 +762,7 @@ fn from_host() -> Result<Env, CliError> {
         lock_dir,
         machine,
         exec: Exec::Host { runner, fetcher },
+        system_hidden: Cell::new(false),
     })
 }
 
@@ -906,6 +935,7 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
             machine_state,
             any_real.then(|| RealSteps { fetcher, packages }),
         ))),
+        system_hidden: Cell::new(false),
     })
 }
 

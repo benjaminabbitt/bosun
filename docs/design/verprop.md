@@ -352,6 +352,15 @@ its user.
 runs under `sudo bosun …` (Linux/macOS) or from an Administrator terminal (Windows). bosun
 checks privilege against the computed plan and fails fast before changing anything (§5.5).
 
+**Reading the system state without elevation (DECIDED, built).** An elevated run leaves the
+system state file and its lock root's: the state readable by every user, the lock writable only
+by root. A run without elevation reads it under a shared lock taken through the lock file opened
+read-only, so `status`, `prune` and `install` see every claim. When the user may not read it
+(a state file or directory root's alone), the run leaves the system state out: its packages are
+skipped in `install` and `status`, `uninstall` and `prune` plan nothing at system scope, it is
+warned about once (`SYSTEM_STATE_HIDDEN`), and the file is never locked or written. An elevated
+run that cannot read it fails, as before.
+
 ### 4.7 Resolution is per machine
 
 `bosun lock` resolves:
@@ -1644,6 +1653,7 @@ under a pty on Unix only.
 | V-3 | hold only exact specs: `Installer::unhold`; state records `held` (absent: installed reads held); the plan unholds bosun's hold once no spec is exact (before any version change) and holds a package an exact spec newly pins; apk installs `pkg=ver` then the bare name, so a range leaves the world unpinned | landed; real tier: apt hold → `*` → unheld → `apt-get --only-upgrade` → bosun leaves 2.0-1 (Debian 12/13); dnf `*` unlocked → exact locked → range unlocked (Rocky 9, Fedora 41); apk world unpinned → pinned → unpinned (Alpine 3.20, 3.23) |
 | V-4 | machine architecture from `uname -m` through the runner (Linux/macOS) or `PROCESSOR_ARCHITEW6432` / `PROCESSOR_ARCHITECTURE` (Windows), not bosun's build target (§5.5) | landed; unit tests on `x86_64`, `aarch64`, `arm64`, `armv7l`, `i686` |
 | V-5 | apk ordering and validity by the probed apk-tools major (2 vs 3); real-tier ordering oracle: each index's versions sorted by bosun, every adjacent pair confirmed by `dpkg --compare-versions` / `rpm.vercmp` / `apk version -t`, plus conformance pairs | landed; 0 disagreements: Debian 13 23,276 pairs, Debian 12 21,410, Fedora 41 22,394, Rocky 9 2,800, Alpine 3.20 (apk-tools 2.14.4) 4,921, Alpine 3.23 (3.0.8) 5,282 |
+| TV-6 | system state without elevation: `read` takes its shared lock through the lock file opened read-only; state the user may not read (`PortError::StateDenied`) is left out of a run without elevation, its packages skipped, warned once, never locked or written; elevated runs fail on it as before | landed; real tier in `debian:13`: elevated install, then a non-root `prune` / `status` read it; with the state 0600 a non-root `prune` warns and leaves it untouched |
 
 **First real-host smoke run (2026-10-14, release build, Debian 13, read-only `--plan` and
 `lock` in a scratch dir).** `backends` found apt 3.0.3, cargo 1.96.1 and github-release; jq

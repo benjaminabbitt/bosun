@@ -178,6 +178,10 @@ struct BosunWorld {
     seeded: BTreeMap<String, Vec<Value>>,
     /// The manifest as the scenario wrote it.
     manifest: Option<String>,
+    /// The system state file's size and modification time when a step made
+    /// it root's.
+    #[cfg(unix)]
+    system_state: Option<(u64, std::time::SystemTime)>,
     code: i32,
     stdout: String,
     stderr: String,
@@ -866,6 +870,38 @@ fn bosun_recorded(
     fs::write(dir.join("state.json"), doc.to_string()).unwrap();
 }
 
+/// What an elevated run leaves: the system state and its lock root's, the
+/// lock writable only by root, the state readable by every user or by root
+/// alone. Tagged `@unprivileged`: root reads and writes them regardless.
+#[cfg(unix)]
+#[given(regex = r"^the system state is root's, readable (by every user|only by root)$")]
+fn system_state_roots(world: &mut BosunWorld, readers: String) {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = world.path().join("state").join("system");
+    let state = dir.join("state.json");
+    let lock = dir.join("state.lock");
+    fs::write(&lock, "").unwrap();
+    fs::set_permissions(&lock, fs::Permissions::from_mode(0o444)).unwrap();
+    let mode = if readers == "by every user" {
+        0o444
+    } else {
+        0o000
+    };
+    fs::set_permissions(&state, fs::Permissions::from_mode(mode)).unwrap();
+    let meta = fs::metadata(&state).unwrap();
+    world.system_state = Some((meta.len(), meta.modified().unwrap()));
+}
+
+#[cfg(unix)]
+#[then("the system state is unchanged")]
+fn system_state_unchanged(world: &mut BosunWorld) {
+    let meta = fs::metadata(world.path().join("state").join("system").join("state.json")).unwrap();
+    assert_eq!(
+        Some((meta.len(), meta.modified().unwrap())),
+        world.system_state
+    );
+}
+
 #[given("the project has a bosun.lock from an older bosun")]
 fn old_project_lock(world: &mut BosunWorld) {
     let old = r#"{"lockfileVersion": 1, "targets": {}, "packages": []}"#;
@@ -1219,6 +1255,16 @@ fn claim_is_absolute(world: &mut BosunWorld, relative: String) {
 #[then(expr = "it warns {string}")]
 fn warns(world: &mut BosunWorld, needle: String) {
     assert!(world.stderr.contains(&needle), "stderr:\n{}", world.stderr);
+}
+
+#[then(expr = "it warns once {string}")]
+fn warns_once(world: &mut BosunWorld, needle: String) {
+    assert_eq!(
+        world.stderr.matches(&needle).count(),
+        1,
+        "stderr:\n{}",
+        world.stderr
+    );
 }
 
 #[then(expr = "it does not warn {string}")]
@@ -1587,19 +1633,39 @@ fn versions_file_gives(
     assert_eq!(leaf["backend"], backend.as_str(), "{}", world.stdout);
 }
 
+/// Whether a file without read permission is unreadable to this process:
+/// false for root, and on Windows.
+fn file_modes_bind() -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let probe = dir.path().join("probe");
+        fs::write(&probe, "x").unwrap();
+        fs::set_permissions(&probe, fs::Permissions::from_mode(0o000)).unwrap();
+        fs::read(&probe).is_err()
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
 fn main() {
     // An undefined step skips its scenario; that must fail the suite, not pass it.
-    // Scenarios tagged @pty drive a pseudo-terminal, which only unix has.
+    // Scenarios tagged @pty drive a pseudo-terminal, which only unix has;
+    // those tagged @unprivileged need file modes to bind, so not root or Windows.
+    let unprivileged = file_modes_bind();
     futures::executor::block_on(
         BosunWorld::cucumber()
             .fail_on_skipped()
-            .filter_run_and_exit("tests/acceptance/features", |feature, _, scenario| {
-                cfg!(unix)
-                    || !feature
-                        .tags
-                        .iter()
-                        .chain(&scenario.tags)
-                        .any(|t| t == "pty")
+            .filter_run_and_exit("tests/acceptance/features", move |feature, _, scenario| {
+                let mut tags = feature.tags.iter().chain(&scenario.tags);
+                tags.all(|t| match t.as_str() {
+                    "pty" => cfg!(unix),
+                    "unprivileged" => unprivileged,
+                    _ => true,
+                })
             }),
     );
 }

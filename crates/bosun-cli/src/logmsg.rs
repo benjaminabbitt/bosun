@@ -32,3 +32,8 @@ pub const RENDER_FROM_ROOTFS: &str =
 
 /// A path render copies out of an image is not in it.
 pub const RENDER_IMAGE_LACKS: &str = "the image has no such path; left out";
+
+/// A run without elevation may not read the system state an elevated run
+/// left; it leaves that state, and the packages it records, out.
+pub const SYSTEM_STATE_HIDDEN: &str =
+    "system state is not readable by this user; its packages are left out (run elevated to include them)";

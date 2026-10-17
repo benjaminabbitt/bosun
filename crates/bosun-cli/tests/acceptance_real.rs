@@ -35,6 +35,9 @@ struct RealWorld {
     /// Whether this scenario changed dnf's repositories, which are put back
     /// once it ends.
     dnf_repos: bool,
+    /// The system state file's size and modification time when a step made
+    /// it root's alone.
+    system_state: Option<(u64, std::time::SystemTime)>,
     code: i32,
     stdout: String,
     stderr: String,
@@ -80,6 +83,22 @@ fn clean_apt(_w: &mut RealWorld, pkg: String) {
     let _ = fs::remove_file("/var/lib/bosun/state.json");
     let _ = run("apt-mark", &["unhold", &pkg]);
     let _ = run("apt-get", &["remove", "-y", &pkg]);
+}
+
+const SYSTEM_STATE: &str = "/var/lib/bosun/state.json";
+
+#[cfg(unix)]
+#[when("the system state is made readable only by root")]
+fn system_state_private(w: &mut RealWorld) {
+    fs::set_permissions(SYSTEM_STATE, fs::Permissions::from_mode(0o600)).unwrap();
+    let meta = fs::metadata(SYSTEM_STATE).unwrap();
+    w.system_state = Some((meta.len(), meta.modified().unwrap()));
+}
+
+#[then("the system state is unchanged")]
+fn system_state_unchanged(w: &mut RealWorld) {
+    let meta = fs::metadata(SYSTEM_STATE).unwrap();
+    assert_eq!(Some((meta.len(), meta.modified().unwrap())), w.system_state);
 }
 
 #[given("the dnf index is refreshed")]

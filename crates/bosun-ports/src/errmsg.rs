@@ -15,6 +15,8 @@ pub const HTTP_REQUEST: &str = "http request failed";
 pub const HTTP_STATUS: &str = "http request returned an error status";
 /// Reading or writing machine state failed.
 pub const STATE_IO: &str = "machine state i/o failed";
+/// This user may not read a scope's machine state (§4.6).
+pub const STATE_DENIED: &str = "machine state is not readable by this user";
 /// A backend operation failed.
 pub const BACKEND: &str = "backend operation failed";
 /// A backend was asked to do something it does not support (§5.2).

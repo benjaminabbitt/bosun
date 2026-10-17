@@ -40,6 +40,12 @@ pub enum IoError {
         /// The underlying I/O error.
         source: std::io::Error,
     },
+    /// This user may not read a scope's machine state (§4.6).
+    #[error("{kind}: {path}", kind = bosun_ports::errmsg::STATE_DENIED)]
+    Denied {
+        /// The state or lock file that could not be opened.
+        path: PathBuf,
+    },
     /// A lockfile's major version is newer than this build can read.
     #[error("{kind}: found {found}, this build reads {max}", kind = errmsg::LOCKFILE_VERSION)]
     LockfileVersion {
@@ -105,8 +111,13 @@ pub enum IoError {
 
 impl From<IoError> for bosun_ports::PortError {
     fn from(e: IoError) -> bosun_ports::PortError {
-        bosun_ports::PortError::StateIo {
-            detail: e.to_string(),
+        match e {
+            IoError::Denied { path } => bosun_ports::PortError::StateDenied {
+                path: path.display().to_string(),
+            },
+            e => bosun_ports::PortError::StateIo {
+                detail: e.to_string(),
+            },
         }
     }
 }
@@ -114,6 +125,20 @@ impl From<IoError> for bosun_ports::PortError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn denied_maps_to_its_own_port_error_naming_the_file() {
+        let port: bosun_ports::PortError = IoError::Denied {
+            path: PathBuf::from("/var/lib/bosun/state.json"),
+        }
+        .into();
+        assert_eq!(
+            port,
+            bosun_ports::PortError::StateDenied {
+                path: "/var/lib/bosun/state.json".to_string()
+            }
+        );
+    }
 
     #[test]
     fn maps_to_a_port_error_carrying_its_message() {

@@ -108,3 +108,48 @@ Feature: accept, hold and privilege at system scope (apt)
     When I run `bosun lock .`
     Then it succeeds
     And the lock pins hello 2.11~rc1-1
+
+  # An elevated run leaves the system state root's: readable by every user,
+  # its lock writable only by root. A run without elevation reads it under a
+  # shared lock it opens read-only.
+  @unprivileged
+  Scenario: without elevation, system state root left readable is read
+    Given a Debian trixie amd64 machine, not elevated
+    And jq 1.7.1-6+deb13u2 is installed outside bosun
+    And bosun installed jq 1.7.1-6+deb13u2 unheld for this project wanting ">=1.6"
+    And the system state is root's, readable by every user
+    When I run `bosun --format json prune --yes`
+    Then it succeeds
+    When I run `bosun --format text status .`
+    Then it succeeds
+    And it says "1.7.1-6+deb13u2 (up to date)"
+    And it does not warn "system state is not readable"
+
+  # State this user cannot read is left out, never failed on or written: its
+  # packages are skipped, said once.
+  @unprivileged
+  Scenario: without elevation, system state this user cannot read is left out
+    Given a Debian trixie amd64 machine, not elevated
+    And jq 1.7.1-6+deb13u2 is installed outside bosun
+    And bosun installed jq 1.7.1-6+deb13u2 unheld for this project wanting ">=1.6"
+    And the system state is root's, readable only by root
+    When I run `bosun --format json prune --yes`
+    Then it succeeds
+    And it warns "system state is not readable by this user; its packages are left out"
+    When I run `bosun --format json install . --plan`
+    Then it succeeds
+    And the plan's actions are none
+    And it warns once "system state is not readable by this user"
+    When I run `bosun --format text status .`
+    Then it succeeds
+    And it does not say "jq"
+    And the system state is unchanged
+
+  @unprivileged
+  Scenario: elevated, system state that cannot be read is an error
+    Given a Debian trixie amd64 machine, elevated
+    And bosun installed jq 1.7.1-6+deb13u2 unheld for this project wanting ">=1.6"
+    And the system state is root's, readable only by root
+    When I run `bosun --format json prune --yes`
+    Then it fails
+    And it says "machine state is not readable by this user"

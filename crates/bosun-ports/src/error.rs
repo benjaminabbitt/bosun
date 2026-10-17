@@ -68,6 +68,14 @@ pub enum PortError {
         detail: String,
     },
 
+    /// This user may not read a scope's machine state: root's, left by an
+    /// elevated run (§4.6).
+    #[error("{kind}: {path}", kind = errmsg::STATE_DENIED)]
+    StateDenied {
+        /// The file that could not be opened.
+        path: String,
+    },
+
     /// A backend operation failed for a backend-specific reason.
     #[error("{kind}: {detail}", kind = errmsg::BACKEND)]
     Backend {
