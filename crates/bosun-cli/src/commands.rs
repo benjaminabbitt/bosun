@@ -6,11 +6,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use bosun_core::record::{LockDocument, LockLeaf, LockPackage, Package, StateDocument, StateLeaf};
-use bosun_core::{BackendId, Libc, Manifest, Os, Scope, Spec};
+use bosun_core::{BackendId, Libc, Manifest, Os, Scope, Spec, Target, Version};
 use bosun_io::{check_options, load_manifest, lock, manifest_hash};
 use bosun_ports::Installer;
 use bosun_resolve::{resolve, resolve_with_lock, NotApplicable, Outcome, Resolution};
 use serde::Serialize;
+use tracing::{info, warn};
 
 use crate::env::Env;
 use crate::error::CliError;
@@ -352,7 +353,7 @@ pub fn status(env: &Env, path: PathBuf, pref: &[BackendId]) -> Result<StatusOutp
                 let leaf = managed_leaf(&[&system, &user], &entry.name);
                 let claimed_by = leaf.map_or_else(Vec::new, |l| claim_statuses(&l.claimed_by));
                 let (installed, managed, present) = match leaf {
-                    Some(l) => (Some(l.installed.as_str().to_string()), true, true),
+                    Some(l) => (Some(installed_now(env, l).as_str().to_string()), true, true),
                     None => match live_presence(env, &resolution, &entry.name, target, backend) {
                         Some(v) => (v, false, true),
                         None => (None, false, false),
@@ -385,6 +386,16 @@ pub fn status(env: &Env, path: PathBuf, pref: &[BackendId]) -> Result<StatusOutp
         libc: libc_info(env.machine().libc()),
         os: env.machine().os(),
     })
+}
+
+/// The version of a package bosun state records that its package manager
+/// reports installed now (§4.6), or the recorded one where it reports none or
+/// cannot be asked.
+fn installed_now(env: &Env, leaf: &StateLeaf) -> Version {
+    env.installer_for(&leaf.placement.backend)
+        .and_then(|i| bosun_apply::reported_installed(i, &leaf.placement.purl).ok())
+        .flatten()
+        .unwrap_or_else(|| leaf.installed.clone())
 }
 
 /// Whether `backend` installs into a scope this run leaves out
@@ -485,7 +496,7 @@ pub fn machine_status(env: &Env) -> Result<MachineStatus, CliError> {
                     scope: scope_label(scope),
                     target: target.to_string(),
                     backend: leaf.placement.backend.as_str().to_string(),
-                    installed: leaf.installed.as_str().to_string(),
+                    installed: installed_now(env, leaf).as_str().to_string(),
                     origin: origin_label(leaf.origin),
                     claimed_by: claim_statuses(&leaf.claimed_by),
                 });
@@ -684,6 +695,23 @@ pub(crate) struct PendingLock {
 }
 
 impl PendingLock {
+    /// Pin each `(name, target, version)` the package manager moved the
+    /// package to, so the lock follows what is installed (§4.6).
+    fn follow(&mut self, followed: &[(String, Target, Version)]) {
+        for (name, target, version) in followed {
+            let leaf = self
+                .doc
+                .packages
+                .iter_mut()
+                .find(|p| &p.name == name)
+                .and_then(|p| p.targets.get_mut(target));
+            if let Some(leaf) = leaf {
+                leaf.resolved = version.clone();
+                leaf.checksum = None;
+            }
+        }
+    }
+
     /// Write the lock, making its directory; gives where it went.
     pub(crate) fn write(&self) -> Result<PathBuf, CliError> {
         let io_err = |e: std::io::Error| CliError::Io {
@@ -962,7 +990,7 @@ use bosun_apply::{
     build_install_plan, build_prune_plan, build_uninstall_plan, ApplyReport, ApplyResult, Current,
     Diagnostic, Managed, Plan,
 };
-use bosun_core::{Claim, Installed, Origin, Ref, Target};
+use bosun_core::{Claim, Installed, Origin, Ref};
 use bosun_resolve::{frozen_select, select_across_claims};
 
 /// Options for `install`.
@@ -1000,9 +1028,12 @@ pub fn install_plan(
         (managed, carried, None)
     } else {
         let relocked = relock(env, &file, &manifest, pref, &Release::None)?;
-        let (managed, carried) =
-            managed_from_resolution(env, &claim_path, &relocked.resolution, &mut state)?;
-        (managed, carried, relocked.pending)
+        let resolved = managed_from_resolution(env, &claim_path, &relocked.resolution, &mut state)?;
+        let mut pending = relocked.pending;
+        if let Some(pending) = &mut pending {
+            pending.follow(&resolved.followed);
+        }
+        (resolved.managed, resolved.carried, pending)
     };
 
     let plan =
@@ -1063,9 +1094,10 @@ fn managed_from_resolution<'a>(
     manifest_path: &Path,
     resolution: &bosun_resolve::Resolution,
     state: &mut ScopeCache,
-) -> Result<(Vec<Managed<'a>>, Vec<Diagnostic>), CliError> {
+) -> Result<Resolved<'a>, CliError> {
     let mut managed = Vec::new();
     let mut carried = Vec::new();
+    let mut followed = Vec::new();
     for entry in &resolution.outcomes {
         match &entry.outcome {
             Outcome::Resolved {
@@ -1096,7 +1128,7 @@ fn managed_from_resolution<'a>(
                 // §4.6 A: a package not in bosun state is checked on the machine
                 // (accepted if present), so one installed outside bosun is never
                 // reinstalled or held.
-                let current = current_for(doc, &entry.name, installer, &purl)?;
+                let (current, moved_from) = current_for(doc, &entry.name, installer, &purl)?;
                 // §4.6 D: when bosun would act, select over every claim's
                 // intersection (refusing an empty one), not just this manifest.
                 let resolved = if needs_resolution(&current) {
@@ -1117,6 +1149,17 @@ fn managed_from_resolution<'a>(
                 } else {
                     version.clone() // accepted: bosun does not install it
                 };
+                let resolved = following_the_tool(
+                    &entry.name,
+                    &current,
+                    moved_from.as_ref(),
+                    &claims,
+                    &vers_type,
+                    resolved,
+                );
+                if moved_from.is_some() && resolved != leaf.resolved {
+                    followed.push((entry.name.clone(), *target, resolved.clone()));
+                }
                 let checksum = (resolved == leaf.resolved)
                     .then(|| leaf.checksum.clone())
                     .flatten();
@@ -1142,7 +1185,20 @@ fn managed_from_resolution<'a>(
             }),
         }
     }
-    Ok((managed, carried))
+    Ok(Resolved {
+        managed,
+        carried,
+        followed,
+    })
+}
+
+/// What [`managed_from_resolution`] decided: the packages to plan for, the
+/// diagnostics resolution carried, and each package whose end version follows
+/// the package manager's move rather than the lock, by name and target.
+struct Resolved<'a> {
+    managed: Vec<Managed<'a>>,
+    carried: Vec<Diagnostic>,
+    followed: Vec<(String, Target, Version)>,
 }
 
 fn managed_from_lock<'a>(
@@ -1178,7 +1234,7 @@ fn managed_from_lock<'a>(
         frozen_select(&leaf.resolved, &claims, &vers_type)
             .map_err(|e| CliError::Resolve(e.to_string()))?;
         // §4.6 A: present outside bosun → accepted, not reinstalled.
-        let current = current_for(doc, &pkg.name, installer, &purl)?;
+        let (current, _) = current_for(doc, &pkg.name, installer, &purl)?;
         // §4.6/§7 --frozen: a package bosun does not own, installed at a version
         // other than the one the lock pins, is a conflict bosun will not resolve
         // by changing it. Error and skip; the error blocks apply.
@@ -1224,41 +1280,93 @@ fn not_applicable_diagnostic(name: &str, na: &NotApplicable) -> Diagnostic {
     }
 }
 
-/// The current state of a package (§4.6). bosun state is authoritative for what
-/// it installed; a package it did not record is checked on the machine with
-/// `verify_installed` and, if present, treated as `accepted` — so a package
-/// installed outside bosun is never reinstalled or held, only accepted.
+/// The current state of a package (§4.6). For a package bosun state records,
+/// its version is the one the package manager reports now (its own updates
+/// move it under a range), the recorded one where it reports none; the
+/// recorded version comes back too when the two differ. A package state does
+/// not record is checked on the machine with `verify_installed` and, if
+/// present, treated as `accepted` — so a package installed outside bosun is
+/// never reinstalled or held, only accepted.
 fn current_for(
     doc: &StateDocument,
     name: &str,
     installer: &dyn Installer,
     purl: &bosun_core::Purl,
-) -> Result<Current, CliError> {
+) -> Result<(Current, Option<Version>), CliError> {
     if let Some(leaf) = doc
         .packages
         .iter()
         .find(|p| p.name == name)
         .and_then(|p| p.targets.values().next())
     {
-        return Ok(Current::Present {
-            version: Some(leaf.installed.clone()),
-            origin: leaf.origin,
-            claimed_by: leaf.claimed_by.clone(),
-            held: leaf.held,
-        });
+        let reported = bosun_apply::reported_installed(installer, &leaf.placement.purl)
+            .map_err(|e| CliError::Resolve(e.to_string()))?;
+        let moved_from = reported
+            .as_ref()
+            .filter(|now| **now != leaf.installed)
+            .map(|_| leaf.installed.clone());
+        if let (Some(recorded), Some(now)) = (&moved_from, &reported) {
+            info!(
+                message = crate::logmsg::INSTALLED_MOVED,
+                package = %name,
+                recorded = %recorded,
+                installed = %now,
+            );
+        }
+        return Ok((
+            Current::Present {
+                version: Some(reported.unwrap_or_else(|| leaf.installed.clone())),
+                origin: leaf.origin,
+                claimed_by: leaf.claimed_by.clone(),
+                held: leaf.held,
+            },
+            moved_from,
+        ));
     }
     match installer
         .verify_installed(&Ref::new(purl.clone()))
         .map_err(|e| CliError::Resolve(e.to_string()))?
     {
-        Installed::Present { version } => Ok(Current::Present {
-            version,
-            origin: Origin::Accepted,
-            claimed_by: Vec::new(),
-            held: false,
-        }),
-        Installed::Absent => Ok(Current::Absent),
+        Installed::Present { version } => Ok((
+            Current::Present {
+                version,
+                origin: Origin::Accepted,
+                claimed_by: Vec::new(),
+                held: false,
+            },
+            None,
+        )),
+        Installed::Absent => Ok((Current::Absent, None)),
     }
+}
+
+/// The version to end at when the package manager moved a package bosun
+/// recorded: its own version where that is newer than `resolved` and every
+/// claim admits it, so a distro's update within the spec is never taken
+/// back; else `resolved`. A version it moved outside the spec is said, and
+/// planned for as any other.
+fn following_the_tool(
+    name: &str,
+    current: &Current,
+    moved_from: Option<&Version>,
+    claims: &[Claim],
+    vers_type: &str,
+    resolved: Version,
+) -> Version {
+    let (
+        Some(_),
+        Current::Present {
+            version: Some(now), ..
+        },
+    ) = (moved_from, current)
+    else {
+        return resolved;
+    };
+    if !bosun_apply::satisfies_all(now, claims, vers_type) {
+        warn!(message = crate::logmsg::INSTALLED_OUTSIDE_SPEC, package = %name, installed = %now);
+        return resolved;
+    }
+    resolved.max(now.clone())
 }
 
 /// Whether bosun would install/upgrade/downgrade (so it needs a resolved
@@ -1601,5 +1709,84 @@ mod tests {
         let path = dir.path().join("config.yaml");
         fs::write(&path, "installer: [scoop, winget]\n").unwrap();
         assert_eq!(config_installer(&path).unwrap(), vec!["scoop", "winget"]);
+    }
+
+    fn deb(raw: &str) -> Version {
+        Version::parse(raw, bosun_core::Scheme::Debian).unwrap()
+    }
+
+    fn at(raw: &str) -> Current {
+        Current::Present {
+            version: Some(deb(raw)),
+            origin: Origin::Installed,
+            claimed_by: Vec::new(),
+            held: false,
+        }
+    }
+
+    fn wanting(spec: &str) -> Vec<Claim> {
+        vec![Claim {
+            manifest: PathBuf::from("/w/a/bosun.yaml"),
+            spec: format!("vers:deb/{spec}"),
+            user: None,
+        }]
+    }
+
+    fn follow(current: &Current, moved_from: Option<&str>, spec: &str, resolved: &str) -> String {
+        let moved_from = moved_from.map(deb);
+        following_the_tool(
+            "jq",
+            current,
+            moved_from.as_ref(),
+            &wanting(spec),
+            "deb",
+            deb(resolved),
+        )
+        .as_str()
+        .to_string()
+    }
+
+    #[test]
+    fn a_package_the_package_manager_moved_up_within_the_spec_stays_there() {
+        assert_eq!(
+            follow(&at("1.2-1"), Some("1.1-1"), ">=1.0", "1.1-1"),
+            "1.2-1"
+        );
+    }
+
+    #[test]
+    fn the_resolved_version_stands_unless_the_package_manager_moved_past_it() {
+        // Not moved: the lock's choice stands, whatever is installed.
+        assert_eq!(follow(&at("1.2-1"), None, ">=1.0", "1.1-1"), "1.1-1");
+        // Moved, but the lock already asks for more: upgrade to it.
+        assert_eq!(
+            follow(&at("1.2-1"), Some("1.1-1"), ">=1.0", "1.3-1"),
+            "1.3-1"
+        );
+        // Moved to exactly what is resolved.
+        assert_eq!(
+            follow(&at("1.2-1"), Some("1.1-1"), ">=1.0", "1.2-1"),
+            "1.2-1"
+        );
+        // Version unknown, or absent.
+        let unknown = Current::Present {
+            version: None,
+            origin: Origin::Installed,
+            claimed_by: Vec::new(),
+            held: false,
+        };
+        assert_eq!(follow(&unknown, Some("1.1-1"), ">=1.0", "1.1-1"), "1.1-1");
+        assert_eq!(
+            follow(&Current::Absent, Some("1.1-1"), ">=1.0", "1.1-1"),
+            "1.1-1"
+        );
+    }
+
+    #[test]
+    fn a_package_the_package_manager_moved_outside_the_spec_is_planned_back() {
+        assert_eq!(
+            follow(&at("2.0-1"), Some("1.1-1"), "<2.0", "1.1-1"),
+            "1.1-1"
+        );
     }
 }

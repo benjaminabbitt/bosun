@@ -396,8 +396,22 @@ fn wants_exact(claims: &[Claim], vers_type: &str) -> bool {
         .any(|c| Spec::new(&c.spec, vers_type).is_ok_and(|spec| spec.is_exact()))
 }
 
+/// The version the package manager reports installed now, for a package
+/// state records (§4.6): under a range its own updates move it between bosun
+/// runs. `None` when it reports none (absent, or a backend that cannot read
+/// a version), so the recorded one stands.
+pub fn reported_installed(
+    installer: &dyn Installer,
+    purl: &Purl,
+) -> Result<Option<Version>, PortError> {
+    Ok(match installer.verify_installed(&Ref::new(purl.clone()))? {
+        bosun_core::Installed::Present { version } => version,
+        bosun_core::Installed::Absent => None,
+    })
+}
+
 /// Does `version` satisfy every claim's vers set?
-fn satisfies_all(version: &Version, claims: &[Claim], vers_type: &str) -> bool {
+pub fn satisfies_all(version: &Version, claims: &[Claim], vers_type: &str) -> bool {
     claims
         .iter()
         .all(|c| Spec::new(&c.spec, vers_type).is_ok_and(|spec| spec.range().contains(version)))

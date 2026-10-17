@@ -22,7 +22,8 @@ use bosun_core::record::{Package, Placement, StateDocument, StateLeaf};
 use bosun_core::{BackendId, Claim, Installed, Origin, Ref, Scope, Target, Version};
 use bosun_ports::{Installer, PortError, StateStore, StateTransaction, StepRunner};
 
-use crate::{Action, ActionKind, Plan};
+use crate::{logmsg, Action, ActionKind, Plan};
+use tracing::{debug, info};
 
 /// Carries out a [`Plan`]. The host applier runs it on this machine; a
 /// container renderer (§8, out of M1) would be a peer implementation.
@@ -214,6 +215,35 @@ impl<'a, S: StateStore> HostApplier<'a, S> {
         }
     }
 
+    /// Record, for each package state records at this target, the version
+    /// its package manager reports installed now (§4.6), where that moved. A
+    /// backend that reports none, or cannot be asked, leaves the recorded one.
+    fn refresh(&self, doc: &mut StateDocument) {
+        for pkg in &mut doc.packages {
+            let Some(leaf) = pkg.targets.get_mut(&self.target) else {
+                continue;
+            };
+            let Some(installer) = self.installers.get(&leaf.placement.backend) else {
+                continue;
+            };
+            match crate::reported_installed(*installer, &leaf.placement.purl) {
+                Ok(Some(now)) if now != leaf.installed => {
+                    info!(
+                        message = logmsg::INSTALLED_MOVED,
+                        package = %pkg.name,
+                        recorded = %leaf.installed,
+                        installed = %now,
+                    );
+                    leaf.installed = now;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    debug!(message = logmsg::INSTALLED_UNREAD, package = %pkg.name, error = %e)
+                }
+            }
+        }
+    }
+
     /// Stamp each claim with the invoking user when recording in system scope
     /// and the claim has no user yet (§4.6); user-scope state stays unstamped.
     fn stamp(&self, claims: &[Claim]) -> Vec<Claim> {
@@ -252,6 +282,7 @@ impl<S: StateStore> Driver for HostApplier<'_, S> {
     fn apply(&self, plan: &Plan) -> Result<ApplyReport, PortError> {
         let mut txn = self.state.begin(self.scope)?;
         let mut doc = txn.state().clone();
+        self.refresh(&mut doc);
         let mut outcomes = Vec::new();
         let mut failed: BTreeSet<BackendId> = BTreeSet::new();
 

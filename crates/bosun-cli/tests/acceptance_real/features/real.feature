@@ -75,6 +75,49 @@ Feature: real backends against a disposable container
     Then it succeeds
     And dpkg reports bosun-probe not installed
 
+  # Under a range apt's own updates move a package bosun installed; bosun
+  # reads the version dpkg reports, shows it, and plans nothing for it.
+  @apt-get
+  Scenario: apt updates a package bosun installed under a range, and bosun follows
+    Given the system state is clean
+    And a local apt repository offers bosun-probe 1.0-1 and 2.0-1
+    And the manifest:
+      """
+      version: 2
+      packages:
+        - name: bosun-probe
+          spec: "<2.0"
+          install:
+            linux:debian: {backend: apt}
+      """
+    When I run `bosun install . --yes --scope system`
+    Then it succeeds
+    And dpkg reports bosun-probe at 1.0-1
+    When the manifest becomes:
+      """
+      version: 2
+      packages:
+        - name: bosun-probe
+          spec: "*"
+          install:
+            linux:debian: {backend: apt}
+      """
+    And I run `bosun install . --yes --scope system`
+    Then it succeeds
+    And dpkg reports bosun-probe at 1.0-1
+    When apt upgrades bosun-probe
+    Then dpkg reports bosun-probe at 2.0-1
+    When I run `bosun --format text status .`
+    Then it succeeds
+    And it says "2.0-1 (up to date)"
+    When I run `bosun --format json install . --plan --scope system`
+    Then it succeeds
+    And it does not report "downgrade"
+    When the manifest is deleted
+    And I run `bosun prune --yes --scope system`
+    Then it succeeds
+    And dpkg reports bosun-probe not installed
+
   # apt refuses to change a held package under -y, so bosun releases its own
   # hold before it moves the package to another version.
   @apt-get

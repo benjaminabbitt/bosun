@@ -37,3 +37,13 @@ pub const RENDER_IMAGE_LACKS: &str = "the image has no such path; left out";
 /// left; it leaves that state, and the packages it records, out.
 pub const SYSTEM_STATE_HIDDEN: &str =
     "system state is not readable by this user; its packages are left out (run elevated to include them)";
+
+/// The package manager moved a package bosun recorded (its own updates under a
+/// range); bosun follows the version it reports.
+pub const INSTALLED_MOVED: &str =
+    "the package manager moved this package since bosun recorded it; following its version";
+
+/// The package manager moved a package bosun recorded to a version outside the
+/// spec; the plan moves it back as for any other.
+pub const INSTALLED_OUTSIDE_SPEC: &str =
+    "the package manager moved this package outside the spec; planning to move it back";

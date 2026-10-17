@@ -1834,12 +1834,21 @@ fn apply_records_a_new_package_without_touching_an_existing_one() {
     // A different package already in state must not be overwritten by a new
     // install (guards the name match in `record`).
     let apt = verifying(Scope::System, true, true, present("1.7.1-3"));
-    let store = FakeStateStore::with(prestate(
+    // git through a backend this run has no installer for, so nothing reads
+    // its version again.
+    let mut git = prestate(
         "git",
         "2.43.0",
         Origin::Installed,
         vec![claim("/w/x", ">=2")],
-    ));
+    );
+    git.packages[0]
+        .targets
+        .get_mut(&AMD64)
+        .unwrap()
+        .placement
+        .backend = BackendId::new("dnf");
+    let store = FakeStateStore::with(git);
     let plan = build_install_plan(
         &[managed(
             "jq",
@@ -2151,4 +2160,82 @@ fn diagnostics_and_privilege_errors_have_text() {
         }],
     };
     assert!(mixed.to_string().contains("jq") && mixed.to_string().contains("rg"));
+}
+
+/// A plan with nothing in it for the system scope, applied there.
+fn apply_nothing(apt: &FakeInstaller, store: &FakeStateStore) {
+    let plan = Plan {
+        actions: Vec::new(),
+        diagnostics: Vec::new(),
+    };
+    apply_system(&plan, apt, store);
+}
+
+#[test]
+fn apply_records_the_version_the_package_manager_moved_a_package_to() {
+    let claims = vec![claim("/w/a", ">=1.6")];
+    for origin in [Origin::Installed, Origin::Accepted] {
+        let apt = verifying(Scope::System, true, true, present("1.7.1-4"));
+        let store = FakeStateStore::with(prestate("jq", "1.7.1-3", origin, claims.clone()));
+        apply_nothing(&apt, &store);
+        let leaf = &store.snapshot().packages[0].targets[&AMD64];
+        assert_eq!(leaf.installed.as_str(), "1.7.1-4", "{origin:?}");
+        assert_eq!(leaf.origin, origin);
+    }
+}
+
+#[test]
+fn apply_keeps_the_recorded_version_where_the_package_manager_reports_none() {
+    let claims = vec![claim("/w/a", ">=1.6")];
+    for verify in [Installed::Absent, Installed::Present { version: None }] {
+        let apt = verifying(Scope::System, true, true, verify);
+        let store =
+            FakeStateStore::with(prestate("jq", "1.7.1-3", Origin::Installed, claims.clone()));
+        apply_nothing(&apt, &store);
+        assert_eq!(
+            store.snapshot().packages[0].targets[&AMD64]
+                .installed
+                .as_str(),
+            "1.7.1-3"
+        );
+    }
+}
+
+#[test]
+fn apply_keeps_the_recorded_version_of_another_target_or_an_absent_backend() {
+    let claims = vec![claim("/w/a", ">=1.6")];
+    let apt = verifying(Scope::System, true, true, present("1.7.1-4"));
+    let mut doc = prestate("jq", "1.7.1-3", Origin::Installed, claims.clone());
+    let leaf = doc.packages[0].targets.remove(&AMD64).unwrap();
+    doc.packages[0].targets.insert(Target::Any, leaf);
+    let mut other = prestate("rg", "14.0", Origin::Installed, claims);
+    other.packages[0]
+        .targets
+        .get_mut(&AMD64)
+        .unwrap()
+        .placement
+        .backend = BackendId::new("cargo");
+    doc.packages.extend(other.packages);
+    let store = FakeStateStore::with(doc);
+    apply_nothing(&apt, &store);
+    let after = store.snapshot();
+    assert_eq!(
+        after.packages[0].targets[&Target::Any].installed.as_str(),
+        "1.7.1-3"
+    );
+    assert_eq!(after.packages[1].targets[&AMD64].installed.as_str(), "14.0");
+}
+
+#[test]
+fn reported_installed_is_the_version_the_package_manager_reads_or_none() {
+    let purl: Purl = "pkg:deb/debian/jq".parse().unwrap();
+    let cases = [
+        (present("1.7.1-4"), Some(deb("1.7.1-4"))),
+        (Installed::Present { version: None }, None),
+        (Installed::Absent, None),
+    ];
+    for (verify, want) in cases {
+        let apt = verifying(Scope::System, true, true, verify);
+        assert_eq!(reported_installed(&apt, &purl).unwrap(), want);
+    }
 }

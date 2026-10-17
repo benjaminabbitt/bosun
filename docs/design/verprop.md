@@ -315,6 +315,17 @@ Only the header and the per-target leaf fields differ:
   wants it), the backend's dry-run in the plan showing any cascade (e.g. dependents
   `apt-get -s remove` would also take), and confirmation. No separate "pre-existing" marker
   is kept.
+- `installed` follows the package manager (DECIDED, built). Under a range bosun holds nothing,
+  so apt, dnf and apk move a package between bosun runs. Planning (and `status`) reads each
+  recorded package's version from its backend's installed-version query (`verify_installed`,
+  as verification does) and takes that as current; the recorded one stands where the backend
+  reports none (github-release) or the package is gone. Every state write records it (the
+  applier reads it again at the start of its transaction), so state catches up on the next
+  `install`, `uninstall` or `prune` that writes. A move within every claim's spec is never
+  taken back: the end version is the package manager's wherever it is newer than what the lock
+  or the claims' selection would give, and the lock follows it; a lock newer still is upgraded
+  to. A move outside the spec is warned about (`INSTALLED_OUTSIDE_SPEC`) and planned like any
+  installed version outside it. `install --frozen` still applies its lock's version.
 - `held`: whether bosun holds the package at `installed` (§5.2: only while some claim's spec is
   exact). State written before bosun recorded this has no `held`; a package bosun installed then
   was held, so it reads as held, and the next `install` releases it if no spec is exact.
@@ -519,6 +530,9 @@ backend, package ID, from → to version, the claim(s) that drove it, and the pr
 - **Ordering is fixed:** sources first, then migrations, then unholds, then installs, upgrades
   and downgrades, then holds, so a renamed package's old version is gone before the new one is
   installed, and a hold bosun releases is gone before the version moves.
+- **The current version is the package manager's** (§4.6): each recorded package's version is
+  read from its backend, so a plan compares against what is installed now, not what bosun last
+  recorded, and never takes a distro's update within the spec back down.
 - **Diagnostics live in the plan:** conflicting exact pins, entries not applicable on this
   machine, missing backends. Errors block apply.
 - **Index age** is shown for repo-bound backends, since planning uses whatever index is current
@@ -1661,6 +1675,7 @@ under a pty on Unix only.
 | TV-6 | system state without elevation: `read` takes its shared lock through the lock file opened read-only; state the user may not read (`PortError::StateDenied`) is left out of a run without elevation, its packages skipped, warned once, never locked or written; elevated runs fail on it as before | landed; real tier in `debian:13`: elevated install, then a non-root `prune` / `status` read it; with the state 0600 a non-root `prune` warns and leaves it untouched |
 | TV-7 | dnf never goes back past the installed build: `select` asks `rpm -q`, ranks builds behind it last, and keeps it, admitted, when no repository offers it | landed; real tier in `fedora:41` (wget2 2.2.0 kept with fedora's 2.1.0 at priority 1 after `upgrade`) and `rockylinux:9` (unzip 6.0-60.el9_8 kept over the 9.5 vault's 6.0-58.el9_5 at priority 1); red without the installed build: a downgrade was planned |
 | TV-8 | uv resolves with the configuration `uv tool install` reads: `uv python find` and `uv pip compile` run as `uv --directory / --project /`, so a project's `uv.toml`, `[tool.uv]`, `.python-version` or `UV_PROJECT` where bosun runs is not read | landed; real tier in `python:3.12-slim` with uv 0.13.1: a `uv.toml` in the project naming an unreachable index, ruff `>=0.6.0\|<0.7.0` → 0.6.9; red without it (`Connection refused`) |
+| TV-9 | state follows the package manager: planning and `status` take each recorded package's version from `verify_installed`; the applier records it at the start of every state transaction; a move within the spec ends there (the lock follows), never back; a move outside it is warned and planned as any | landed; real tier in `debian:13`: bosun-probe 1.0-1 under `*`, `apt-get --only-upgrade install` → 2.0-1, `status` shows `2.0-1 (up to date)`, `install --plan` plans nothing |
 
 **First real-host smoke run (2026-10-14, release build, Debian 13, read-only `--plan` and
 `lock` in a scratch dir).** `backends` found apt 3.0.3, cargo 1.96.1 and github-release; jq
