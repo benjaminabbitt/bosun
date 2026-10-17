@@ -74,6 +74,11 @@ pub fn distro_from(text: &str) -> Distro {
             .unwrap_or_default(),
         version_id: map.get("VERSION_ID").cloned(),
         version_codename: map.get("VERSION_CODENAME").cloned(),
+        // The archive a derivative's apt reads: Ubuntu's, else Debian's.
+        base_codename: map
+            .get("UBUNTU_CODENAME")
+            .or_else(|| map.get("DEBIAN_CODENAME"))
+            .cloned(),
     }
 }
 
@@ -104,6 +109,7 @@ mod tests {
             id_like: like.iter().map(|s| s.to_string()).collect(),
             version_id: ver.map(String::from),
             version_codename: None,
+            base_codename: None,
         }
     }
 
@@ -210,5 +216,69 @@ mod tests {
         assert_eq!(detect_from(&[&primary, &fallback]).unwrap().id, "debian");
         // Neither present → None.
         assert!(detect_from(&[&missing]).is_none());
+    }
+
+    /// Linux Mint 22's `/etc/os-release` as installed (known content: the
+    /// `linuxmintd/mint22-amd64` image keeps Ubuntu's base-files, so it
+    /// reads as Ubuntu noble).
+    const MINT22: &str = "NAME=\"Linux Mint\"\nVERSION=\"22 (Wilma)\"\nID=linuxmint\n\
+        ID_LIKE=\"ubuntu debian\"\nPRETTY_NAME=\"Linux Mint 22\"\nVERSION_ID=\"22\"\n\
+        HOME_URL=\"https://www.linuxmint.com/\"\nVERSION_CODENAME=wilma\nUBUNTU_CODENAME=noble\n";
+    /// Pop!_OS 24.04 (known content; no image).
+    const POP2404: &str = "NAME=\"Pop!_OS\"\nVERSION=\"24.04 LTS\"\nID=pop\n\
+        ID_LIKE=\"ubuntu debian\"\nVERSION_ID=\"24.04\"\nVERSION_CODENAME=noble\n\
+        UBUNTU_CODENAME=noble\n";
+    /// elementary OS 8 (known content; the image is OS 7).
+    const ELEMENTARY8: &str = "NAME=\"elementary OS\"\nVERSION=\"8 Circe\"\nID=elementary\n\
+        ID_LIKE=\"ubuntu debian\"\nVERSION_ID=\"8\"\nVERSION_CODENAME=circe\n\
+        UBUNTU_CODENAME=noble\n";
+
+    fn fixture(name: &str) -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/os-release")
+            .join(name);
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    }
+
+    #[test]
+    fn a_derivatives_deb_release_is_the_codename_its_apt_reads() {
+        // The apt suites each image lists name these codenames.
+        let cases = [
+            (MINT22.to_string(), "wilma", "noble"),
+            (POP2404.to_string(), "noble", "noble"),
+            (ELEMENTARY8.to_string(), "circe", "noble"),
+            (fixture("elementary7"), "horus", "jammy"),
+            (fixture("lmde6"), "faye", "bookworm"),
+        ];
+        for (text, own, apt) in cases {
+            let d = distro_from(&text);
+            assert_eq!(d.version_codename.as_deref(), Some(own));
+            assert_eq!(d.release("deb").as_deref(), Some(apt), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_distro_naming_no_base_releases_as_its_own_codename() {
+        for (name, codename) in [
+            ("debian13", "trixie"),
+            ("kali-rolling", "kali-rolling"),
+            ("linuxmintd-mint22-image", "noble"),
+        ] {
+            let d = distro_from(&fixture(name));
+            assert_eq!(d.release("deb").as_deref(), Some(codename), "{name}");
+        }
+        assert_eq!(
+            distro_from("ID=x\nDEBIAN_CODENAME=bookworm\n")
+                .base_codename
+                .as_deref(),
+            Some("bookworm")
+        );
+        // Ubuntu's archive before Debian's, should a file name both.
+        assert_eq!(
+            distro_from("ID=x\nDEBIAN_CODENAME=bookworm\nUBUNTU_CODENAME=noble\n")
+                .base_codename
+                .as_deref(),
+            Some("noble")
+        );
     }
 }

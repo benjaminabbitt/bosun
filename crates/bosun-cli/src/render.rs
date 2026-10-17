@@ -291,6 +291,7 @@ fn parse_distro(s: &str, like: &[String]) -> Result<Distro, CliError> {
             .and_then(|r| r.strip_prefix(&format!("{id}-")))
             .map(str::to_string),
         version_codename: release.map(str::to_string),
+        base_codename: None,
     })
 }
 

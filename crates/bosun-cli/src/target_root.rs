@@ -346,6 +346,7 @@ mod tests {
         );
         let rolling = Distro {
             version_codename: None,
+            base_codename: None,
             ..distro
         };
         assert_eq!(root.apt(Some(&rolling)), None);

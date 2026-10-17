@@ -436,6 +436,7 @@ mod tests {
                 id_like: vec![],
                 version_id: Some("12".into()),
                 version_codename: Some("bookworm".into()),
+                base_codename: None,
             }),
             libc: Some(Libc {
                 family: bosun_core::LibcFamily::Musl,
@@ -461,6 +462,7 @@ mod tests {
                 id_like: vec!["debian".into()],
                 version_id: Some("24.04".into()),
                 version_codename: Some("noble".into()),
+                base_codename: None,
             }),
             Some(Libc {
                 family: bosun_core::LibcFamily::Gnu,

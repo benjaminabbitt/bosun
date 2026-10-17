@@ -416,6 +416,10 @@ pub struct Distro {
     /// The `VERSION_CODENAME` field (e.g. `bookworm`, `noble`), used as the
     /// deb purl `distro` qualifier (§5.6). Absent on distros without one.
     pub version_codename: Option<String>,
+    /// The codename of the distro whose archive this one's apt reads:
+    /// `UBUNTU_CODENAME`, else `DEBIAN_CODENAME` (Linux Mint 22 `noble`
+    /// under `VERSION_CODENAME=wilma`; LMDE 6 `bookworm` under `faye`).
+    pub base_codename: Option<String>,
 }
 
 impl Distro {
@@ -428,14 +432,16 @@ impl Distro {
     }
 
     /// This distro's release as packages of `purl_type` spell it: the value of
-    /// their purl `distro` qualifier (§5.6). deb: `VERSION_CODENAME`
-    /// (`bookworm`); rpm: `<ID>-<VERSION_ID>` (`fedora-41`). `None` for a type
+    /// their purl `distro` qualifier (§5.6). deb: the codename apt uses, the
+    /// base distro's where os-release names one, else `VERSION_CODENAME`
+    /// (`bookworm`; `noble` on Linux Mint 22); rpm: `<ID>-<VERSION_ID>`
+    /// (`fedora-41`). `None` for a type
     /// with no such rule, or when a field it needs is missing or blank (Arch,
     /// Debian sid), so a release selector never matches there.
     pub fn release(&self, purl_type: &str) -> Option<String> {
         let present = |field: &Option<String>| field.clone().filter(|v| !v.is_empty());
         match purl_type {
-            "deb" => present(&self.version_codename),
+            "deb" => present(&self.base_codename).or_else(|| present(&self.version_codename)),
             "rpm" => present(&self.version_id).map(|v| format!("{}-{v}", self.id)),
             _ => None,
         }
@@ -571,6 +577,7 @@ mod tests {
             id_like: vec!["debian".into()],
             version_id: Some("24.04".into()),
             version_codename: Some("noble".into()),
+            base_codename: None,
         };
         assert!(ubuntu.satisfies_family("ubuntu")); // by ID
         assert!(ubuntu.satisfies_family("debian")); // by ID_LIKE
@@ -628,6 +635,7 @@ mod tests {
             id_like: Vec::new(),
             version_id: version_id.map(str::to_string),
             version_codename: codename.map(str::to_string),
+            base_codename: None,
         }
     }
 
@@ -635,6 +643,21 @@ mod tests {
     fn deb_release_is_the_codename() {
         let bookworm = os_release("debian", Some("12"), Some("bookworm"));
         assert_eq!(bookworm.release("deb").as_deref(), Some("bookworm"));
+    }
+
+    #[test]
+    fn a_derivatives_deb_release_is_its_base_distros_codename() {
+        let mint = Distro {
+            base_codename: Some("noble".into()),
+            ..os_release("linuxmint", Some("22"), Some("wilma"))
+        };
+        assert_eq!(mint.release("deb").as_deref(), Some("noble"));
+        assert_eq!(mint.release("rpm").as_deref(), Some("linuxmint-22"));
+        let blank = Distro {
+            base_codename: Some(String::new()),
+            ..mint
+        };
+        assert_eq!(blank.release("deb").as_deref(), Some("wilma"));
     }
 
     #[test]

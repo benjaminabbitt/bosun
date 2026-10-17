@@ -790,20 +790,27 @@ present on essentially every current distro and container base image. It is plai
 `KEY=value` lines, so a small hand-written parser suffices. Fields used, and the release
 token each distro gets (below):
 
-| distro | `ID` | `ID_LIKE` | `VERSION_ID` | `VERSION_CODENAME` | release token |
-|---|---|---|---|---|---|
-| Ubuntu 24.04 | `ubuntu` | `debian` | `24.04` | `noble` | `noble` |
-| Debian 12 | `debian` | — | `12` | `bookworm` | `bookworm` |
-| Linux Mint | `linuxmint` | `ubuntu debian` | `22` | `wilma` | `wilma` |
-| Fedora 41 | `fedora` | — | `41` | — | `fedora-41` |
-| RHEL / Rocky | `rhel` / `rocky` | `fedora` / `rhel centos fedora` | `9.4` | — | `rhel-9.4` / `rocky-9.4` |
-| Amazon Linux 2023 | `amzn` | `fedora` | `2023` | — | `amzn-2023` |
-| openSUSE Tumbleweed | `opensuse-tumbleweed` | `opensuse suse` | — | — | — |
-| Arch / Manjaro | `arch` / `manjaro` | — / `arch` | — | — | — |
-| Alpine | `alpine` | — | `3.20.3` | — | — |
+| distro | `ID` | `ID_LIKE` | `VERSION_ID` | `VERSION_CODENAME` | `UBUNTU_` / `DEBIAN_CODENAME` | release token |
+|---|---|---|---|---|---|---|
+| Ubuntu 24.04 | `ubuntu` | `debian` | `24.04` | `noble` | `noble` / — | `noble` |
+| Debian 12 | `debian` | — | `12` | `bookworm` | — | `bookworm` |
+| Linux Mint 22 | `linuxmint` | `ubuntu debian` | `22` | `wilma` | `noble` / — | `noble` |
+| LMDE 6 | `linuxmint` | `debian` | `6` | `faye` | — / `bookworm` | `bookworm` |
+| Pop!_OS 24.04 | `pop` | `ubuntu debian` | `24.04` | `noble` | `noble` / — | `noble` |
+| elementary OS 7 / 8 | `elementary` | `ubuntu debian` | `7` / `8` | `horus` / `circe` | `jammy` / `noble`, — | `jammy` / `noble` |
+| Kali | `kali` | `debian` | `2026.3` | `kali-rolling` | — | `kali-rolling` |
+| Fedora 41 | `fedora` | — | `41` | — | — | `fedora-41` |
+| RHEL / Rocky | `rhel` / `rocky` | `fedora` / `rhel centos fedora` | `9.4` | — | — | `rhel-9.4` / `rocky-9.4` |
+| Amazon Linux 2023 | `amzn` | `fedora` | `2023` | — | — | `amzn-2023` |
+| openSUSE Tumbleweed | `opensuse-tumbleweed` | `opensuse suse` | — | — | — | — |
+| Arch / Manjaro | `arch` / `manjaro` | — / `arch` | — | — | — | — |
+| Alpine | `alpine` | — | `3.20.3` | — | — | — |
 
-(Typical values. The Debian, Ubuntu and Alpine rows have been checked in containers; Alpine's
-`VERSION_ID` is a point release.)
+(Typical values. The Debian, Ubuntu and Alpine rows have been checked in containers, as have
+LMDE 6 (`linuxmintd/lmde6-amd64`), elementary OS 7 (`elementary/docker:stable`) and Kali
+(2026-10-17); Linux Mint 22, Pop!_OS 24.04 and elementary OS 8 are their installed files'
+known contents: `linuxmintd/mint22-amd64` keeps Ubuntu's base-files, so it reads as Ubuntu
+noble. Alpine's `VERSION_ID` is a point release.)
 
 - **`ID_LIKE` (DECIDED, built):** `linux:<distro>` matches when `ID` equals it **or**
   `ID_LIKE` contains it, so Ubuntu, Mint and Pop!_OS all match `linux:debian` without being
@@ -815,12 +822,18 @@ token each distro gets (below):
   release fails to resolve on another.
   - **The release token is the purl `distro` qualifier value** (§5.6), matched exactly, so a
     selector and the identity bosun records use one vocabulary: deb distros (`ID` or `ID_LIKE`
-    `debian`) use `VERSION_CODENAME` (`linux:debian@bookworm`, `linux:ubuntu@noble`); rpm
+    `debian`) use the codename their apt reads: `UBUNTU_CODENAME`, else `DEBIAN_CODENAME`, else
+    `VERSION_CODENAME` (`linux:debian@bookworm`, `linux:ubuntu@noble`, `linux:linuxmint@noble`
+    on Mint 22, whose apt reads Ubuntu's `noble` suites beside Mint's own `wilma`); rpm
     distros (`ID` or `ID_LIKE` `fedora`, `rhel` or `suse`) use `<ID>-<VERSION_ID>`
     (`linux:fedora@fedora-41`), as in the official purl suite. No prefix or numeric rule on
     `VERSION_ID` (`ubuntu@24` names nothing).
   - The `<distro>` of a release selector matches `ID` only: a release is a release of that
     distro, and `ID_LIKE` carries none.
+  - **A derivative's own codename names nothing (DECIDED):** `linux:linuxmint@wilma` does not
+    match Mint 22; `linux:linuxmint@noble` does, as it does Mint 22.1 (`xia`) and 22.2
+    (`zara`), which read the same Ubuntu suites and so offer the same versions. One token per
+    machine keeps the selector and the recorded purl in one vocabulary.
   - A distro whose package type has no `distro` rule (Arch, Alpine) gets no release
     selectors. This holds for Alpine after apk lands too: bosun doesn't invent a branch rule
     (`alpine@3.20`) ahead of purl; Alpine entries use `linux:alpine` and libc keys.
@@ -990,7 +1003,7 @@ bosun does not invent a package-ID or version-range syntax. It uses the package-
   (defaulting to `name`), or a full purl where that's clearer. bosun builds the canonical
   purl from the backend's purl type plus host facts. For deb/rpm the namespace is the distro
   `ID`, with `arch` and `distro` qualifiers; `distro` is the release token (§5.4: deb
-  `VERSION_CODENAME`, rpm `<ID>-<VERSION_ID>`, the latter waiting on an rpm-typed backend) and
+  the codename apt reads, rpm `<ID>-<VERSION_ID>`, the latter waiting on an rpm-typed backend) and
   is left out when the machine has none. A source becomes the standard `repository_url`
   qualifier.
 - The lockfile and machine state record that purl (unversioned) per target, alongside
@@ -1539,7 +1552,8 @@ remote indexes. Traits stay ready; nothing is stubbed.
   the manifest hash passed in, so bosun-resolve depends on neither bosun-host nor bosun-io.
   Install blocks hold an ordered `backends` list (the YAML accepts a scalar or a sequence);
   manifest version 2 replaced it with an unordered set (§5.3).
-  The deb `distro` qualifier is os-release `VERSION_CODENAME`.
+  The deb `distro` qualifier is os-release `VERSION_CODENAME` (since TV-10, the base
+  distro's `UBUNTU_CODENAME` / `DEBIAN_CODENAME` where set).
 - An empty claim intersection is one refusal (listing each manifest's spec and what's
   available) whether the specs are disjoint or nothing published fits; telling those apart
   needs vers interval algebra, deferred. Reporting lockfiles a plain `install` doesn't match is
@@ -1676,6 +1690,7 @@ under a pty on Unix only.
 | TV-7 | dnf never goes back past the installed build: `select` asks `rpm -q`, ranks builds behind it last, and keeps it, admitted, when no repository offers it | landed; real tier in `fedora:41` (wget2 2.2.0 kept with fedora's 2.1.0 at priority 1 after `upgrade`) and `rockylinux:9` (unzip 6.0-60.el9_8 kept over the 9.5 vault's 6.0-58.el9_5 at priority 1); red without the installed build: a downgrade was planned |
 | TV-8 | uv resolves with the configuration `uv tool install` reads: `uv python find` and `uv pip compile` run as `uv --directory / --project /`, so a project's `uv.toml`, `[tool.uv]`, `.python-version` or `UV_PROJECT` where bosun runs is not read | landed; real tier in `python:3.12-slim` with uv 0.13.1: a `uv.toml` in the project naming an unreachable index, ruff `>=0.6.0\|<0.7.0` → 0.6.9; red without it (`Connection refused`) |
 | TV-9 | state follows the package manager: planning and `status` take each recorded package's version from `verify_installed`; the applier records it at the start of every state transaction; a move within the spec ends there (the lock follows), never back; a move outside it is warned and planned as any | landed; real tier in `debian:13`: bosun-probe 1.0-1 under `*`, `apt-get --only-upgrade install` → 2.0-1, `status` shows `2.0-1 (up to date)`, `install --plan` plans nothing |
+| TV-10 | a deb release is the codename apt reads: `UBUNTU_CODENAME`, else `DEBIAN_CODENAME`, else `VERSION_CODENAME` (`Distro::base_codename`); `linux:linuxmint@wilma` names nothing, `@noble` matches Mint 22 | landed; os-release of LMDE 6, elementary OS 7, Debian 13, Kali captured from images; Mint 22, Pop!_OS 24.04, elementary OS 8 from known contents (no faithful image) |
 
 **First real-host smoke run (2026-10-14, release build, Debian 13, read-only `--plan` and
 `lock` in a scratch dir).** `backends` found apt 3.0.3, cargo 1.96.1 and github-release; jq

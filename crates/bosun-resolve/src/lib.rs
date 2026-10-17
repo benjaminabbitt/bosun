@@ -841,6 +841,7 @@ mod tests {
             id_like: Vec::new(),
             version_id: Some("12".to_string()),
             version_codename: Some("bookworm".to_string()),
+            base_codename: None,
         }
     }
 
@@ -1619,6 +1620,7 @@ mod tests {
             id_like: vec!["debian".to_string()],
             version_id: None,
             version_codename: Some("noble".to_string()),
+            base_codename: None,
         };
         let ubuntu_host = Host {
             os: Os::Linux,
@@ -1638,6 +1640,7 @@ mod tests {
             id_like: Vec::new(),
             version_id: Some("41".to_string()),
             version_codename: None,
+            base_codename: None,
         };
         let fedora_host = Host {
             os: Os::Linux,
@@ -1667,6 +1670,7 @@ mod tests {
         Distro {
             version_id: Some("13".to_string()),
             version_codename: Some("trixie".to_string()),
+            base_codename: None,
             ..debian()
         }
     }
@@ -1677,6 +1681,7 @@ mod tests {
             id_like: vec!["debian".to_string()],
             version_id: Some("22.04".to_string()),
             version_codename: Some("jammy".to_string()),
+            base_codename: None,
         }
     }
 
@@ -1755,6 +1760,7 @@ mod tests {
         let sid = Distro {
             version_id: None,
             version_codename: None,
+            base_codename: None,
             ..debian()
         };
         assert_eq!(picked(&m, &linux(Some(&sid)), &backends), "0.1-1");
@@ -1922,6 +1928,7 @@ mod tests {
             id_like: Vec::new(),
             version_id: Some("41".to_string()),
             version_codename: None,
+            base_codename: None,
         };
         assert_eq!(picked(&m, &linux(Some(&fedora)), &backends), "1.6-1");
     }
@@ -1957,6 +1964,7 @@ mod tests {
             id_like: Vec::new(),
             version_id: Some("3.20.3".to_string()),
             version_codename: None,
+            base_codename: None,
         }
     }
 
@@ -2095,6 +2103,7 @@ mod tests {
         let apt = FakeIndex::new(Scheme::Debian, &["1.0-1"]);
         let blank = Distro {
             version_codename: Some(String::new()),
+            base_codename: None,
             ..debian()
         };
         let host = linux(Some(&blank));
@@ -2572,6 +2581,7 @@ mod tests {
             id_like: id_like.iter().map(|s| s.to_string()).collect(),
             version_id: version_id.map(str::to_string),
             version_codename: None,
+            base_codename: None,
         }
     }
 
@@ -2677,6 +2687,7 @@ mod tests {
             id_like: Vec::new(),
             version_id: None,
             version_codename: None,
+            base_codename: None,
         };
         let host = Host {
             os: Os::Linux,

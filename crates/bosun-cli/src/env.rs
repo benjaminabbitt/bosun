@@ -799,6 +799,7 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
         id_like: d.id_like,
         version_id: d.version_id,
         version_codename: d.codename,
+        base_codename: None,
     });
     let libc = fx
         .libc
