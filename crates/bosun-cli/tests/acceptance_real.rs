@@ -12,12 +12,16 @@
 //! `@dnf-3` for dnf4, `@apk`, `@npm`, `@uv`, `@useradd @runuser`); it runs
 //! only where all are.
 
+use std::cmp::Ordering;
+use std::collections::BTreeSet;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use bosun_core::{Scheme, Version};
+use bosun_ports::BackendFactory;
 use cucumber::gherkin::Step;
 use cucumber::{given, then, when, World};
 use tempfile::TempDir;
@@ -748,6 +752,330 @@ fn no_temp_files(w: &mut RealWorld) {
             }
         }
     }
+}
+
+// --- version ordering against the tools (§6) ---------------------------------
+
+/// Pairs whose order the tools' own test suites and release notes pin down:
+/// epochs, `~` and `^`, letters against digits, leading zeros, separators.
+const DEBIAN_PAIRS: &[(&str, &str)] = &[
+    ("1.0", "1.0-0"),
+    ("1.0~rc1-1", "1.0-1"),
+    ("1.0~~", "1.0~"),
+    ("1.0~", "1.0"),
+    ("1.0", "1.0+1"),
+    ("1:0.1", "2.0"),
+    ("0:1.0", "1.0"),
+    ("1.0a", "1.0"),
+    ("1.0a", "1.0+"),
+    ("1.0.0", "1.0"),
+    ("1.01", "1.1"),
+    ("1.0-1~deb12u1", "1.0-1"),
+    ("3.0.17-1~deb12u1", "3.0.17-1~deb12u2"),
+    ("2:1.0-1~bpo12+1", "2:1.0-1"),
+    ("1.0-1ubuntu0.1", "1.0-1ubuntu0.2"),
+    ("20250419~deb12u1", "20250419"),
+    ("1.2.3-4+b1", "1.2.3-4"),
+    ("a", "b"),
+    ("1.0-a", "1.0-1"),
+];
+
+/// rpm's own `rpmvercmp.at` cases and EVR pairs, each side with a release or
+/// neither (bosun sorts an absent release below any; rpm skips it).
+const RPM_PAIRS: &[(&str, &str)] = &[
+    ("1.0", "2.0"),
+    ("2.0.1a", "2.0.1"),
+    ("5.5p1", "5.5p10"),
+    ("10xyz", "10.1xyz"),
+    ("xyz.4", "8"),
+    ("6.0.rc1", "6.0"),
+    ("10b2", "10a1"),
+    ("1.0a", "1.0aa"),
+    ("10.0001", "10.1"),
+    ("2_0", "2.0"),
+    ("+a", "_a"),
+    ("1.0~rc1", "1.0"),
+    ("1.0~rc1~git123", "1.0~rc1"),
+    ("1.0^git1", "1.0"),
+    ("1.0^git1", "1.01"),
+    ("1.0^20160102", "1.0^20160101^git1"),
+    ("1.0~rc1^git1", "1.0~rc1"),
+    ("1.0^git1~pre", "1.0^git1"),
+    ("1b.fc17", "1.fc17"),
+    ("1g.fc17", "1.fc17"),
+    ("1:1.6-1.fc41", "2.0-1.fc41"),
+    ("0:1.0-1", "1.0-1"),
+    ("1.7.1-10.fc41", "1.7.1-8.fc41"),
+    ("1.0~rc1-1.fc41", "1.0-1.fc41"),
+    ("2026e-1.el9_8", "2026a-1.el9"),
+];
+
+/// apk-tools' ordering, including the pairs apk-tools 2 and 3 disagree on.
+const ALPINE_PAIRS: &[(&str, &str)] = &[
+    ("1.0_alpha", "1.0_beta"),
+    ("1.0_pre", "1.0_rc1"),
+    ("1.0_rc1", "1.0"),
+    ("1.0", "1.0_p1"),
+    ("1.0_cvs", "1.0_svn"),
+    ("1.0_git", "1.0_hg"),
+    ("1.0_p1", "1.0a"),
+    ("1.0a", "1.0.1"),
+    ("1.0-r1", "1.0"),
+    ("1.0.4-r3", "1.0.4-r10"),
+    ("1.10", "1.9"),
+    ("01.2", "1.2"),
+    ("1.01", "1.1"),
+    ("1.0", "1.00"),
+    ("1.010", "1.01"),
+    ("20260909", "20260413"),
+    ("2.4_p1-r1", "2.4-r1"),
+];
+
+/// Collect the stdout lines of `sh -c script`, which must succeed.
+fn sh_lines(script: &str) -> Vec<String> {
+    let out = Command::new("sh")
+        .args(["-c", script])
+        .output()
+        .unwrap_or_else(|e| panic!("sh -c {script}: {e}"));
+    assert!(
+        out.status.success(),
+        "sh -c {script}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
+/// The versions the index offers (and the machine has installed), once each.
+fn corpus(tool: &str) -> BTreeSet<String> {
+    let lines = match tool {
+        "apt" => sh_lines(
+            "apt-cache dumpavail | sed -n 's/^Version: //p'; dpkg-query -W -f='${Version}\\n'",
+        ),
+        "dnf" => sh_lines(
+            "dnf -q repoquery --available --queryformat '%{epoch}:%{version}-%{release}\\n'; \
+             rpm -qa --queryformat '%{epoch}:%{version}-%{release}\\n' | sed 's/^(none)/0/'",
+        ),
+        "apk" => sh_lines(
+            "for f in /var/cache/apk/APKINDEX.*.tar.gz; do tar -xzOf \"$f\" APKINDEX; done \
+             | sed -n 's/^V://p'",
+        ),
+        other => panic!("no corpus for {other}"),
+    };
+    lines
+        .into_iter()
+        .map(|v| v.strip_prefix("0:").map(str::to_string).unwrap_or(v))
+        .collect()
+}
+
+/// `versions` sorted by bosun, as adjacent pairs: if the tool agrees with
+/// every one, it orders the whole corpus as bosun does.
+fn adjacent_pairs(versions: &BTreeSet<String>, scheme: Scheme) -> Vec<(String, String)> {
+    let mut parsed: Vec<Version> = Vec::new();
+    let mut rejected = Vec::new();
+    for v in versions {
+        match Version::parse(v.as_str(), scheme) {
+            Ok(v) => parsed.push(v),
+            Err(_) => rejected.push(v.clone()),
+        }
+    }
+    assert!(
+        rejected.is_empty(),
+        "bosun rejects {} version(s) the index offers: {:?}",
+        rejected.len(),
+        &rejected[..rejected.len().min(20)]
+    );
+    assert!(
+        parsed.len() > 100,
+        "a corpus of only {} versions",
+        parsed.len()
+    );
+    parsed.sort();
+    parsed
+        .windows(2)
+        .map(|w| (w[0].as_str().to_string(), w[1].as_str().to_string()))
+        .collect()
+}
+
+/// The conformance pairs, both ways round.
+fn both_ways(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+    pairs
+        .iter()
+        .flat_map(|(a, b)| {
+            [
+                (a.to_string(), b.to_string()),
+                (b.to_string(), a.to_string()),
+            ]
+        })
+        .collect()
+}
+
+/// What the tool says of each pair, as an ordering.
+fn tool_order(tool: &str, pairs: &[(String, String)], bosun: &[Ordering]) -> Vec<Ordering> {
+    match tool {
+        // dpkg answers one relation by exit code: ask the one bosun gives.
+        "dpkg" => pairs
+            .iter()
+            .zip(bosun)
+            .map(|((a, b), want)| {
+                let op = match want {
+                    Ordering::Less => "lt",
+                    Ordering::Equal => "eq",
+                    Ordering::Greater => "gt",
+                };
+                if run("dpkg", &["--compare-versions", a, op, b]).0 == 0 {
+                    *want
+                } else if run("dpkg", &["--compare-versions", a, "lt", b]).0 == 0 {
+                    Ordering::Less
+                } else if run("dpkg", &["--compare-versions", a, "gt", b]).0 == 0 {
+                    Ordering::Greater
+                } else {
+                    Ordering::Equal
+                }
+            })
+            .collect(),
+        // One rpm run compares every pair through its Lua `rpm.vercmp`.
+        "rpm" => {
+            let mut lua = String::from("local r = {}\n");
+            for (a, b) in pairs {
+                lua.push_str(&format!(
+                    "r[#r+1] = rpm.vercmp([====[{a}]====], [====[{b}]====])\n"
+                ));
+            }
+            lua.push_str("print(table.concat(r, ','))\n");
+            let script = std::env::temp_dir().join("bosun-vercmp.lua");
+            fs::write(&script, lua).unwrap();
+            let (code, out) = run(
+                "rpm",
+                &[
+                    "--eval",
+                    &format!("%{{lua: dofile('{}')}}", script.display()),
+                ],
+            );
+            assert_eq!(code, 0, "rpm --eval: {out}");
+            let got: Vec<Ordering> = out
+                .trim()
+                .split(',')
+                .map(|n| {
+                    n.trim()
+                        .parse::<i32>()
+                        .unwrap_or_else(|e| panic!("{n:?}: {e}"))
+                        .cmp(&0)
+                })
+                .collect();
+            assert_eq!(got.len(), pairs.len(), "rpm.vercmp answers");
+            got
+        }
+        "apk" => pairs
+            .iter()
+            .map(|(a, b)| {
+                let (code, out) = run("apk", &["version", "-t", a, b]);
+                assert_eq!(code, 0, "apk version -t {a} {b}: {out}");
+                match out.trim() {
+                    "<" => Ordering::Less,
+                    "=" => Ordering::Equal,
+                    ">" => Ordering::Greater,
+                    other => panic!("apk version -t {a} {b}: {other:?}"),
+                }
+            })
+            .collect(),
+        other => panic!("no ordering oracle {other}"),
+    }
+}
+
+/// bosun and the tool order every pair alike.
+fn assert_agree(tool: &str, scheme: Scheme, pairs: &[(String, String)]) {
+    let bosun: Vec<Ordering> = pairs
+        .iter()
+        .map(|(a, b)| {
+            let parse = |v: &str| {
+                Version::parse(v, scheme).unwrap_or_else(|e| panic!("bosun rejects {v}: {e}"))
+            };
+            parse(a).cmp(&parse(b))
+        })
+        .collect();
+    let theirs = tool_order(tool, pairs, &bosun);
+    let disagree: Vec<String> = pairs
+        .iter()
+        .zip(bosun.iter().zip(&theirs))
+        .filter(|(_, (ours, theirs))| ours != theirs)
+        .map(|((a, b), (ours, theirs))| format!("{a} vs {b}: bosun {ours:?}, {tool} {theirs:?}"))
+        .collect();
+    eprintln!(
+        "{tool}: {} pairs compared, {} disagree",
+        pairs.len(),
+        disagree.len()
+    );
+    assert!(
+        disagree.is_empty(),
+        "{} of {} pairs disagree:\n{}",
+        disagree.len(),
+        pairs.len(),
+        disagree[..disagree.len().min(40)].join("\n")
+    );
+}
+
+/// The scheme and oracle for a distro's family name in a step.
+fn family(
+    name: &str,
+) -> (
+    Scheme,
+    &'static str,
+    &'static [(&'static str, &'static str)],
+) {
+    match name {
+        "Debian" => (Scheme::Debian, "dpkg", DEBIAN_PAIRS),
+        "RPM" => (Scheme::Rpm, "rpm", RPM_PAIRS),
+        "Alpine" => (Scheme::Alpine, "apk", ALPINE_PAIRS),
+        other => panic!("no version family {other}"),
+    }
+}
+
+/// Probe and build the apk backend as bosun does, which sets the version
+/// rules of the host's apk-tools major.
+#[given("bosun follows the host's apk-tools")]
+fn follow_apk_tools(_w: &mut RealWorld) {
+    let runner = bosun_host::ProcessCommandRunner;
+    let factory =
+        bosun_backends::apk::ApkFactory::new(std::sync::Arc::new(bosun_host::ProcessCommandRunner));
+    let host = bosun_ports::HostInfo {
+        os: bosun_core::Os::Linux,
+        arch: bosun_core::Arch::Amd64,
+        distro: None,
+        runner: &runner,
+    };
+    let probe = factory.probe(&host).unwrap().expect("apk answers");
+    eprintln!(
+        "apk {}: {:?}",
+        probe.version,
+        bosun_backends::apk::apk_tools_for(&probe.version)
+    );
+    let _ = factory.build(probe);
+}
+
+#[then(
+    regex = r"^bosun orders the versions (apt|dnf|apk) offers as (?:dpkg --compare-versions|rpm\.vercmp|apk version -t) does$"
+)]
+fn orders_corpus(_w: &mut RealWorld, index: String) {
+    let name = match index.as_str() {
+        "apt" => "Debian",
+        "dnf" => "RPM",
+        _ => "Alpine",
+    };
+    let (scheme, tool, _) = family(name);
+    let pairs = adjacent_pairs(&corpus(&index), scheme);
+    assert_agree(tool, scheme, &pairs);
+}
+
+#[then(
+    regex = r"^bosun orders the (Debian|RPM|Alpine) conformance pairs as (?:dpkg --compare-versions|rpm\.vercmp|apk version -t) does$"
+)]
+fn orders_conformance(_w: &mut RealWorld, name: String) {
+    let (scheme, tool, pairs) = family(&name);
+    assert_agree(tool, scheme, &both_ways(pairs));
 }
 
 fn enabled() -> bool {

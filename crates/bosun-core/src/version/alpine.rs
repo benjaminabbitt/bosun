@@ -1,5 +1,9 @@
-//! Alpine (apk) version ordering (§6), as apk-tools 3 orders versions:
-//! `digit{.digit}...{letter}{_suffix{#}}...{~hash}{-r#}`.
+//! Alpine (apk) version ordering (§6), as the host's apk-tools orders
+//! versions. apk-tools 2 (Alpine 3.22 and earlier, [`v2`]) and 3 order a few
+//! versions differently, so the rule follows the major the apk backend
+//! probes ([`set_apk_tools`]); apk-tools 3 until one is probed.
+//!
+//! apk-tools 3 reads `digit{.digit}...{letter}{_suffix{#}}...{~hash}{-r#}`.
 //!
 //! A version is a sequence of tokens whose kinds may only appear in grammar
 //! order: an initial number, more `.`-numbers, one letter, `_` suffixes each
@@ -14,6 +18,56 @@
 //! `alpha < beta < pre < rc < (none) < cvs < svn < git < hg < p`.
 
 use std::cmp::Ordering;
+use std::sync::atomic::{AtomicU8, Ordering as AtomicOrdering};
+
+mod v2;
+
+/// Which apk-tools major's version rules bosun follows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApkTools {
+    /// apk-tools 2 (Alpine 3.22 and earlier).
+    V2,
+    /// apk-tools 3 (Alpine 3.23 and later).
+    V3,
+}
+
+/// The rule in force, by major: a host fact, like its architecture, that
+/// every Alpine version on this machine is read under.
+static APK_TOOLS: AtomicU8 = AtomicU8::new(3);
+
+/// Follow `rule` for every Alpine version from now on: the apk backend sets
+/// the major it probed.
+pub fn set_apk_tools(rule: ApkTools) {
+    let major = match rule {
+        ApkTools::V2 => 2,
+        ApkTools::V3 => 3,
+    };
+    APK_TOOLS.store(major, AtomicOrdering::Relaxed);
+}
+
+/// The apk-tools rule in force.
+pub fn apk_tools() -> ApkTools {
+    match APK_TOOLS.load(AtomicOrdering::Relaxed) {
+        2 => ApkTools::V2,
+        _ => ApkTools::V3,
+    }
+}
+
+/// Whether `raw` is a version `rule`'s apk-tools accepts.
+pub(super) fn is_valid(rule: ApkTools, raw: &str) -> bool {
+    match rule {
+        ApkTools::V2 => v2::is_valid(raw),
+        ApkTools::V3 => is_valid_v3(raw),
+    }
+}
+
+/// Order two versions as `rule`'s apk-tools does.
+pub(super) fn compare(rule: ApkTools, a: &str, b: &str) -> Ordering {
+    match rule {
+        ApkTools::V2 => v2::compare(a, b),
+        ApkTools::V3 => compare_v3(a, b),
+    }
+}
 
 /// Token kinds, in the order the grammar allows them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -153,8 +207,8 @@ impl<'a> Tokens<'a> {
     }
 }
 
-/// Whether `raw` is a version apk accepts.
-pub(super) fn is_valid(raw: &str) -> bool {
+/// Whether `raw` is a version apk-tools 3 accepts.
+fn is_valid_v3(raw: &str) -> bool {
     let mut tokens = Tokens::new(raw);
     let mut t = tokens.first();
     while t.kind < Kind::End {
@@ -181,8 +235,8 @@ fn token_cmp(a: &Token, b: &Token) -> Ordering {
     }
 }
 
-/// Order two valid versions as apk does.
-pub(super) fn compare(a: &str, b: &str) -> Ordering {
+/// Order two valid versions as apk-tools 3 does.
+fn compare_v3(a: &str, b: &str) -> Ordering {
     let (mut ia, mut ib) = (Tokens::new(a), Tokens::new(b));
     let (mut ta, mut tb) = (ia.first(), ib.first());
     while ta.kind == tb.kind && ta.kind < Kind::End {
@@ -212,7 +266,23 @@ mod tests {
     use super::*;
 
     fn cmp(a: &str, b: &str) -> Ordering {
-        compare(a, b)
+        compare(ApkTools::V3, a, b)
+    }
+
+    fn is_valid(raw: &str) -> bool {
+        super::is_valid(ApkTools::V3, raw)
+    }
+
+    #[test]
+    fn the_rule_picks_the_majors_ordering_and_grammar() {
+        assert_eq!(compare(ApkTools::V2, "1.0", "1.00"), Ordering::Greater);
+        assert_eq!(compare(ApkTools::V3, "1.0", "1.00"), Ordering::Less);
+        assert_eq!(compare(ApkTools::V2, "1.0~ab", "1.0~b"), Ordering::Equal);
+        assert_eq!(compare(ApkTools::V3, "1.0~ab", "1.0~b"), Ordering::Less);
+        assert!(super::is_valid(ApkTools::V2, "1.0b2"));
+        assert!(!super::is_valid(ApkTools::V3, "1.0b2"));
+        assert!(!super::is_valid(ApkTools::V2, "1.0~ab"));
+        assert!(super::is_valid(ApkTools::V3, "1.0~ab"));
     }
 
     #[test]

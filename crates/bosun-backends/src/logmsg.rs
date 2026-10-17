@@ -27,6 +27,10 @@ pub const CARGO_INDEX: &str = "cargo installs crates.io crates from this index";
 pub const CARGO_INDEX_UNREADABLE: &str =
     "cargo's configured crates.io index is not one bosun can read";
 
+/// The apk-tools major the apk backend probed, whose version rules every
+/// Alpine version on this machine follows.
+pub const APK_ORDERING: &str = "apk versions order as this apk-tools major orders them";
+
 /// A crate cargo installed from a path or git, not crates.io, which bosun
 /// installs from; it is left out of the export.
 pub const NOT_FROM_CRATES_IO: &str = "cargo install not from crates.io left out of the export";

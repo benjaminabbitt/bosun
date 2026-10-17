@@ -10,7 +10,8 @@
 //! - [`Scheme::Semver`] → `semver` (pre-release precedence: `0.7.0-pre1 <
 //!   0.7.0`);
 //! - [`Scheme::Rpm`] → `rpmvercmp` over `[epoch:]version-release` (`rpm`);
-//! - [`Scheme::Alpine`] → apk-tools' own ordering (`alpine`);
+//! - [`Scheme::Alpine`] → apk-tools' own ordering (`alpine`), by the
+//!   major the host's apk is ([`set_apk_tools`]);
 //! - [`Scheme::Pep440`] → `pep440_rs` (epoch, pre/post/dev releases, local
 //!   labels: `1.0.dev1 < 1.0a1 < 1.0 < 1.0+local < 1.0.post1`);
 //! - [`Scheme::Generic`] → bosun's own typed-[`Segment`] engine (`segment`).
@@ -29,6 +30,7 @@ use std::fmt;
 
 use crate::errmsg;
 
+pub use alpine::{apk_tools, set_apk_tools, ApkTools};
 pub use segment::Segment;
 
 /// The version grammar a string is written in.
@@ -114,7 +116,7 @@ impl Version {
                 .map_err(|e| VersionError::Semver(e.to_string()))?,
             Scheme::Generic => Parsed::Generic(segment::tokenize(&raw)),
             Scheme::Rpm => Parsed::Rpm(rpm::Evr::parse(&raw)),
-            Scheme::Alpine if alpine::is_valid(&raw) => Parsed::Alpine,
+            Scheme::Alpine if alpine::is_valid(alpine::apk_tools(), &raw) => Parsed::Alpine,
             Scheme::Alpine => return Err(VersionError::Alpine(raw)),
             Scheme::Pep440 => raw
                 .parse::<pep440_rs::Version>()
@@ -167,7 +169,9 @@ impl Version {
             (Parsed::Semver(a), Parsed::Semver(b)) => a.cmp(b),
             (Parsed::Generic(a), Parsed::Generic(b)) => segment::compare(a, b),
             (Parsed::Rpm(a), Parsed::Rpm(b)) => a.cmp(b),
-            (Parsed::Alpine, Parsed::Alpine) => alpine::compare(&self.raw, &other.raw),
+            (Parsed::Alpine, Parsed::Alpine) => {
+                alpine::compare(alpine::apk_tools(), &self.raw, &other.raw)
+            }
             (Parsed::Pep440(a), Parsed::Pep440(b)) => a.cmp(b),
             // Unreachable: equal scheme implies equal Parsed variant.
             _ => Ordering::Equal,
@@ -281,6 +285,23 @@ mod tests {
         assert!(apk("1.10-r0") > apk("1.9-r0"));
         assert_eq!(apk("01.2"), apk("1.2"));
         assert_eq!(apk("1.0").try_cmp(&apk("1.0-r0")), Some(Ordering::Less));
+    }
+
+    #[test]
+    fn alpine_versions_follow_the_apk_tools_major_set() {
+        // The only test that changes the rule; it puts apk-tools 3's back.
+        assert_eq!(apk_tools(), ApkTools::V3);
+        set_apk_tools(ApkTools::V2);
+        assert_eq!(apk_tools(), ApkTools::V2);
+        let v2 = (
+            apk("1.0") > apk("1.00"),
+            Version::parse("1.0b2", Scheme::Alpine).is_ok(),
+        );
+        set_apk_tools(ApkTools::V3);
+        assert_eq!(apk_tools(), ApkTools::V3);
+        assert_eq!(v2, (true, true));
+        assert!(apk("1.0") < apk("1.00"));
+        assert!(Version::parse("1.0b2", Scheme::Alpine).is_err());
     }
 
     #[test]

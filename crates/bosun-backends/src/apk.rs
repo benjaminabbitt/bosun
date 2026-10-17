@@ -15,6 +15,7 @@
 
 use std::sync::Arc;
 
+use bosun_core::version::{set_apk_tools, ApkTools};
 use bosun_core::{
     BackendId, Capabilities, HoldSupport, Installed, Os, Ref, Scheme, Scope, Source, Target,
     Version,
@@ -75,6 +76,10 @@ impl BackendFactory for ApkFactory {
     }
 
     fn build(&self, probe: Probe) -> Backend {
+        // Every Alpine version on this machine orders as its apk-tools does.
+        let rule = apk_tools_for(&probe.version);
+        debug!(message = logmsg::APK_ORDERING, apk = %probe.version, rule = ?rule);
+        set_apk_tools(rule);
         let backend = ApkBackend {
             runner: self.runner.clone(),
             _version: probe.version,
@@ -83,6 +88,20 @@ impl BackendFactory for ApkFactory {
             index: Box::new(backend.clone()),
             installer: Box::new(backend),
         }
+    }
+}
+
+/// The version rules of the apk-tools major `version` is: 2 and earlier
+/// order as apk-tools 2, the rest as 3.
+pub fn apk_tools_for(version: &Version) -> ApkTools {
+    let major = version
+        .as_str()
+        .split(|c: char| !c.is_ascii_digit())
+        .next()
+        .and_then(|m| m.parse::<u32>().ok());
+    match major {
+        Some(m) if m <= 2 => ApkTools::V2,
+        _ => ApkTools::V3,
     }
 }
 
@@ -357,6 +376,18 @@ impl Installer for ApkBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_apk_tools_major_picks_the_version_rules() {
+        for (raw, rule) in [
+            ("2.14.4", ApkTools::V2),
+            ("2.10.8-r0", ApkTools::V2),
+            ("3.0.8-r0", ApkTools::V3),
+            ("3.1.0", ApkTools::V3),
+        ] {
+            assert_eq!(apk_tools_for(&apk(raw)), rule, "{raw}");
+        }
+    }
     use bosun_core::{Arch, SourceId};
     use bosun_ports::testing::FakeCommandRunner;
     use bosun_ports::Output;

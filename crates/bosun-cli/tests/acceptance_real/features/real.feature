@@ -635,3 +635,28 @@ Feature: real backends against a disposable container
     When the manifest is deleted
     And the non-root user runs `bosun prune --yes`
     Then it succeeds
+
+  # bosun orders versions itself (render, and claims across manifests, need
+  # it where the tool is absent), so its ordering is held to the tool's own:
+  # every version the index offers, sorted by bosun, must be in order by the
+  # tool too, pair by adjacent pair, as must the conformance pairs.
+  @apt-get @dpkg
+  Scenario: bosun orders Debian versions as dpkg does
+    Given the apt index is refreshed
+    Then bosun orders the versions apt offers as dpkg --compare-versions does
+    And bosun orders the Debian conformance pairs as dpkg --compare-versions does
+
+  @dnf @rpm
+  Scenario: bosun orders RPM versions as rpm does
+    Given the dnf index is refreshed
+    Then bosun orders the versions dnf offers as rpm.vercmp does
+    And bosun orders the RPM conformance pairs as rpm.vercmp does
+
+  # apk-tools 2 and 3 order a few versions differently; bosun follows the
+  # major the apk backend probes.
+  @apk
+  Scenario: bosun orders Alpine versions as the host's apk does
+    Given the apk index is refreshed
+    And bosun follows the host's apk-tools
+    Then bosun orders the versions apk offers as apk version -t does
+    And bosun orders the Alpine conformance pairs as apk version -t does
