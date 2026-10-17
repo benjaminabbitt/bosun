@@ -500,18 +500,13 @@ fn an_unreachable_mirror_falls_back_to_the_release_file_fetched_before() {
 }
 
 #[test]
-fn the_unchecked_signature_is_warned_about_once() {
+fn reading_a_release_warns_of_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let idx = index(&Arc::new(bookworm_mirror()), dir.path());
     let log = logged(|| {
         versions(&idx, JQ);
     });
-    assert_eq!(
-        log.matches(logmsg::APT_SIGNATURE_NOT_VERIFIED).count(),
-        1,
-        "{log}"
-    );
-    assert!(log.contains("WARN"), "{log}");
+    assert!(!log.contains("WARN"), "{log}");
 }
 
 #[test]

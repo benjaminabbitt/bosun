@@ -6,7 +6,8 @@ Feature: render resolves versions for a machine bosun isn't running on
   selector form. apt's versions come from the release's own mirror, read as
   the image's apt would read it: the release, its updates and its security
   suite, each package index checked against the hash the release file lists.
-  The release file's own signature is not checked, and bosun says so.
+  The release file is trusted as fetched over HTTPS; the image's apt checks
+  its signature when it installs.
   Backends whose index is already remote (cargo, GitHub releases) resolve as
   they always do; one that can only ask a local package manager is an error
   naming it. Nothing on this machine is asked: not its package managers, and
@@ -73,10 +74,10 @@ Feature: render resolves versions for a machine bosun isn't running on
     Then it succeeds
     And it says "JQ_VERSION=1.6-2.1+deb12u3"
 
-  Scenario: the release file's signature is not verified, and bosun says so
+  Scenario: reading the release file warns of nothing
     When I run `bosun render env . --target linux/amd64 --distro debian@bookworm`
     Then it succeeds
-    And it warns "signature is not verified"
+    And it does not warn "signature"
 
   Scenario: render json gives each platform its own versions
     When I run `bosun render json . --targets linux/amd64,linux/arm64 --distro debian@bookworm`

@@ -7,10 +7,9 @@
 //! `bookworm-updates` and `bookworm-security` for Debian 12), each fetched the
 //! way apt fetches it: the suite's `InRelease`, then each component's
 //! `Packages.gz` (else `.xz`), checked against the size and SHA256 the `InRelease` lists
-//! (by hash when the release offers `Acquire-By-Hash`). The `InRelease`'s own
-//! OpenPGP signature is **not** checked: [`ReleaseSignature`] is where that
-//! goes, and [`UncheckedSignatures`], its only implementation, says so with a
-//! warning.
+//! (by hash when the release offers `Acquire-By-Hash`). The `InRelease` is
+//! trusted as fetched over HTTPS; its OpenPGP signature is not checked here
+//! (the image's apt checks it when it installs).
 //!
 //! Fetched files are cached: an `InRelease` is used for [`RELEASE_TTL`] before
 //! it is fetched again (an older one is used, with a warning, when the mirror
@@ -98,30 +97,6 @@ pub fn default_sources(distro: &str, codename: &str, arch: Arch) -> Option<Sourc
 
 fn ubuntu_components() -> Vec<&'static str> {
     vec!["main", "restricted", "universe", "multiverse"]
-}
-
-/// What became of a release file's OpenPGP signature.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SignatureCheck {
-    /// Not checked: the file is trusted as fetched over HTTPS.
-    NotChecked,
-}
-
-/// Checks the OpenPGP signature of an `InRelease` before its hashes are
-/// trusted. The keyring and policy are an open decision (§4.7), so the only
-/// implementation is [`UncheckedSignatures`].
-pub trait ReleaseSignature {
-    /// Check `inrelease`, fetched from `url`.
-    fn check(&self, url: &str, inrelease: &[u8]) -> Result<SignatureCheck, PortError>;
-}
-
-/// Checks no signature.
-pub struct UncheckedSignatures;
-
-impl ReleaseSignature for UncheckedSignatures {
-    fn check(&self, _url: &str, _inrelease: &[u8]) -> Result<SignatureCheck, PortError> {
-        Ok(SignatureCheck::NotChecked)
-    }
 }
 
 /// One file a release lists: its SHA256 and size.
@@ -288,13 +263,10 @@ type Available = BTreeMap<String, Vec<String>>;
 pub struct RemoteAptIndex {
     fetcher: Arc<dyn HttpFetcher>,
     cache: PathBuf,
-    signatures: Box<dyn ReleaseSignature>,
     /// Each release read this run, by distro, codename and arch.
     releases: RefCell<BTreeMap<(String, String, Arch), Rc<Available>>>,
     /// Set by `refresh`: fetch every `InRelease` again, however fresh.
     refetch: Cell<bool>,
-    /// The unchecked-signature warning was given.
-    warned: Cell<bool>,
 }
 
 impl RemoteAptIndex {
@@ -303,10 +275,8 @@ impl RemoteAptIndex {
         RemoteAptIndex {
             fetcher,
             cache,
-            signatures: Box::new(UncheckedSignatures),
             releases: RefCell::new(BTreeMap::new()),
             refetch: Cell::new(false),
-            warned: Cell::new(false),
         }
     }
 
@@ -341,11 +311,6 @@ impl RemoteAptIndex {
                 Err(e) => return Err(e),
             }
         };
-        if self.signatures.check(&url, &bytes)? == SignatureCheck::NotChecked
-            && !self.warned.replace(true)
-        {
-            warn!(message = logmsg::APT_SIGNATURE_NOT_VERIFIED, url = %url);
-        }
         let release = parse_release(&signed_text(&String::from_utf8_lossy(&bytes)))?;
         if !release.is_for(&s.suite) {
             return Err(PortError::Backend {

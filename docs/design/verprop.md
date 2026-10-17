@@ -398,12 +398,10 @@ namespace is the distro, its `distro` qualifier the codename, its `arch` the arc
   indexes as two streams, which the pure-Rust xz decoder doesn't read, and Debian's security
   suite lists only xz) is fetched by hash when the release offers `Acquire-By-Hash`, and refused
   unless its size and SHA256 are the ones the `InRelease` lists. A release file must name the
-  suite asked for (its `Suite` or `Codename`). The `InRelease`'s OpenPGP signature is **not**
-  verified: which keyrings to trust (the distros' archive keys, shipped how, rotated how) is an
-  open decision (§11). The seam is `ReleaseSignature` in `bosun_backends::apt::remote`; its only
-  implementation, `UncheckedSignatures`, reports the release as not checked, and the index warns
-  once per run that the release file's signature is not verified. `Valid-Until` is not checked
-  either: without a verified signature it proves nothing.
+  suite asked for (its `Suite` or `Codename`). The `InRelease`'s OpenPGP signature is not
+  verified, and bosun does not warn about it (decided, §11): HTTPS and the hash chain are
+  enough to choose versions, and the image's apt verifies the release against its keyring when
+  it installs what was chosen. `Valid-Until` is not checked either.
 - **Cache and freshness:** under the user cache directory (`$XDG_CACHE_HOME/bosun/apt`,
   default `~/.cache/bosun/apt`; `%LOCALAPPDATA%\bosun\cache\apt` on Windows), one directory per
   mirror and suite. An `InRelease` is reused for an hour (`RELEASE_TTL`) and then fetched again;
@@ -1191,19 +1189,16 @@ Future driver: CI.
 
 ## 11. Open questions
 
-- **Signatures of apt release files (§4.7):** the remote apt index trusts an `InRelease` as
-  fetched over HTTPS and checks every package index against it, but does not verify its
-  OpenPGP signature. Verifying needs the distros' archive keyrings (ship them in bosun, read
-  them from the user, or fetch them), an OpenPGP crate, and a rotation story. The seam is
-  `ReleaseSignature`; until it is decided, bosun warns.
-
-Settled here last:
+None open. Settled here last:
 
 - **Name:** `bosun` stays. The crates.io name is taken, which doesn't matter while bosun ships
   only as release binaries (§3.1).
 - **Remote indexes (§4.7):** built right after Linux breadth (release selectors, libc, dnf,
   apk), apt `Packages` first (built: §4.7, `render --target`, §8.3). `Containerfile.bosun` with
   versions decided ahead of the build and the ctxloom dev container dogfood (§12) build on it.
+- **Signatures of apt release files (§4.7):** not verified by the remote index, and not
+  warned about. HTTPS and the `InRelease` → package index hash chain are enough for choosing
+  versions; the image's apt verifies the release against its keyring when it installs.
 - **The rest of the ctxloom family (§12):** ltk, taskloom, harp and reprise stay out of the
   dogfood manifest, published or not.
 
@@ -1471,7 +1466,7 @@ under a pty on Unix only.
 | M3-2 | winget (user), scoop (user), choco (system) backends; probe only on Windows | landed hermetically (argv and output parsing unit-tested, fixture scenarios); **unverified on a real Windows host** |
 | M3-3 | github-installer: a release's `.msi` (`msiexec /i … /qn /norestart`) or `.exe` (manifest `silent_args`, required); found in the Uninstall registry keys (`reg query`, three views) by `display_name` (`*` suffix = prefix); uninstall `msiexec /x {ProductCode}` or the entry's quiet/plain uninstaller; msiexec's 3010 (reboot required) is success, reported; system scope, no hold, no downgrade | landed (unit tests); **unverified on a real Windows host**; no fixture scenario (the seam has no registry) |
 | M3-4 | `bosun render args\|env\|json [path]` for this machine, from its lock (missing or stale: an error naming `bosun lock`); variable stems from the logical name or the entry's `var` (manifest key, checked at load), clashes and digit-led stems refused; the build-args driver is `bosun_apply::render` | landed |
-| M3-5 | apt's remote index (§4.7): a release's suites from its mirror over HTTPS (Debian and Ubuntu defaults, as stock images list them), `InRelease` → package index hash chain (by hash), signature not verified (seam `ReleaseSignature`, warned), cached under the user cache dir (`InRelease` an hour, indexes while their hash holds); `BackendFactory::remote_index` (apt, cargo, github-release, github-deb, github-rpm) | landed; unit tests over trimmed real Debian 12 captures; same candidates as `apt-cache policy` in `debian:12`, `debian:13` and `ubuntu:24.04` |
+| M3-5 | apt's remote index (§4.7): a release's suites from its mirror over HTTPS (Debian and Ubuntu defaults, as stock images list them), `InRelease` → package index hash chain (by hash), signature not verified (decided: HTTPS and the hash chain; the image's apt verifies at install), cached under the user cache dir (`InRelease` an hour, indexes while their hash holds); `BackendFactory::remote_index` (apt, cargo, github-release, github-deb, github-rpm) | landed; unit tests over trimmed real Debian 12 captures; same candidates as `apt-cache policy` in `debian:12`, `debian:13` and `ubuntu:24.04` |
 | M3-6 | `render args\|env --target <platform>`, `render json --targets a,b`, `--distro <id>[@<release>]`, `--libc <family>[@<version>]`: another machine is resolved fresh through remote indexes with a runner that runs nothing; a backend without one is an error naming it; missing distro or libc facts are warned about. Debian pre-releases are `~` before a pre-release tag (`~deb12u1`, `~bpo`, `~24.04.1` are releases) | landed |
 | M3-7 | npm and uv backends (user scope, platform-independent, no hold): npm registry abbreviated metadata / `npm install -g --prefix` / `npm ls -g --json`; PyPI JSON API / `uv tool install name==ver` / `uv tool list`; export from each; PEP 440 ordering (`pep440_rs`, vers `pypi`, conformance suites run); `npm` and `pypi` purls must-pass | landed; real tier in `node:22-slim` with uv 0.13.1 (semver 7.6.0 → 7.5.0 → pruned; ruff 0.6.9 → 0.6.8 → pruned) |
 | M2-10 | with no terminal, every confirm (install, uninstall, prune, remove, migrate) applies, still printing what it applies to stderr; `--yes` only skips a terminal's prompt | landed |

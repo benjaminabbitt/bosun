@@ -34,12 +34,6 @@ pub const FIRST_USE_CHECKSUM: &str =
 pub const DNF_NO_VERSIONLOCK: &str =
     "dnf has no versionlock command, so dnf packages cannot be held; install python3-dnf-plugin-versionlock";
 
-/// apt's remote index trusts a release file's hashes without checking its
-/// OpenPGP signature (§4.7): the package indexes are checked against it, but
-/// it is only as trustworthy as the HTTPS connection it came over.
-pub const APT_SIGNATURE_NOT_VERIFIED: &str =
-    "the apt release file's signature is not verified; its package index hashes are trusted as fetched over HTTPS";
-
 /// A release's mirror could not be reached, so the release file fetched
 /// earlier is used.
 pub const APT_STALE_RELEASE: &str =
