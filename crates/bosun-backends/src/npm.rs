@@ -118,6 +118,17 @@ impl BackendFactory for NpmFactory {
             installer: Box::new(backend),
         }
     }
+
+    fn remote_index(&self) -> Option<Box<dyn Index>> {
+        // The registry is the query side wherever it runs.
+        Some(Box::new(NpmBackend {
+            runner: self.runner.clone(),
+            fetcher: self.fetcher.clone(),
+            program: program(self.os),
+            os: self.os,
+            prefix: Arc::new(OnceLock::new()),
+        }))
+    }
 }
 
 #[derive(Clone)]
@@ -906,6 +917,22 @@ mod tests {
             }),
             Err(PortError::CommandOutput { .. })
         ));
+    }
+
+    #[test]
+    fn a_remote_index_reads_the_registry_and_runs_nothing() {
+        let runner = Arc::new(FakeCommandRunner::new());
+        let fetcher = Arc::new(
+            FakeHttpFetcher::new().with_body("https://registry.npmjs.org/cowsay", REGISTRY_COWSAY),
+        );
+        let index = NpmFactory::new(runner.clone(), fetcher, Os::Linux)
+            .remote_index()
+            .expect("a remote index");
+        let got = index
+            .query_available(&reff("pkg:npm/cowsay"), &bosun_core::Target::Any)
+            .unwrap();
+        assert!(got.contains(&sem("1.6.0")));
+        assert!(runner.calls().is_empty());
     }
 
     #[test]

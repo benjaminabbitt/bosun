@@ -8,8 +8,8 @@ Feature: render resolves versions for a machine bosun isn't running on
   suite, each package index checked against the hash the release file lists.
   The release file is trusted as fetched over HTTPS; the image's apt checks
   its signature when it installs.
-  Backends whose index is already remote (cargo, GitHub releases) resolve as
-  they always do; one that can only ask a local package manager is an error
+  Backends whose index is already remote (cargo, npm, uv, GitHub releases)
+  resolve as they always do, and need not be on this machine; one that can only ask a local package manager is an error
   naming it. Nothing on this machine is asked: not its package managers, and
   not its lock.
 
@@ -78,6 +78,25 @@ Feature: render resolves versions for a machine bosun isn't running on
     When I run `bosun render env . --target linux/amd64 --distro debian@bookworm`
     Then it succeeds
     And it does not warn "signature"
+
+  Scenario: npm and uv entries resolve for another target from their registries
+    Given the npm registry lists cowsay 1.5.0 and 1.6.0
+    And PyPI lists httpie 3.2.3, 3.2.4 and 4.0.0b1
+    And the manifest:
+      """
+      version: 2
+      packages:
+        - name: cowsay
+          spec: "*"
+          install: {backend: npm}
+        - name: httpie
+          spec: ">=3.2"
+          install: {backend: uv}
+      """
+    When I run `bosun render env . --target linux/arm64 --distro debian@bookworm`
+    Then it succeeds
+    And it says "COWSAY_VERSION=1.6.0"
+    And it says "HTTPIE_VERSION=3.2.4"
 
   Scenario: render json gives each platform its own versions
     When I run `bosun render json . --targets linux/amd64,linux/arm64 --distro debian@bookworm`

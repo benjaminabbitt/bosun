@@ -170,6 +170,8 @@ struct BosunWorld {
     releases: BTreeMap<(String, String), Release>,
     /// What distro mirrors list, by `(distro, suite, arch)`: package and version.
     apt_mirror: BTreeMap<(String, String, String), Vec<(String, String)>>,
+    /// What the npm registry and PyPI answer, by URL.
+    registry: BTreeMap<String, Value>,
     /// Seeded state packages per scope (`system` / `user`).
     seeded: BTreeMap<String, Vec<Value>>,
     /// The manifest as the scenario wrote it.
@@ -311,6 +313,9 @@ impl BosunWorld {
         }
         for (url, body) in self.apt_mirror_files() {
             serve(url, &body);
+        }
+        for (url, doc) in &self.registry {
+            serve(url.clone(), doc.to_string().as_bytes());
         }
         http
     }
@@ -1436,6 +1441,31 @@ fn mirror_lists(
         .entry((distro.to_lowercase(), suite, arch))
         .or_default()
         .push((pkg, version));
+}
+
+/// The npm registry's or PyPI's metadata for a package lists these versions,
+/// served over the canned HTTP to the compiled-in backends' remote indexes.
+#[given(regex = r"^(the npm registry|PyPI) lists (\S+) (.+)$")]
+fn registry_lists(world: &mut BosunWorld, registry: String, pkg: String, list: String) {
+    let listed = versions(&list);
+    let (url, doc) = if registry == "PyPI" {
+        let releases: serde_json::Map<String, Value> = listed
+            .into_iter()
+            .map(|v| (v, json!([{"yanked": false}])))
+            .collect();
+        (
+            format!("https://pypi.org/pypi/{pkg}/json"),
+            json!({ "releases": releases }),
+        )
+    } else {
+        let versions: serde_json::Map<String, Value> =
+            listed.into_iter().map(|v| (v, json!({}))).collect();
+        (
+            format!("https://registry.npmjs.org/{}", pkg.replace('/', "%2F")),
+            json!({ "versions": versions }),
+        )
+    };
+    world.registry.insert(url, doc);
 }
 
 #[then("it prints:")]

@@ -72,6 +72,14 @@ impl BackendFactory for UvFactory {
             installer: Box::new(backend),
         }
     }
+
+    fn remote_index(&self) -> Option<Box<dyn Index>> {
+        // PyPI is the query side wherever it runs.
+        Some(Box::new(UvBackend {
+            runner: self.runner.clone(),
+            fetcher: self.fetcher.clone(),
+        }))
+    }
 }
 
 /// `uv 0.13.1 (x86_64-unknown-linux-musl)` → `0.13.1`.
@@ -324,6 +332,22 @@ mod tests {
 
     fn reff(name: &str) -> Ref {
         Ref::new(format!("pkg:pypi/{name}").parse().unwrap())
+    }
+
+    #[test]
+    fn a_remote_index_reads_pypi_and_runs_nothing() {
+        let runner = Arc::new(FakeCommandRunner::new());
+        let fetcher = Arc::new(
+            FakeHttpFetcher::new().with_body("https://pypi.org/pypi/httpie/json", PYPI_HTTPIE),
+        );
+        let index = UvFactory::new(runner.clone(), fetcher)
+            .remote_index()
+            .expect("a remote index");
+        let got = index
+            .query_available(&reff("httpie"), &Target::Any)
+            .unwrap();
+        assert!(got.contains(&pep("3.2.4")));
+        assert!(runner.calls().is_empty());
     }
 
     fn backend(runner: Arc<dyn CommandRunner>, fetcher: Arc<dyn HttpFetcher>) -> UvBackend {

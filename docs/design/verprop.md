@@ -373,8 +373,9 @@ installation for this:
 
 A `BackendFactory` offers its remote index through `remote_index()`, built for the platform the
 factory was made for, with no probe and no local program (`None`: it can only ask a local
-package manager). cargo (crates.io's sparse index), github-release, github-deb and github-rpm
-(GitHub's API) return the index they always use; apt returns its remote index. Resolving for
+package manager). cargo (crates.io's sparse index), npm (the npm registry), uv (PyPI's JSON
+API), github-release, github-deb and github-rpm (GitHub's API) return the index they always
+use, so none of them needs to be on this machine; apt returns its remote index. Resolving for
 another machine runs every factory with a command runner that runs nothing, so it cannot touch
 this machine's package managers.
 
@@ -1401,13 +1402,13 @@ committed; the real host install is the user's to run (`bosun install`, then
 **Since M1** (the M2 and M3 slices below): manifest version 2, the per-machine lock, `add` /
 `remove` / `migrate` / `upgrade` / `export`, more github release kinds, Windows (hermetic only),
 apply without a terminal, claims in `status`, Linux breadth: release selectors and libc
-(§5.4), dnf and apk, npm and uv, and `render` (§8.3) with apt's remote index (§4.7). `just test` runs 793
-tests and 184 scenarios.
+(§5.4), dnf and apk, npm and uv, and `render` (§8.3) with apt's remote index (§4.7). `just test` runs 845
+tests and 192 scenarios.
 
 **Next, in order.**
 
-1. **Containers:** `Containerfile.bosun` (§8.2) on `render`'s resolution; npm's and uv's
-   remote indexes; dnf's and apk's remote indexes. (npm and uv are built: M3-7.)
+1. **Containers:** `Containerfile.bosun` (§8.2) on `render`'s resolution; dnf's and apk's
+   remote indexes. (npm and uv are built, with their remote indexes: M3-7.)
 2. **macOS, and Windows on a real host:** the macOS machine, brew (research first), and
    verifying scoop, winget, choco and github-installer on Windows.
 
@@ -1468,7 +1469,7 @@ under a pty on Unix only.
 | M3-4 | `bosun render args\|env\|json [path]` for this machine, from its lock (missing or stale: an error naming `bosun lock`); variable stems from the logical name or the entry's `var` (manifest key, checked at load), clashes and digit-led stems refused; the build-args driver is `bosun_apply::render` | landed |
 | M3-5 | apt's remote index (§4.7): a release's suites from its mirror over HTTPS (Debian and Ubuntu defaults, as stock images list them), `InRelease` → package index hash chain (by hash), signature not verified (decided: HTTPS and the hash chain; the image's apt verifies at install), cached under the user cache dir (`InRelease` an hour, indexes while their hash holds); `BackendFactory::remote_index` (apt, cargo, github-release, github-deb, github-rpm) | landed; unit tests over trimmed real Debian 12 captures; same candidates as `apt-cache policy` in `debian:12`, `debian:13` and `ubuntu:24.04` |
 | M3-6 | `render args\|env --target <platform>`, `render json --targets a,b`, `--distro <id>[@<release>]`, `--libc <family>[@<version>]`: another machine is resolved fresh through remote indexes with a runner that runs nothing; a backend without one is an error naming it; missing distro or libc facts are warned about. Debian pre-releases are `~` before a pre-release tag (`~deb12u1`, `~bpo`, `~24.04.1` are releases) | landed |
-| M3-7 | npm and uv backends (user scope, platform-independent, no hold): npm registry abbreviated metadata / `npm install -g --prefix` under npm's own global prefix (`npm prefix -g`; warned when not writable or its bin dir is off `PATH`) / `npm ls -g --json`; PyPI JSON API / `uv tool install name==ver` / `uv tool list`; export from each; PEP 440 ordering (`pep440_rs`, vers `pypi`, conformance suites run); `npm` and `pypi` purls must-pass | landed; real tier in `node:22-slim` with uv 0.13.1 (semver 7.6.0 → 7.5.0 → pruned under `~/.npm-global`; the system prefix fails, warned; ruff 0.6.9 → 0.6.8 → pruned) |
+| M3-7 | npm and uv backends (user scope, platform-independent, no hold): npm registry abbreviated metadata / `npm install -g --prefix` under npm's own global prefix (`npm prefix -g`; warned when not writable or its bin dir is off `PATH`) / `npm ls -g --json`; PyPI JSON API / `uv tool install name==ver` / `uv tool list`; both offer their registry as their remote index (`render --target`); export from each; PEP 440 ordering (`pep440_rs`, vers `pypi`, conformance suites run); `npm` and `pypi` purls must-pass | landed; real tier in `node:22-slim` with uv 0.13.1 (semver 7.6.0 → 7.5.0 → pruned under `~/.npm-global`; the system prefix fails, warned; ruff 0.6.9 → 0.6.8 → pruned) |
 | M2-10 | with no terminal, every confirm (install, uninstall, prune, remove, migrate) applies, still printing what it applies to stderr; `--yes` only skips a terminal's prompt | landed |
 | M2-11 | `status [path]` lists every claim on each package (manifest, spec, user, whether the manifest still exists); with no path, everything bosun manages on the machine; `install` records a `claim` on a package bosun installed for another project | landed |
 | M2-12 | release selectors `linux:<distro>@<release>`: the release is the purl `distro` value a block's backend gives this machine (deb codename, rpm `<ID>-<VERSION_ID>`); exact `ID` only | landed; checked in Debian 12/13 and Ubuntu 22.04/24.04 containers |
