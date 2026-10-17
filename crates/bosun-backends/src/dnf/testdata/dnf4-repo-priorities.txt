@@ -1,0 +1,4 @@
+vault95 1
+baseos 99
+appstream 99
+extras 99

@@ -11,25 +11,30 @@
 //! instead of failing at the hold step. A lock blocks any other version of
 //! the package, so every version change and removal releases it first.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use bosun_core::{
     Arch, BackendId, Capabilities, HoldSupport, Installed, Os, Ref, Scheme, Scope, Source, Target,
-    Version,
+    Version, Want,
 };
 use bosun_ports::{
     Backend, BackendFactory, BackendMeta, Command, CommandRunner, HostInfo, Index, Installer,
-    PortError, Probe, Step, Steps,
+    PortError, Probe, Selection, Step, Steps,
 };
-use tracing::warn;
+use tracing::{debug, warn};
+
+mod priority;
+
+use priority::{Build, Priorities, Ranking};
 
 use crate::logmsg;
 
 const BACKEND: &str = "dnf";
 
-/// One available build per line, for [`parse_repoquery`]. dnf5 needs the
-/// newline; dnf4 adds its own as well, leaving blank lines between records.
-const REPOQUERY_FORMAT: &str = "%{name}|%{epoch}|%{version}|%{release}|%{arch}\\n";
+/// One available build per line, with the repository offering it, for
+/// [`parse_repoquery`]. dnf5 needs the newline; dnf4 adds its own as well,
+/// leaving blank lines between records.
+const REPOQUERY_FORMAT: &str = "%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{repoid}\\n";
 
 /// The installed `[epoch:]version-release`, the epoch only when it is set.
 const RPM_QUERY_FORMAT: &str = "%|EPOCH?{%{EPOCH}:}:{}|%{VERSION}-%{RELEASE}\\n";
@@ -51,7 +56,7 @@ impl DnfFactory {
     /// Whether `dnf versionlock` exists: always in dnf5, and in dnf4 when a
     /// package provides the command (the plugin).
     fn has_versionlock(&self, dnf: &Version) -> bool {
-        if *dnf >= Version::parse("5", Scheme::Rpm).expect("5 is a version") {
+        if is_dnf5(dnf) {
             return true;
         }
         let query = Command::new("rpm", argv(&["-q", "--whatprovides", VERSIONLOCK_COMMAND]));
@@ -97,12 +102,19 @@ impl BackendFactory for DnfFactory {
         let backend = DnfBackend {
             runner: self.runner.clone(),
             versionlock: self.has_versionlock(&probe.version),
+            dnf5: is_dnf5(&probe.version),
+            priorities: Arc::new(OnceLock::new()),
         };
         Backend {
             index: Box::new(backend.clone()),
             installer: Box::new(backend),
         }
     }
+}
+
+/// Whether the probed dnf is dnf5.
+fn is_dnf5(dnf: &Version) -> bool {
+    *dnf >= Version::parse("5", Scheme::Rpm).expect("5 is a version")
 }
 
 /// `dnf5 version 5.2.17.0` (dnf5) or `4.14.0` (dnf4): the last word of the
@@ -125,6 +137,10 @@ struct DnfBackend {
     runner: Arc<dyn CommandRunner>,
     /// Whether `dnf versionlock` is available (dnf5, or dnf4 with the plugin).
     versionlock: bool,
+    /// Whether this is dnf5, which prints its repository configuration.
+    dnf5: bool,
+    /// The enabled repositories' priorities, asked of dnf on first use.
+    priorities: Arc<OnceLock<Result<Priorities, PortError>>>,
 }
 
 fn argv(parts: &[&str]) -> Vec<String> {
@@ -157,14 +173,15 @@ fn rpm_arch(arch: Arch) -> &'static str {
     }
 }
 
-/// The available versions in `dnf repoquery` output (one
-/// `name|epoch|version|release|arch` per line) for exactly `name`, built for
-/// `arch` or `noarch` (any arch when `None`), as `[epoch:]version-release`.
-fn parse_repoquery(stdout: &str, name: &str, arch: Option<&str>) -> Vec<Version> {
-    let mut versions: Vec<Version> = Vec::new();
+/// The available builds in `dnf repoquery` output (one
+/// `name|epoch|version|release|arch|repoid` per line) for exactly `name`,
+/// built for `arch` or `noarch` (any arch when `None`), each version as
+/// `[epoch:]version-release` with the repository offering it.
+fn parse_repoquery(stdout: &str, name: &str, arch: Option<&str>) -> Vec<Build> {
+    let mut builds: Vec<Build> = Vec::new();
     for line in stdout.lines() {
         let fields: Vec<&str> = line.split('|').collect();
-        let [n, epoch, version, release, a] = fields[..] else {
+        let [n, epoch, version, release, a, repo] = fields[..] else {
             continue;
         };
         if n != name || !arch.is_none_or(|want| a == want || a == "noarch") {
@@ -174,13 +191,17 @@ fn parse_repoquery(stdout: &str, name: &str, arch: Option<&str>) -> Vec<Version>
             "" | "0" => format!("{version}-{release}"),
             e => format!("{e}:{version}-{release}"),
         };
-        if let Ok(v) = Version::parse(evr, Scheme::Rpm) {
-            if !versions.contains(&v) {
-                versions.push(v);
+        if let Ok(version) = Version::parse(evr, Scheme::Rpm) {
+            let build = Build {
+                version,
+                repo: repo.to_string(),
+            };
+            if !builds.contains(&build) {
+                builds.push(build);
             }
         }
     }
-    versions
+    builds
 }
 
 impl DnfBackend {
@@ -202,21 +223,9 @@ impl DnfBackend {
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         }
     }
-}
 
-impl Index for DnfBackend {
-    fn refresh(&self) -> Result<(), PortError> {
-        let out = self
-            .runner
-            .run(&Command::new("dnf", argv(&["makecache", "--refresh"])))?;
-        if out.success() {
-            Ok(())
-        } else {
-            Err(Self::failed(&out))
-        }
-    }
-
-    fn query_available(&self, pkg: &Ref, target: &Target) -> Result<Vec<Version>, PortError> {
+    /// The builds of `pkg` the enabled repositories offer for `target`.
+    fn builds(&self, pkg: &Ref, target: &Target) -> Result<Vec<Build>, PortError> {
         let name = pkg.purl.native_id();
         let out = self.runner.run(&Command::new(
             "dnf",
@@ -238,6 +247,86 @@ impl Index for DnfBackend {
             Target::Any => None,
         };
         Ok(parse_repoquery(&out.stdout_utf8(), &name, arch))
+    }
+
+    /// The enabled repositories' priorities, as dnf reads its configuration
+    /// (asked once).
+    fn priorities(&self) -> Result<&Priorities, PortError> {
+        self.priorities
+            .get_or_init(|| {
+                let (program, args) = if self.dnf5 {
+                    ("dnf", argv(&["-q", "--dump-repo-config=*"]))
+                } else {
+                    ("python3", argv(&["-c", priority::DNF4_PRIORITIES]))
+                };
+                let out = self.runner.run(&Command::new(program, args))?;
+                if !out.success() {
+                    return Err(PortError::CommandFailed {
+                        program: program.to_string(),
+                        code: out.code,
+                        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+                    });
+                }
+                let stdout = out.stdout_utf8();
+                let found = if self.dnf5 {
+                    priority::parse_dnf5(&stdout)
+                } else {
+                    priority::parse_dnf4(&stdout)
+                }?;
+                debug!(message = logmsg::DNF_PRIORITIES, priorities = ?found);
+                Ok(found)
+            })
+            .as_ref()
+            .map_err(Clone::clone)
+    }
+}
+
+impl Index for DnfBackend {
+    fn refresh(&self) -> Result<(), PortError> {
+        let out = self
+            .runner
+            .run(&Command::new("dnf", argv(&["makecache", "--refresh"])))?;
+        if out.success() {
+            Ok(())
+        } else {
+            Err(Self::failed(&out))
+        }
+    }
+
+    fn query_available(&self, pkg: &Ref, target: &Target) -> Result<Vec<Version>, PortError> {
+        let builds = self.builds(pkg, target)?;
+        Ok(Ranking::new(&builds, &Priorities::new()).versions())
+    }
+
+    /// dnf's own choice in `want`: by repository priority, then version
+    /// ([`priority`]).
+    fn select(
+        &self,
+        pkg: &Ref,
+        target: &Target,
+        want: &Want,
+        prefer: &[Version],
+    ) -> Result<Selection, PortError> {
+        let builds = self.builds(pkg, target)?;
+        let ranking = Ranking::new(&builds, self.priorities()?);
+        let chosen = ranking.choose(want, prefer);
+        if let Some(v) = &chosen {
+            let name = pkg.purl.native_id();
+            let priority = ranking.priority(v);
+            debug!(message = logmsg::DNF_CHOSEN, package = %name, version = %v, priority);
+            if let Some(newer) = ranking.passed_over(want, v) {
+                debug!(
+                    message = logmsg::DNF_NEWER_PASSED_OVER,
+                    package = %name,
+                    newer = %newer,
+                    priority = ranking.priority(&newer),
+                );
+            }
+        }
+        Ok(Selection {
+            chosen,
+            available: ranking.versions(),
+        })
     }
 }
 
@@ -377,7 +466,14 @@ mod tests {
         DnfBackend {
             runner,
             versionlock,
+            dnf5: true,
+            priorities: Arc::new(OnceLock::new()),
         }
+    }
+
+    /// The versions of `builds`, for comparing a parse with a version list.
+    fn versions(builds: Vec<Build>) -> Vec<Version> {
+        Ranking::new(&builds, &Priorities::new()).versions()
     }
 
     fn idle(versionlock: bool) -> DnfBackend {
@@ -607,7 +703,7 @@ mod tests {
                 "repoquery",
                 "--available",
                 "--queryformat",
-                "%{name}|%{epoch}|%{version}|%{release}|%{arch}\\n",
+                "%{name}|%{epoch}|%{version}|%{release}|%{arch}|%{repoid}\\n",
                 "jq"
             ]
         );
@@ -634,14 +730,30 @@ mod tests {
         }
         assert_eq!(
             parse_repoquery(DNF4_REPOQUERY_JQ, "jq", Some("x86_64")),
-            vec![rpm("1.6-19.el9_8.2")]
+            vec![Build {
+                version: rpm("1.6-19.el9_8.2"),
+                repo: "baseos".to_string()
+            }]
         );
         assert_eq!(
             parse_repoquery(DNF5_REPOQUERY_TZDATA, "tzdata", Some("x86_64")),
-            vec![rpm("2024a-9.fc41"), rpm("2025b-1.fc41")]
+            vec![
+                Build {
+                    version: rpm("2024a-9.fc41"),
+                    repo: "fedora".to_string()
+                },
+                Build {
+                    version: rpm("2025b-1.fc41"),
+                    repo: "updates".to_string()
+                }
+            ]
         );
         assert_eq!(
-            parse_repoquery(DNF4_REPOQUERY_TZDATA, "tzdata", Some("aarch64")),
+            versions(parse_repoquery(
+                DNF4_REPOQUERY_TZDATA,
+                "tzdata",
+                Some("aarch64")
+            )),
             vec![
                 rpm("2026a-1.el9"),
                 rpm("2026b-1.el9_8"),
@@ -653,14 +765,24 @@ mod tests {
 
     #[test]
     fn repoquery_keeps_a_nonzero_epoch() {
-        let got = parse_repoquery(DNF5_REPOQUERY_SHADOW, "shadow-utils", Some("x86_64"));
+        let got = versions(parse_repoquery(
+            DNF5_REPOQUERY_SHADOW,
+            "shadow-utils",
+            Some("x86_64"),
+        ));
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].as_str(), "2:4.15.1-12.fc41");
-        let got = parse_repoquery(DNF4_REPOQUERY_SHADOW, "shadow-utils", Some("x86_64"));
+        let got = versions(parse_repoquery(
+            DNF4_REPOQUERY_SHADOW,
+            "shadow-utils",
+            Some("x86_64"),
+        ));
         assert_eq!(got[0].as_str(), "2:4.9-16.el9");
         // A zero epoch is left off, as rpm prints it.
         assert_eq!(
-            parse_repoquery(DNF5_REPOQUERY_JQ, "jq", None)[0].as_str(),
+            parse_repoquery(DNF5_REPOQUERY_JQ, "jq", None)[0]
+                .version
+                .as_str(),
             "1.7.1-8.fc41"
         );
     }
@@ -668,33 +790,123 @@ mod tests {
     #[test]
     fn repoquery_keeps_this_arch_and_noarch_only() {
         assert!(parse_repoquery(DNF5_REPOQUERY_JQ, "jq", Some("aarch64")).is_empty());
-        let mixed = "jq|0|1.7.1|8.fc41|i686\njq|0|1.7.1|9.fc41|x86_64\n";
+        let mixed = "jq|0|1.7.1|8.fc41|i686|fedora\njq|0|1.7.1|9.fc41|x86_64|updates\n";
         assert_eq!(
-            parse_repoquery(mixed, "jq", Some("x86_64")),
+            versions(parse_repoquery(mixed, "jq", Some("x86_64"))),
             vec![rpm("1.7.1-9.fc41")]
         );
-        // With no arch to match, every build counts, each version once.
+        // With no arch to match, every build counts, each once.
         assert_eq!(
-            parse_repoquery(mixed, "jq", None),
+            versions(parse_repoquery(mixed, "jq", None)),
             vec![rpm("1.7.1-8.fc41"), rpm("1.7.1-9.fc41")]
         );
-        assert_eq!(
-            parse_repoquery(DNF5_REPOQUERY_JQ, "jq", None),
-            vec![rpm("1.7.1-8.fc41")]
-        );
+        assert_eq!(parse_repoquery(DNF5_REPOQUERY_JQ, "jq", None).len(), 1);
+    }
+
+    #[test]
+    fn repoquery_keeps_each_repository_offering_a_build() {
+        let twice = "jq|0|1.7.1|8.fc41|x86_64|fedora\njq|0|1.7.1|8.fc41|x86_64|mirror\n";
+        let got = parse_repoquery(twice, "jq", Some("x86_64"));
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[1].repo, "mirror");
     }
 
     #[test]
     fn repoquery_keeps_exactly_the_named_package() {
         // repoquery also matches globs and provides; only `name` counts.
-        let out = "jq-devel|0|1.7.1|8.fc41|x86_64\njq|0|1.7.1|8.fc41|x86_64\n";
+        let out = "jq-devel|0|1.7.1|8.fc41|x86_64|fedora\njq|0|1.7.1|8.fc41|x86_64|fedora\n";
         assert_eq!(
-            parse_repoquery(out, "jq", Some("x86_64")),
+            versions(parse_repoquery(out, "jq", Some("x86_64"))),
             vec![rpm("1.7.1-8.fc41")]
         );
         // Malformed lines are skipped.
-        assert!(parse_repoquery("jq|0|1.7.1|8.fc41\njq\n", "jq", None).is_empty());
-        assert!(parse_repoquery("jq|0|1.7.1|8.fc41|x86_64|extra\n", "jq", None).is_empty());
+        assert!(parse_repoquery("jq|0|1.7.1|8.fc41|x86_64\njq\n", "jq", None).is_empty());
+        assert!(parse_repoquery("jq|0|1.7.1|8.fc41|x86_64|fedora|extra\n", "jq", None).is_empty());
+    }
+
+    const DNF5_DUMP: &str = include_str!("testdata/dnf5-dump-repo-config.txt");
+    const DNF5_VIM_PRIORITY: &str =
+        include_str!("testdata/dnf5-repoquery-vim-enhanced-fedora-priority-1.txt");
+    const DNF4_CURL_PRIORITY: &str =
+        include_str!("testdata/dnf4-repoquery-curl-vault-priority-1.txt");
+    const DNF4_PRIORITIES: &str = include_str!("testdata/dnf4-repo-priorities.txt");
+
+    fn want(range: &str) -> Want {
+        Want::of(bosun_core::VersRange::parse(range).unwrap())
+    }
+
+    #[test]
+    fn dnf5_selects_by_the_priorities_it_prints() {
+        // Fedora 41 with `priority=1` on fedora: `dnf install vim-enhanced`
+        // takes fedora's 9.1.737 over updates' 9.1.1914.
+        let fake = Arc::new(
+            FakeCommandRunner::new()
+                .with_stdout(DNF5_VIM_PRIORITY)
+                .with_stdout(DNF5_DUMP),
+        );
+        let got = backend(fake.clone(), true)
+            .select(&reff("vim-enhanced"), &AMD64, &want("vers:rpm/*"), &[])
+            .unwrap();
+        assert_eq!(got.chosen, Some(rpm("2:9.1.737-1.fc41")));
+        assert_eq!(
+            got.available,
+            vec![rpm("2:9.1.1914-1.fc41"), rpm("2:9.1.737-1.fc41")]
+        );
+        let calls = fake.calls();
+        assert_eq!(calls[1].program, "dnf");
+        assert_eq!(calls[1].args, vec!["-q", "--dump-repo-config=*"]);
+    }
+
+    #[test]
+    fn dnf4_selects_by_the_priorities_its_api_reports() {
+        // Rocky 9 with the 9.5 vault at `priority=1`: `dnf install curl`
+        // takes the vault's 7.76.1-31.el9 over baseos' newer builds.
+        let fake = Arc::new(
+            FakeCommandRunner::new()
+                .with_stdout(DNF4_CURL_PRIORITY)
+                .with_stdout(DNF4_PRIORITIES)
+                .with_stdout(DNF4_CURL_PRIORITY),
+        );
+        let mut b = backend(fake.clone(), true);
+        b.dnf5 = false;
+        let got = b
+            .select(&reff("curl"), &AMD64, &want("vers:rpm/*"), &[])
+            .unwrap();
+        assert_eq!(got.chosen, Some(rpm("7.76.1-31.el9")));
+        let wider = b
+            .select(&reff("curl"), &AMD64, &want("vers:rpm/>=7.76.1-40"), &[])
+            .unwrap();
+        assert_eq!(wider.chosen, Some(rpm("7.76.1-40.el9_8.8")));
+        let calls = fake.calls();
+        assert_eq!(calls[1].program, "python3");
+        assert_eq!(calls[1].args, vec!["-c", priority::DNF4_PRIORITIES]);
+        // The priorities are asked once.
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[2].args[0], "repoquery");
+    }
+
+    #[test]
+    fn priorities_dnf_cannot_report_fail_the_selection() {
+        let fake = Arc::new(
+            FakeCommandRunner::new()
+                .with_stdout(DNF5_VIM_PRIORITY)
+                .with_output(exit(1, "")),
+        );
+        let err = backend(fake, true)
+            .select(&reff("vim-enhanced"), &AMD64, &want("vers:rpm/*"), &[])
+            .unwrap_err();
+        assert!(
+            matches!(err, PortError::CommandFailed { ref program, code: Some(1), .. } if program == "dnf"),
+            "{err:?}"
+        );
+        let fake = Arc::new(
+            FakeCommandRunner::new()
+                .with_stdout(DNF5_VIM_PRIORITY)
+                .with_stdout("priority = 1\n"),
+        );
+        assert!(backend(fake, true)
+            .select(&reff("vim-enhanced"), &AMD64, &want("vers:rpm/*"), &[])
+            .is_err());
     }
 
     #[test]

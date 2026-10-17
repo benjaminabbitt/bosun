@@ -1,2 +1,2 @@
-shadow-utils|2|4.9|16.el9|x86_64
+shadow-utils|2|4.9|16.el9|x86_64|baseos
 

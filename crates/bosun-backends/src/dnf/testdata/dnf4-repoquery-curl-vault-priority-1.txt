@@ -1,0 +1,10 @@
+curl|0|7.76.1|31.el9|x86_64|vault95
+
+curl|0|7.76.1|40.el9_8.5|x86_64|baseos
+
+curl|0|7.76.1|40.el9_8.7|x86_64|baseos
+
+curl|0|7.76.1|40.el9_8.8|x86_64|baseos
+
+curl|0|7.76.1|40.el9|x86_64|baseos
+

@@ -1,0 +1,612 @@
+======== "fedora-cisco-openh264-debuginfo" repository configuration: ========
+bandwidth = 0
+baseurl = 
+build_cache = 1
+cachedir = /var/cache/libdnf5
+cost = 1000
+countme = 0
+deltarpm = 0
+deltarpm_percentage = 75
+enabled = 0
+enabled_metadata = 
+enablegroups = 1
+exclude = 
+excludepkgs = 
+fastestmirror = 0
+gpgcheck = 1
+gpgkey = file:///etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-41-x86_64
+includepkgs = 
+ip_resolve = whatever
+max_parallel_downloads = 3
+mediaid = 
+metadata_expire = 1209600
+metalink = https://mirrors.fedoraproject.org/metalink?repo=fedora-cisco-openh264-debug-41&arch=x86_64
+minrate = 1000
+mirrorlist
+module_hotfixes = 0
+name = Fedora 41 openh264 (From Cisco) - x86_64 - Debug
+password = 
+pkg_gpgcheck = 1
+priority = 99
+protected_packages = dnf5, glob:/etc/dnf/protected.d/*.conf, setup, dnf5, setup, sudo, setup
+proxy = 
+proxy_auth_method = any
+proxy_password
+proxy_sslcacert = 
+proxy_sslclientcert = 
+proxy_sslclientkey = 
+proxy_sslverify = 1
+proxy_username
+repo_gpgcheck = 0
+retries = 10
+skip_if_unavailable = 1
+sslcacert = 
+sslclientcert = 
+sslclientkey = 
+sslverify = 1
+throttle = 0
+timeout = 30
+type = rpm
+user_agent = libdnf (Fedora Linux 41; container; Linux.x86_64)
+username = 
+======== "fedora-cisco-openh264" repository configuration: ========
+bandwidth = 0
+baseurl = 
+build_cache = 1
+cachedir = /var/cache/libdnf5
+cost = 1000
+countme = 0
+deltarpm = 0
+deltarpm_percentage = 75
+enabled = 1
+enabled_metadata = 
+enablegroups = 1
+exclude = 
+excludepkgs = 
+fastestmirror = 0
+gpgcheck = 1
+gpgkey = file:///etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-41-x86_64
+includepkgs = 
+ip_resolve = whatever
+max_parallel_downloads = 3
+mediaid = 
+metadata_expire = 1209600
+metalink = https://mirrors.fedoraproject.org/metalink?repo=fedora-cisco-openh264-41&arch=x86_64
+minrate = 1000
+mirrorlist
+module_hotfixes = 0
+name = Fedora 41 openh264 (From Cisco) - x86_64
+password = 
+pkg_gpgcheck = 1
+priority = 99
+protected_packages = dnf5, glob:/etc/dnf/protected.d/*.conf, setup, dnf5, setup, sudo, setup
+proxy = 
+proxy_auth_method = any
+proxy_password
+proxy_sslcacert = 
+proxy_sslclientcert = 
+proxy_sslclientkey = 
+proxy_sslverify = 1
+proxy_username
+repo_gpgcheck = 0
+retries = 10
+skip_if_unavailable = 1
+sslcacert = 
+sslclientcert = 
+sslclientkey = 
+sslverify = 1
+throttle = 0
+timeout = 30
+type = rpm
+user_agent = libdnf (Fedora Linux 41; container; Linux.x86_64)
+username = 
+======== "updates" repository configuration: ========
+bandwidth = 0
+baseurl = 
+build_cache = 1
+cachedir = /var/cache/libdnf5
+cost = 1000
+countme = 1
+deltarpm = 0
+deltarpm_percentage = 75
+enabled = 1
+enabled_metadata = 
+enablegroups = 1
+exclude = 
+excludepkgs = 
+fastestmirror = 0
+gpgcheck = 1
+gpgkey = file:///etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-41-x86_64
+includepkgs = 
+ip_resolve = whatever
+max_parallel_downloads = 3
+mediaid = 
+metadata_expire = 21600
+metalink = https://mirrors.fedoraproject.org/metalink?repo=updates-released-f41&arch=x86_64
+minrate = 1000
+mirrorlist
+module_hotfixes = 0
+name = Fedora 41 - x86_64 - Updates
+password = 
+pkg_gpgcheck = 1
+priority = 99
+protected_packages = dnf5, glob:/etc/dnf/protected.d/*.conf, setup, dnf5, setup, sudo, setup
+proxy = 
+proxy_auth_method = any
+proxy_password
+proxy_sslcacert = 
+proxy_sslclientcert = 
+proxy_sslclientkey = 
+proxy_sslverify = 1
+proxy_username
+repo_gpgcheck = 0
+retries = 10
+skip_if_unavailable = 0
+sslcacert = 
+sslclientcert = 
+sslclientkey = 
+sslverify = 1
+throttle = 0
+timeout = 30
+type = rpm
+user_agent = libdnf (Fedora Linux 41; container; Linux.x86_64)
+username = 
+======== "fedora" repository configuration: ========
+bandwidth = 0
+baseurl = 
+build_cache = 1
+cachedir = /var/cache/libdnf5
+cost = 1000
+countme = 1
+deltarpm = 0
+deltarpm_percentage = 75
+enabled = 1
+enabled_metadata = 
+enablegroups = 1
+exclude = 
+excludepkgs = 
+fastestmirror = 0
+gpgcheck = 1
+gpgkey = file:///etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-41-x86_64
+includepkgs = 
+ip_resolve = whatever
+max_parallel_downloads = 3
+mediaid = 
+metadata_expire = 604800
+metalink = https://mirrors.fedoraproject.org/metalink?repo=fedora-41&arch=x86_64
+minrate = 1000
+mirrorlist
+module_hotfixes = 0
+name = Fedora 41 - x86_64
+password = 
+pkg_gpgcheck = 1
+priority = 1
+protected_packages = dnf5, glob:/etc/dnf/protected.d/*.conf, setup, dnf5, setup, sudo, setup
+proxy = 
+proxy_auth_method = any
+proxy_password
+proxy_sslcacert = 
+proxy_sslclientcert = 
+proxy_sslclientkey = 
+proxy_sslverify = 1
+proxy_username
+repo_gpgcheck = 0
+retries = 10
+skip_if_unavailable = 0
+sslcacert = 
+sslclientcert = 
+sslclientkey = 
+sslverify = 1
+throttle = 0
+timeout = 30
+type = rpm
+user_agent = libdnf (Fedora Linux 41; container; Linux.x86_64)
+username = 
+======== "updates-testing-debuginfo" repository configuration: ========
+bandwidth = 0
+baseurl = 
+build_cache = 1
+cachedir = /var/cache/libdnf5
+cost = 1000
+countme = 0
+deltarpm = 0
+deltarpm_percentage = 75
+enabled = 0
+enabled_metadata = 
+enablegroups = 1
+exclude = 
+excludepkgs = 
+fastestmirror = 0
+gpgcheck = 1
+gpgkey = file:///etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-41-x86_64
+includepkgs = 
+ip_resolve = whatever
+max_parallel_downloads = 3
+mediaid = 
+metadata_expire = 21600
+metalink = https://mirrors.fedoraproject.org/metalink?repo=updates-testing-debug-f41&arch=x86_64
+minrate = 1000
+mirrorlist
+module_hotfixes = 0
+name = Fedora 41 - x86_64 - Test Updates Debug
+password = 
+pkg_gpgcheck = 1
+priority = 99
+protected_packages = dnf5, glob:/etc/dnf/protected.d/*.conf, setup, dnf5, setup, sudo, setup
+proxy = 
+proxy_auth_method = any
+proxy_password
+proxy_sslcacert = 
+proxy_sslclientcert = 
+proxy_sslclientkey = 
+proxy_sslverify = 1
+proxy_username
+repo_gpgcheck = 0
+retries = 10
+skip_if_unavailable = 0
+sslcacert = 
+sslclientcert = 
+sslclientkey = 
+sslverify = 1
+throttle = 0
+timeout = 30
+type = rpm
+user_agent = libdnf (Fedora Linux 41; container; Linux.x86_64)
+username = 
+======== "updates-testing" repository configuration: ========
+bandwidth = 0
+baseurl = 
+build_cache = 1
+cachedir = /var/cache/libdnf5
+cost = 1000
+countme = 1
+deltarpm = 0
+deltarpm_percentage = 75
+enabled = 0
+enabled_metadata = 
+enablegroups = 1
+exclude = 
+excludepkgs = 
+fastestmirror = 0
+gpgcheck = 1
+gpgkey = file:///etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-41-x86_64
+includepkgs = 
+ip_resolve = whatever
+max_parallel_downloads = 3
+mediaid = 
+metadata_expire = 21600
+metalink = https://mirrors.fedoraproject.org/metalink?repo=updates-testing-f41&arch=x86_64
+minrate = 1000
+mirrorlist
+module_hotfixes = 0
+name = Fedora 41 - x86_64 - Test Updates
+password = 
+pkg_gpgcheck = 1
+priority = 99
+protected_packages = dnf5, glob:/etc/dnf/protected.d/*.conf, setup, dnf5, setup, sudo, setup
+proxy = 
+proxy_auth_method = any
+proxy_password
+proxy_sslcacert = 
+proxy_sslclientcert = 
+proxy_sslclientkey = 
+proxy_sslverify = 1
+proxy_username
+repo_gpgcheck = 0
+retries = 10
+skip_if_unavailable = 0
+sslcacert = 
+sslclientcert = 
+sslclientkey = 
+sslverify = 1
+throttle = 0
+timeout = 30
+type = rpm
+user_agent = libdnf (Fedora Linux 41; container; Linux.x86_64)
+username = 
+======== "fedora-cisco-openh264-source" repository configuration: ========
+bandwidth = 0
+baseurl = 
+build_cache = 1
+cachedir = /var/cache/libdnf5
+cost = 1000
+countme = 0
+deltarpm = 0
+deltarpm_percentage = 75
+enabled = 0
+enabled_metadata = 
+enablegroups = 1
+exclude = 
+excludepkgs = 
+fastestmirror = 0
+gpgcheck = 1
+gpgkey = file:///etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-41-x86_64
+includepkgs = 
+ip_resolve = whatever
+max_parallel_downloads = 3
+mediaid = 
+metadata_expire = 1209600
+metalink = https://mirrors.fedoraproject.org/metalink?repo=fedora-cisco-openh264-source-41&arch=x86_64
+minrate = 1000
+mirrorlist
+module_hotfixes = 0
+name = Fedora 41 openh264 (From Cisco) - x86_64 - Source
+password = 
+pkg_gpgcheck = 1
+priority = 99
+protected_packages = dnf5, glob:/etc/dnf/protected.d/*.conf, setup, dnf5, setup, sudo, setup
+proxy = 
+proxy_auth_method = any
+proxy_password
+proxy_sslcacert = 
+proxy_sslclientcert = 
+proxy_sslclientkey = 
+proxy_sslverify = 1
+proxy_username
+repo_gpgcheck = 0
+retries = 10
+skip_if_unavailable = 1
+sslcacert = 
+sslclientcert = 
+sslclientkey = 
+sslverify = 1
+throttle = 0
+timeout = 30
+type = rpm
+user_agent = libdnf (Fedora Linux 41; container; Linux.x86_64)
+username = 
+======== "updates-testing-source" repository configuration: ========
+bandwidth = 0
+baseurl = 
+build_cache = 1
+cachedir = /var/cache/libdnf5
+cost = 1000
+countme = 0
+deltarpm = 0
+deltarpm_percentage = 75
+enabled = 0
+enabled_metadata = 
+enablegroups = 1
+exclude = 
+excludepkgs = 
+fastestmirror = 0
+gpgcheck = 1
+gpgkey = file:///etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-41-x86_64
+includepkgs = 
+ip_resolve = whatever
+max_parallel_downloads = 3
+mediaid = 
+metadata_expire = 21600
+metalink = https://mirrors.fedoraproject.org/metalink?repo=updates-testing-source-f41&arch=x86_64
+minrate = 1000
+mirrorlist
+module_hotfixes = 0
+name = Fedora 41 - Test Updates Source
+password = 
+pkg_gpgcheck = 1
+priority = 99
+protected_packages = dnf5, glob:/etc/dnf/protected.d/*.conf, setup, dnf5, setup, sudo, setup
+proxy = 
+proxy_auth_method = any
+proxy_password
+proxy_sslcacert = 
+proxy_sslclientcert = 
+proxy_sslclientkey = 
+proxy_sslverify = 1
+proxy_username
+repo_gpgcheck = 0
+retries = 10
+skip_if_unavailable = 0
+sslcacert = 
+sslclientcert = 
+sslclientkey = 
+sslverify = 1
+throttle = 0
+timeout = 30
+type = rpm
+user_agent = libdnf (Fedora Linux 41; container; Linux.x86_64)
+username = 
+======== "updates-debuginfo" repository configuration: ========
+bandwidth = 0
+baseurl = 
+build_cache = 1
+cachedir = /var/cache/libdnf5
+cost = 1000
+countme = 0
+deltarpm = 0
+deltarpm_percentage = 75
+enabled = 0
+enabled_metadata = 
+enablegroups = 1
+exclude = 
+excludepkgs = 
+fastestmirror = 0
+gpgcheck = 1
+gpgkey = file:///etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-41-x86_64
+includepkgs = 
+ip_resolve = whatever
+max_parallel_downloads = 3
+mediaid = 
+metadata_expire = 21600
+metalink = https://mirrors.fedoraproject.org/metalink?repo=updates-released-debug-f41&arch=x86_64
+minrate = 1000
+mirrorlist
+module_hotfixes = 0
+name = Fedora 41 - x86_64 - Updates - Debug
+password = 
+pkg_gpgcheck = 1
+priority = 99
+protected_packages = dnf5, glob:/etc/dnf/protected.d/*.conf, setup, dnf5, setup, sudo, setup
+proxy = 
+proxy_auth_method = any
+proxy_password
+proxy_sslcacert = 
+proxy_sslclientcert = 
+proxy_sslclientkey = 
+proxy_sslverify = 1
+proxy_username
+repo_gpgcheck = 0
+retries = 10
+skip_if_unavailable = 0
+sslcacert = 
+sslclientcert = 
+sslclientkey = 
+sslverify = 1
+throttle = 0
+timeout = 30
+type = rpm
+user_agent = libdnf (Fedora Linux 41; container; Linux.x86_64)
+username = 
+======== "updates-source" repository configuration: ========
+bandwidth = 0
+baseurl = 
+build_cache = 1
+cachedir = /var/cache/libdnf5
+cost = 1000
+countme = 0
+deltarpm = 0
+deltarpm_percentage = 75
+enabled = 0
+enabled_metadata = 
+enablegroups = 1
+exclude = 
+excludepkgs = 
+fastestmirror = 0
+gpgcheck = 1
+gpgkey = file:///etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-41-x86_64
+includepkgs = 
+ip_resolve = whatever
+max_parallel_downloads = 3
+mediaid = 
+metadata_expire = 21600
+metalink = https://mirrors.fedoraproject.org/metalink?repo=updates-released-source-f41&arch=x86_64
+minrate = 1000
+mirrorlist
+module_hotfixes = 0
+name = Fedora 41 - Updates Source
+password = 
+pkg_gpgcheck = 1
+priority = 99
+protected_packages = dnf5, glob:/etc/dnf/protected.d/*.conf, setup, dnf5, setup, sudo, setup
+proxy = 
+proxy_auth_method = any
+proxy_password
+proxy_sslcacert = 
+proxy_sslclientcert = 
+proxy_sslclientkey = 
+proxy_sslverify = 1
+proxy_username
+repo_gpgcheck = 0
+retries = 10
+skip_if_unavailable = 0
+sslcacert = 
+sslclientcert = 
+sslclientkey = 
+sslverify = 1
+throttle = 0
+timeout = 30
+type = rpm
+user_agent = libdnf (Fedora Linux 41; container; Linux.x86_64)
+username = 
+======== "fedora-debuginfo" repository configuration: ========
+bandwidth = 0
+baseurl = 
+build_cache = 1
+cachedir = /var/cache/libdnf5
+cost = 1000
+countme = 0
+deltarpm = 0
+deltarpm_percentage = 75
+enabled = 0
+enabled_metadata = 
+enablegroups = 1
+exclude = 
+excludepkgs = 
+fastestmirror = 0
+gpgcheck = 1
+gpgkey = file:///etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-41-x86_64
+includepkgs = 
+ip_resolve = whatever
+max_parallel_downloads = 3
+mediaid = 
+metadata_expire = 604800
+metalink = https://mirrors.fedoraproject.org/metalink?repo=fedora-debug-41&arch=x86_64
+minrate = 1000
+mirrorlist
+module_hotfixes = 0
+name = Fedora 41 - x86_64 - Debug
+password = 
+pkg_gpgcheck = 1
+priority = 99
+protected_packages = dnf5, glob:/etc/dnf/protected.d/*.conf, setup, dnf5, setup, sudo, setup
+proxy = 
+proxy_auth_method = any
+proxy_password
+proxy_sslcacert = 
+proxy_sslclientcert = 
+proxy_sslclientkey = 
+proxy_sslverify = 1
+proxy_username
+repo_gpgcheck = 0
+retries = 10
+skip_if_unavailable = 0
+sslcacert = 
+sslclientcert = 
+sslclientkey = 
+sslverify = 1
+throttle = 0
+timeout = 30
+type = rpm
+user_agent = libdnf (Fedora Linux 41; container; Linux.x86_64)
+username = 
+======== "fedora-source" repository configuration: ========
+bandwidth = 0
+baseurl = 
+build_cache = 1
+cachedir = /var/cache/libdnf5
+cost = 1000
+countme = 0
+deltarpm = 0
+deltarpm_percentage = 75
+enabled = 0
+enabled_metadata = 
+enablegroups = 1
+exclude = 
+excludepkgs = 
+fastestmirror = 0
+gpgcheck = 1
+gpgkey = file:///etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-41-x86_64
+includepkgs = 
+ip_resolve = whatever
+max_parallel_downloads = 3
+mediaid = 
+metadata_expire = 604800
+metalink = https://mirrors.fedoraproject.org/metalink?repo=fedora-source-41&arch=x86_64
+minrate = 1000
+mirrorlist
+module_hotfixes = 0
+name = Fedora 41 - Source
+password = 
+pkg_gpgcheck = 1
+priority = 99
+protected_packages = dnf5, glob:/etc/dnf/protected.d/*.conf, setup, dnf5, setup, sudo, setup
+proxy = 
+proxy_auth_method = any
+proxy_password
+proxy_sslcacert = 
+proxy_sslclientcert = 
+proxy_sslclientkey = 
+proxy_sslverify = 1
+proxy_username
+repo_gpgcheck = 0
+retries = 10
+skip_if_unavailable = 0
+sslcacert = 
+sslclientcert = 
+sslclientkey = 
+sslverify = 1
+throttle = 0
+timeout = 30
+type = rpm
+user_agent = libdnf (Fedora Linux 41; container; Linux.x86_64)
+username = 

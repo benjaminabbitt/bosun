@@ -28,6 +28,9 @@ struct RealWorld {
     /// Whether this scenario set up the local apt repository, which goes
     /// once it ends.
     local_repo: bool,
+    /// Whether this scenario changed dnf's repositories, which are put back
+    /// once it ends.
+    dnf_repos: bool,
     code: i32,
     stdout: String,
     stderr: String,
@@ -425,6 +428,82 @@ fn rpm_installed(_w: &mut RealWorld, pkg: String) {
     assert_eq!(code, 0, "rpm -q {pkg}: {out}");
 }
 
+/// The repository file a scenario adds, and where it keeps the repository
+/// files it edits, to put them back.
+const DNF_TEST_REPO: &str = "/etc/yum.repos.d/bosun-test.repo";
+const DNF_REPO_BACKUP: &str = "/var/tmp/bosun-yum.repos.d";
+
+/// Keep a copy of `/etc/yum.repos.d` (once per scenario), so the scenario's
+/// changes can be undone.
+fn back_up_dnf_repos(w: &mut RealWorld) {
+    if !w.dnf_repos {
+        w.dnf_repos = true;
+        let _ = fs::remove_dir_all(DNF_REPO_BACKUP);
+        let (code, out) = run("cp", &["-a", "/etc/yum.repos.d", DNF_REPO_BACKUP]);
+        assert_eq!(code, 0, "backing up the repositories: {out}");
+    }
+}
+
+/// Put `/etc/yum.repos.d` back as it was before the scenario.
+fn restore_dnf_repos() {
+    if Path::new(DNF_REPO_BACKUP).exists() {
+        let _ = fs::remove_dir_all("/etc/yum.repos.d");
+        let _ = run("cp", &["-a", DNF_REPO_BACKUP, "/etc/yum.repos.d"]);
+        let _ = fs::remove_dir_all(DNF_REPO_BACKUP);
+    }
+}
+
+/// Add a repository, without signature checks, at `priority`.
+#[given(expr = "a dnf repository {word} at {string} with priority {int}")]
+fn dnf_repo(w: &mut RealWorld, id: String, url: String, priority: i32) {
+    back_up_dnf_repos(w);
+    fs::write(
+        DNF_TEST_REPO,
+        format!("[{id}]\nname={id}\nbaseurl={url}\ngpgcheck=0\nenabled=1\npriority={priority}\n"),
+    )
+    .unwrap();
+    let (code, out) = run("dnf", &["makecache"]);
+    assert_eq!(code, 0, "dnf makecache: {out}");
+}
+
+/// Give an existing repository `priority` (its section in its repo file).
+#[given(expr = "the dnf repository {word} has priority {int}")]
+fn dnf_repo_priority(w: &mut RealWorld, id: String, priority: i32) {
+    back_up_dnf_repos(w);
+    let section = format!("[{id}]");
+    let file = fs::read_dir("/etc/yum.repos.d")
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| fs::read_to_string(p).is_ok_and(|t| t.lines().any(|l| l.trim() == section)))
+        .unwrap_or_else(|| panic!("no repo file has {section}"));
+    let text = fs::read_to_string(&file).unwrap();
+    let edited: String = text
+        .lines()
+        .flat_map(|l| {
+            let extra = (l.trim() == section).then(|| format!("priority={priority}"));
+            std::iter::once(l.to_string()).chain(extra)
+        })
+        .map(|l| l + "\n")
+        .collect();
+    fs::write(&file, edited).unwrap();
+}
+
+#[then(expr = "rpm reports {word} at {word}")]
+fn rpm_version(_w: &mut RealWorld, pkg: String, version: String) {
+    let (code, out) = run(
+        "rpm",
+        &[
+            "-q",
+            "--queryformat",
+            "%|EPOCH?{%{EPOCH}:}:{}|%{VERSION}-%{RELEASE}",
+            &pkg,
+        ],
+    );
+    assert_eq!(code, 0, "rpm -q {pkg}: {out}");
+    assert_eq!(out.trim(), version, "rpm -q {pkg}");
+}
+
 #[then(expr = "rpm reports {word} not installed")]
 fn rpm_absent(_w: &mut RealWorld, pkg: String) {
     let (code, out) = run("rpm", &["-q", &pkg]);
@@ -596,8 +675,13 @@ fn main() {
         RealWorld::cucumber()
             .max_concurrent_scenarios(1)
             .after(|_, _, _, _, world| {
-                if world.is_some_and(|w| w.local_repo) {
-                    remove_local_repo();
+                if let Some(w) = world {
+                    if w.local_repo {
+                        remove_local_repo();
+                    }
+                    if w.dnf_repos {
+                        restore_dnf_repos();
+                    }
                 }
                 Box::pin(async {})
             })

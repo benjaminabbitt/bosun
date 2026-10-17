@@ -34,6 +34,18 @@ pub const FIRST_USE_CHECKSUM: &str =
 pub const DNF_NO_VERSIONLOCK: &str =
     "dnf has no versionlock command, so dnf packages cannot be held; install python3-dnf-plugin-versionlock";
 
+/// The enabled dnf repositories' priorities, as dnf reports them.
+pub const DNF_PRIORITIES: &str = "dnf repository priorities";
+
+/// The version dnf's repository priorities choose among those the spec
+/// admits.
+pub const DNF_CHOSEN: &str = "dnf's repository priorities choose this version within the spec";
+
+/// A newer version the spec admits was passed over: a repository of better
+/// priority offers an older one.
+pub const DNF_NEWER_PASSED_OVER: &str =
+    "a newer version the spec admits was passed over by dnf's repository priorities";
+
 /// A release's mirror could not be reached, so the release file fetched
 /// earlier is used.
 pub const APT_STALE_RELEASE: &str =

@@ -1,8 +1,8 @@
-tzdata|0|2026a|1.el9|noarch
+tzdata|0|2026a|1.el9|noarch|baseos
 
-tzdata|0|2026b|1.el9_8|noarch
+tzdata|0|2026b|1.el9_8|noarch|baseos
 
-tzdata|0|2026c|1.el9_8|noarch
+tzdata|0|2026c|1.el9_8|noarch|baseos
 
-tzdata|0|2026e|1.el9_8|noarch
+tzdata|0|2026e|1.el9_8|noarch|baseos
 
