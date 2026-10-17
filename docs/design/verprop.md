@@ -542,6 +542,12 @@ backend, package ID, from → to version, the claim(s) that drove it, and the pr
   recorded, and never takes a distro's update within the spec back down.
 - **Diagnostics live in the plan:** conflicting exact pins, entries not applicable on this
   machine, missing backends. Errors block apply.
+- **System records wait for elevation:** without elevation, a system-scope `accept`, `claim`
+  or `drop-claim` changes only the system state, which only an elevated run writes (§4.6). It
+  is left out of the plan as a note (`jq: accept recorded on the next elevated run`; JSON
+  `deferred`), reported as such by apply, and planned again by the next elevated run; the
+  user-scope actions beside it still apply. `install`, `uninstall` and `prune` defer;
+  `remove <name>` does not, since its manifest entry is gone afterwards.
 - **Index age** is shown for repo-bound backends, since planning uses whatever index is current
   (refresh is explicit, §9).
 - **Exit codes** (like `terraform plan -detailed-exitcode`): `0` no changes, `2` changes
@@ -964,7 +970,9 @@ root, because updating their index does.
 
 **Fail fast, both directions, before anything changes:**
 
-- **Unelevated, plan changes system scope** → `ElevationRequired`.
+- **Unelevated, plan changes system scope** → `ElevationRequired`. A system-scope action that
+  changes only state (`accept`, `claim`, `drop-claim`) is no change: it waits for the next
+  elevated run (§4.8), and the rest of the plan applies.
 - **Elevated, plan changes user scope** → `MustNotBeElevated`. Under sudo, user-scope installs
   would land in root's home (and `$HOME` under sudo varies by distro), and Homebrew refuses to
   run as root. `--scope system|user` splits a mixed run:
@@ -1702,6 +1710,7 @@ under a pty on Unix only.
 | TV-10 | a deb release is the codename apt reads: `UBUNTU_CODENAME`, else `DEBIAN_CODENAME`, else `VERSION_CODENAME` (`Distro::base_codename`); `linux:linuxmint@wilma` names nothing, `@noble` matches Mint 22 | landed; os-release of LMDE 6, elementary OS 7, Debian 13, Kali captured from images; Mint 22, Pop!_OS 24.04, elementary OS 8 from known contents (no faithful image) |
 | TV-11 | apt scratch roots pruned by age: `used` stamped on each write, `updated` on each successful update; `prune_scratch` removes roots idle for `SCRATCH_MAX_AGE` (30 days) once a run, when the remote index first reads through apt | landed (unit tests with file times set back) |
 | TV-12 | `render --image` never changes the local image store: `create --pull=never --platform <target>`; an image missing locally or held for another platform is an error naming `<engine> pull --platform <target> <ref>` | landed; podman 5.4 with amd64-only `debian:12`: `--target linux/arm64` errors with the pull, amd64 renders, the store unchanged; docker 29 refuses a platform mismatch under `--pull=never` the same way |
+| TV-13 | without elevation, system-scope `accept`, `claim` and `drop-claim` are left out of `install`, `uninstall` and `prune` as `deferred` notes (`defer_system_records`), reported by apply, so user-scope actions in the same plan apply; `remove <name>` keeps needing elevation for them | landed; scenarios: a mixed apt/cargo manifest with root's system state installs ripgrep, defers claim jq and accept tree, and leaves the system state unchanged; a non-elevated prune defers its drop-claim |
 
 **First real-host smoke run (2026-10-14, release build, Debian 13, read-only `--plan` and
 `lock` in a scratch dir).** `backends` found apt 3.0.3, cargo 1.96.1 and github-release; jq

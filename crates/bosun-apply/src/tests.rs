@@ -956,6 +956,89 @@ fn an_accept_only_plan_needs_no_elevation() {
     assert!(check_privilege(&plan, &machine, None).is_ok());
 }
 
+#[test]
+fn without_elevation_system_records_wait_and_everything_else_stays() {
+    let apt: &'static FakeInstaller = Box::leak(Box::new(apt()));
+    let cargo: &'static FakeInstaller = Box::leak(Box::new(cargo()));
+    let semver = |v: &str| Version::parse(v, Scheme::Semver).unwrap();
+    let accepted = |v: Version| Current::Present {
+        version: Some(v),
+        origin: Origin::Accepted,
+        claimed_by: vec![],
+        held: false,
+    };
+    let jq = managed(
+        "jq",
+        "1.7.1-3",
+        accepted(deb("1.7.1-3")),
+        apt,
+        vec![claim("/w/a", ">=1.6")],
+    );
+    let fd = Managed {
+        name: "fd".to_string(),
+        purl: "pkg:cargo/fd-find".parse().unwrap(),
+        backend: BackendId::new("cargo"),
+        resolved: semver("10.0.0"),
+        vers_type: "cargo".to_string(),
+        claims: vec![claim("/w/a", "*")],
+        current: accepted(semver("10.0.0")),
+        installer: cargo,
+        checksum: None,
+    };
+    let rg = Managed {
+        name: "ripgrep".to_string(),
+        purl: "pkg:cargo/ripgrep".parse().unwrap(),
+        backend: BackendId::new("cargo"),
+        resolved: semver("1.0.0"),
+        vers_type: "cargo".to_string(),
+        claims: vec![],
+        current: Current::Absent,
+        installer: cargo,
+        checksum: None,
+    };
+    let plan = build_install_plan(&[jq, fd, rg], vec![]).unwrap();
+    assert_eq!(
+        defer_system_records(plan.clone(), Privilege::Elevated),
+        plan
+    );
+
+    let deferred = defer_system_records(plan, Privilege::Unelevated);
+    assert_eq!(
+        kinds(&deferred),
+        vec![ActionKind::Install, ActionKind::Accept]
+    );
+    assert_eq!(deferred.actions[1].name, "fd");
+    assert_eq!(
+        deferred.diagnostics,
+        vec![Diagnostic::Deferred {
+            name: "jq".to_string(),
+            action: ActionKind::Accept,
+        }]
+    );
+    assert_eq!(deferred.diagnostics[0].severity(), Severity::Warning);
+    assert_eq!(
+        deferred.diagnostics[0].to_string(),
+        format!("jq: accept {}", errmsg::DEFERRED)
+    );
+    assert_eq!(
+        deferred.deferred(),
+        vec![ActionOutcome {
+            name: "jq".to_string(),
+            kind: ActionKind::Accept,
+            result: ApplyResult::Deferred,
+        }]
+    );
+    assert_eq!(deferred.exit_code(), 2);
+
+    // A system change stays, for the privilege check to refuse.
+    let install = system_install_plan();
+    assert_eq!(
+        defer_system_records(install.clone(), Privilege::Unelevated),
+        install
+    );
+    assert!(install.deferred().is_empty());
+}
+
 // --- uninstall and prune plans ---------------------------------------------
 
 fn leaf(name: &str, installed: &str, origin: Origin, claims: Vec<Claim>) -> StateLeaf {

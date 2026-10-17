@@ -196,6 +196,11 @@ fn diag_view(d: &Diagnostic) -> DiagView<'_> {
             name.as_str(),
             Some(format!("installed {installed}, lock pins {locked}")),
         ),
+        Diagnostic::Deferred { name, action } => (
+            "deferred",
+            name.as_str(),
+            Some(format!("{} {}", action.label(), crate::errmsg::DEFERRED)),
+        ),
     };
     DiagView {
         diagnostic,
@@ -241,6 +246,7 @@ fn outcome_view(o: &ActionOutcome) -> OutcomeView<'_> {
         ApplyResult::Applied => ("applied", None),
         ApplyResult::Failed { error } => ("failed", Some(error.as_str())),
         ApplyResult::Skipped => ("skipped", None),
+        ApplyResult::Deferred => ("deferred", None),
     };
     OutcomeView {
         name: &o.name,

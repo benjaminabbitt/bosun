@@ -1510,6 +1510,7 @@ impl Render for ApplyReport {
                     ApplyResult::Applied => "applied".to_string(),
                     ApplyResult::Failed { error } => format!("FAILED: {error}"),
                     ApplyResult::Skipped => "skipped".to_string(),
+                    ApplyResult::Deferred => bosun_apply::errmsg::DEFERRED.to_string(),
                 };
                 format!("{:<10} {:<16} {}", o.kind.label(), o.name, result)
             })

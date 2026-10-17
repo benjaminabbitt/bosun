@@ -14,3 +14,8 @@ pub const INSTALLED_MOVED: &str =
 /// stands.
 pub const INSTALLED_UNREAD: &str =
     "could not read the installed version; keeping the one bosun recorded";
+
+/// Without elevation, a system-scope action that changes only bosun's system
+/// state is left for the next elevated run, which may write that state.
+pub const DEFERRED: &str =
+    "system state needs elevation; leaving this record to the next elevated run";

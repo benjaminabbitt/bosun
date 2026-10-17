@@ -751,9 +751,10 @@ fn write_project(fixture: &str, manifest: &str) -> TempDir {
 #[test]
 fn install_accepts_a_package_present_outside_bosun() {
     // A — host has jq installed (not by bosun), candidate is u2; the manifest
-    // is satisfied by what's present → accept, never install or hold.
+    // is satisfied by what's present → accept, never install or hold (an
+    // elevated run, the one that records a system-scope accept).
     let fixture = r#"{"os":"linux","arch":"amd64","distro":{"id":"debian","codename":"trixie"},
-      "privilege":"unelevated","user":"ben",
+      "privilege":"elevated","user":"ben",
       "backends":[{"id":"apt","version":"2.6.1","purl_type":"deb","vers_type":"deb","platform_independent":false,
         "scope":"system","supports_hold":true,
         "available":{"jq":["1.7.1-6+deb13u2"]},"installed":{"jq":"1.7.1-6+deb13u1"}}]}"#;

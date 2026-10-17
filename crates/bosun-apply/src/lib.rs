@@ -19,7 +19,7 @@
 //! value, so there is no `Deserialize` (and no version-scheme to reconstruct).
 
 mod applier;
-mod errmsg;
+pub mod errmsg;
 mod logmsg;
 pub mod render;
 mod view;
@@ -213,6 +213,16 @@ pub enum Diagnostic {
         /// The version the lockfile pins.
         locked: String,
     },
+    /// A system-scope action that changes only bosun's system state
+    /// (`accept`, `claim`, `drop-claim`) left out of a run without elevation,
+    /// which may not write that state (§5.5): a warning; the next elevated run
+    /// records it.
+    Deferred {
+        /// The entry's name.
+        name: String,
+        /// The action left out.
+        action: ActionKind,
+    },
 }
 
 impl Diagnostic {
@@ -226,7 +236,8 @@ impl Diagnostic {
             Diagnostic::NotApplicable { .. }
             | Diagnostic::MissingBackend { .. }
             | Diagnostic::AcceptedUnsatisfied { .. }
-            | Diagnostic::UnsupportedHold { .. } => Severity::Warning,
+            | Diagnostic::UnsupportedHold { .. }
+            | Diagnostic::Deferred { .. } => Severity::Warning,
         }
     }
 }
@@ -287,6 +298,9 @@ impl std::fmt::Display for Diagnostic {
                 "{name}: installed {installed}, lock pins {locked}: {}",
                 errmsg::FROZEN_ACCEPTED_CONFLICT
             ),
+            Diagnostic::Deferred { name, action } => {
+                write!(f, "{name}: {} {}", action.label(), errmsg::DEFERRED)
+            }
         }
     }
 }
@@ -323,6 +337,52 @@ impl Plan {
         } else {
             0
         }
+    }
+
+    /// What became of the actions [`defer_system_records`] left out: each
+    /// waits for the next elevated run.
+    pub fn deferred(&self) -> Vec<ActionOutcome> {
+        self.diagnostics
+            .iter()
+            .filter_map(|d| match d {
+                Diagnostic::Deferred { name, action } => Some(ActionOutcome {
+                    name: name.clone(),
+                    kind: *action,
+                    result: ApplyResult::Deferred,
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// Leave out of `plan`, when `privilege` is not elevation, each system-scope
+/// action that changes only bosun's system state (`accept`, `claim`,
+/// `drop-claim`): that state is written only elevated (§5.5), and the next
+/// elevated run plans them again. Each becomes a [`Diagnostic::Deferred`], so
+/// the user-scope actions beside them still apply. An action that changes the
+/// machine stays, for [`check_privilege`] to judge.
+pub fn defer_system_records(plan: Plan, privilege: Privilege) -> Plan {
+    if privilege == Privilege::Elevated {
+        return plan;
+    }
+    let Plan {
+        actions,
+        mut diagnostics,
+    } = plan;
+    let (deferred, actions): (Vec<Action>, Vec<Action>) = actions
+        .into_iter()
+        .partition(|a| a.scope == Scope::System && !a.kind.changes_machine());
+    for a in deferred {
+        info!(message = logmsg::DEFERRED, package = %a.name, action = a.kind.label());
+        diagnostics.push(Diagnostic::Deferred {
+            name: a.name,
+            action: a.kind,
+        });
+    }
+    Plan {
+        actions,
+        diagnostics,
     }
 }
 

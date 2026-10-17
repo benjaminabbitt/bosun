@@ -64,6 +64,9 @@ pub enum ApplyResult {
     },
     /// Skipped because an earlier action on the same backend failed.
     Skipped,
+    /// Left for the next elevated run: a system-scope record a run without
+    /// elevation may not write ([`crate::defer_system_records`]).
+    Deferred,
 }
 
 /// The M1 driver: apply a plan on the local host, recording state in one scope

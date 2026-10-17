@@ -18,7 +18,7 @@ mod target_root;
 
 use std::io::{IsTerminal, Write};
 
-use bosun_apply::{check_privilege, Plan};
+use bosun_apply::{check_privilege, defer_system_records, Plan};
 use bosun_core::Scope;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
@@ -153,6 +153,7 @@ fn dispatch(cli: &Cli, format: Format) -> Result<i32, CliError> {
                 },
                 &pref,
             )?;
+            let built = defer_system_records(built, env.machine().privilege());
             let m = Mutation {
                 command: "install",
                 plan_only: *plan,
@@ -184,7 +185,10 @@ fn dispatch(cli: &Cli, format: Format) -> Result<i32, CliError> {
             scope,
             yes,
         } => {
-            let built = commands::uninstall_plan(&env, path.clone())?;
+            let built = defer_system_records(
+                commands::uninstall_plan(&env, path.clone())?,
+                env.machine().privilege(),
+            );
             run_mutation(
                 &env,
                 Mutation {
@@ -200,7 +204,8 @@ fn dispatch(cli: &Cli, format: Format) -> Result<i32, CliError> {
         }
         Command::Render { .. } => unreachable!("render is dispatched before the host is probed"),
         Command::Prune { plan, scope, yes } => {
-            let built = commands::prune_plan(&env)?;
+            let built =
+                defer_system_records(commands::prune_plan(&env)?, env.machine().privilege());
             run_mutation(
                 &env,
                 Mutation {
@@ -358,6 +363,7 @@ fn apply_mutation(
             .map_err(|e| CliError::Resolve(e.to_string()))?;
         report.outcomes.extend(part.outcomes);
     }
+    report.outcomes.extend(plan.deferred());
     let any_failed = report
         .outcomes
         .iter()

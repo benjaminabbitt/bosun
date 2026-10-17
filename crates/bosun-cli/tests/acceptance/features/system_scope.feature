@@ -153,3 +153,60 @@ Feature: accept, hold and privilege at system scope (apt)
     When I run `bosun --format json prune --yes`
     Then it fails
     And it says "machine state is not readable by this user"
+
+  # accept, claim and drop-claim change no package, only the system state,
+  # which only an elevated run writes: without elevation they wait for the
+  # next elevated run, and the user-scope tools beside them still install.
+  @unprivileged
+  Scenario: without elevation, system-scope records wait and user-scope tools install
+    Given a Debian trixie amd64 machine, not elevated
+    And cargo 1.76.0 is available
+    And cargo publishes ripgrep 14.1.1
+    And apt publishes tree 2.2.1-1
+    And tree 2.2.1-1 is installed outside bosun
+    And jq 1.7.1-6+deb13u2 is installed outside bosun
+    And bosun installed jq 1.7.1-6+deb13u2 unheld for another project wanting ">=1.6"
+    And the system state is root's, readable by every user
+    And the manifest:
+      """
+      version: 2
+      packages:
+        - name: jq
+          spec: ">=1.6"
+          install:
+            linux:debian: {backend: apt}
+        - name: tree
+          spec: "*"
+          install:
+            linux:debian: {backend: apt}
+        - name: ripgrep
+          spec: "*"
+          install:
+            linux: {backend: cargo}
+      """
+    When I run `bosun --format json install . --plan`
+    Then it reports changes pending
+    And the plan's actions are "install ripgrep"
+    When I run `bosun --format text install . --plan`
+    Then it reports changes pending
+    And it says "jq: claim recorded on the next elevated run"
+    And it says "tree: accept recorded on the next elevated run"
+    When I run `bosun --format text install . --yes`
+    Then it succeeds
+    And it says "install    ripgrep          applied"
+    And it says "claim      jq               recorded on the next elevated run"
+    And it says "accept     tree             recorded on the next elevated run"
+    And bosun has recorded ripgrep 14.1.1
+    And the system state is unchanged
+
+  @unprivileged
+  Scenario: without elevation, a system-scope claim prune drops waits for the next elevated run
+    Given a Debian trixie amd64 machine, not elevated
+    And jq 1.7.1-6+deb13u2 is installed outside bosun
+    And bosun accepted jq 1.7.1-6+deb13u2 for this project wanting ">=1.6"
+    And the system state is root's, readable by every user
+    When the manifest is deleted
+    And I run `bosun --format text prune --yes`
+    Then it succeeds
+    And it says "drop-claim jq               recorded on the next elevated run"
+    And the system state is unchanged

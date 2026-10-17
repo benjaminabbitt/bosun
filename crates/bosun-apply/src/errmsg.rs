@@ -44,6 +44,9 @@ pub const UNSUPPORTED_DOWNGRADE: &str = "backend cannot downgrade to the resolve
 pub const FROZEN_ACCEPTED_CONFLICT: &str =
     "installed outside bosun at a different version than the lock; bosun will not change it";
 
+/// A system-scope record left out of a run without elevation (§5.5).
+pub const DEFERRED: &str = "recorded on the next elevated run";
+
 /// Two manifest entries give `render` the same variable stem (§8.3).
 pub const VAR_CLASH: &str = "two packages give the same render variable";
 
