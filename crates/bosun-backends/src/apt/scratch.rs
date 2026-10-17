@@ -25,6 +25,7 @@ use bosun_ports::{Command, CommandRunner, PortError};
 use sha2::{Digest, Sha256};
 use tracing::{debug, warn};
 
+use super::policy::{self, Policy};
 use super::remote::{https, RELEASE_TTL};
 use super::sources::SourceEntry;
 use crate::{errmsg, logmsg};
@@ -246,30 +247,6 @@ pub fn plan(root: Option<&Path>, entries: &[SourceEntry], arch: Arch) -> Plan {
     plan
 }
 
-/// The versions of the package `apt-cache policy` describes, each with its
-/// priority: the lines of its version table.
-pub fn parse_policy(stdout: &str) -> Vec<(String, i32)> {
-    let mut versions = Vec::new();
-    let mut in_table = false;
-    for line in stdout.lines() {
-        let line = line.trim_start();
-        if line == "Version table:" {
-            in_table = true;
-            continue;
-        }
-        if !in_table {
-            continue;
-        }
-        let line = line.strip_prefix("*** ").unwrap_or(line);
-        if let [version, priority] = line.split_whitespace().collect::<Vec<_>>()[..] {
-            if let Ok(priority) = priority.parse() {
-                versions.push((version.to_string(), priority));
-            }
-        }
-    }
-    versions
-}
-
 impl Scratch {
     /// Write `plan` under `cache`, in a directory named for its contents, so
     /// a release whose sources are unchanged reuses what apt fetched.
@@ -339,11 +316,11 @@ impl Scratch {
 
     /// `name`'s versions and their priorities, as `apt-cache policy` gives
     /// them in the scratch root.
-    pub fn policy(
+    pub(crate) fn policy(
         &self,
         runner: &dyn CommandRunner,
         name: &str,
-    ) -> Result<Vec<(String, i32)>, PortError> {
+    ) -> Result<Policy, PortError> {
         let out = runner.run(&self.command("apt-cache", &["policy", name]))?;
         if !out.success() {
             return Err(PortError::CommandFailed {
@@ -352,7 +329,7 @@ impl Scratch {
                 stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
             });
         }
-        Ok(parse_policy(&out.stdout_utf8()))
+        policy::parse(&out.stdout_utf8())
     }
 }
 

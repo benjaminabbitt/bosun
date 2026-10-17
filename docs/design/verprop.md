@@ -416,7 +416,9 @@ namespace is the distro, its `distro` qualifier the codename, its `arch` the arc
   apt is run with `APT_CONFIG` naming it (apt reads that before any other configuration, so this
   machine's `apt.conf.d` and sources are not read) and `LC_ALL=C`: `apt-get -q update`, then
   `apt-cache policy <package>`, whose version table gives each version and its priority. The
-  versions at the highest priority are offered (none if it is negative), so apt's own rules
+  choice within the spec is the one local apt makes (`Index::select`, the same `apt-cache
+  policy` reading): the highest priority the spec admits, then the newest, a lock's version
+  first while offered, a priority of 0 or less only when named exactly; so apt's own rules
   choose: pins, `NotAutomatic` / `ButAutomaticUpgrades` suites, priorities, phasing as this
   machine's apt applies it. From the target's root the scratch root takes its `preferences` and
   `preferences.d`, its `trusted.gpg` and `trusted.gpg.d`, and every keyring a `Signed-By` names
@@ -434,12 +436,12 @@ namespace is the distro, its `distro` qualifier the codename, its `arch` the arc
   Debian's security suite lists only xz; a flat repository's at its top), fetched by hash when
   the release offers `Acquire-By-Hash`, and refused unless its size and SHA256 are the ones the
   `InRelease` lists. A release file must name the suite asked for (its `Suite` or `Codename`;
-  not for a flat repository). The versions offered are those of the highest priority apt gives
-  a release with no pins (apt_preferences(5)): 500, or 100 for a `NotAutomatic` release that is
-  also `ButAutomaticUpgrades`, or 1 for `NotAutomatic` alone, a version listed twice taking its
-  highest. So backports listed by an image (Ubuntu's do) offer only what nothing else does.
-  The target's pins are not applied on this path, and a root with `preferences` or
-  `preferences.d` is warned of. Selection takes the highest in the spec as everywhere (§7).
+  not for a flat repository). Each version gets the priority apt gives a release
+  with no pins (apt_preferences(5)): 500, or 100 for a `NotAutomatic` release that is also
+  `ButAutomaticUpgrades`, or 1 for `NotAutomatic` alone, a version listed twice taking its
+  highest; the choice within the spec is then made as apt's is, above. So backports listed by
+  an image (Ubuntu's do) are chosen only when the spec admits nothing else. The target's pins
+  are not applied on this path, and a root with `preferences` or `preferences.d` is warned of.
 - **Integrity: the hash chain, and a signature only where apt has the target's key.** bosun
   verifies no OpenPGP signature itself and warns of none (decided, §11): HTTPS and the hash
   chain are enough to choose versions, and the image's apt verifies the release against its
@@ -1628,7 +1630,7 @@ under a pty on Unix only.
 | TV-3 | npm and PyPI ranges evaluated natively (`nodejs-semver` 7.0.0, `pep440_rs`); npm resolves locally with `npm pack --dry-run --json`, uv with `uv pip compile -` (stdin, new on `Command`) for `uv python find --system`; uv's if-necessary pre-release rule | landed; real tier in `node:22-bookworm-slim` (yarn `*` → 1.22.22, the `latest` tag, though 2.4.3 exists) and `python:3.9-slim` with uv 0.13.1 (black `*` → 25.11.0, the newest for Python 3.9) |
 | TV-4 | configured registries on this machine: npm `npm config get registry` / `@scope:registry`; cargo source replacement from its config files (cwd ancestors, `$CARGO_HOME`; `toml` 1.1.6), a git, local or vendored source an error; uv's index left to uv (no PyPI listing locally) | landed (unit tests) |
 | TV-5 | npm prefix writability by `access(2)` (no probe file), warned once when an install or uninstall step is planned | landed; real tier: root-installed semver accepted with no warning |
-| M3-8 | render reads the target from its image: `--image <ref>` (podman, else docker: create / cp / rm, never run) or `--rootfs <dir>` give os-release (`ID`, `ID_LIKE`, release) and apt sources (one-line and deb822, `deb` only, `Enabled: no` dropped, `arch=` honoured, flat repositories, vendor repositories included); stock sources only without them, logged; apt resolves with this machine's apt in a scratch root (`APT_CONFIG`, empty status, the target's arch, its pins and keys; no key: `Trusted: yes` over HTTPS in the scratch config only), bosun's own reading (apt's default priorities, `NotAutomatic` suites only for what nothing else has, pins warned of) without it; the `--distro` `ID_LIKE` table dropped for `--like` | landed; `--image` renders match `apt-cache policy` inside `debian:12`, `debian:13`, `ubuntu:22.04`, `ubuntu:24.04` (30 packages each), arm64 from amd64, and a derived `debian:12` with Docker's repository and a pin |
+| M3-8 | render reads the target from its image: `--image <ref>` (podman, else docker: create / cp / rm, never run) or `--rootfs <dir>` give os-release (`ID`, `ID_LIKE`, release) and apt sources (one-line and deb822, `deb` only, `Enabled: no` dropped, `arch=` honoured, flat repositories, vendor repositories included); stock sources only without them, logged; apt resolves with this machine's apt in a scratch root (`APT_CONFIG`, empty status, the target's arch, its pins and keys; no key: `Trusted: yes` over HTTPS in the scratch config only), bosun's own reading (apt's default priorities, chosen within the spec as local apt chooses, pins warned of) without it; the `--distro` `ID_LIKE` table dropped for `--like` | landed; `--image` renders match `apt-cache policy` inside `debian:12`, `debian:13`, `ubuntu:22.04`, `ubuntu:24.04` (30 packages each), arm64 from amd64, and a derived `debian:12` with Docker's repository and a pin |
 | M2-10 | with no terminal, every confirm (install, uninstall, prune, remove, migrate) applies, still printing what it applies to stderr; `--yes` only skips a terminal's prompt | landed |
 | M2-11 | `status [path]` lists every claim on each package (manifest, spec, user, whether the manifest still exists); with no path, everything bosun manages on the machine; `install` records a `claim` on a package bosun installed for another project | landed |
 | M2-12 | release selectors `linux:<distro>@<release>`: the release is the purl `distro` value a block's backend gives this machine (deb codename, rpm `<ID>-<VERSION_ID>`); exact `ID` only | landed; checked in Debian 12/13 and Ubuntu 22.04/24.04 containers |

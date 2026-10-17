@@ -11,11 +11,11 @@
 //! Without it, bosun reads them itself, each suite fetched the way apt
 //! fetches it: the suite's `InRelease`, then each component's `Packages.gz`
 //! (else `.xz`), checked against the size and SHA256 the `InRelease` lists
-//! (by hash when the release offers `Acquire-By-Hash`), and the versions apt
-//! would consider kept: those of the highest priority apt gives a release
-//! without pins. Either way, a release file with no key to check it against
-//! is trusted as fetched over HTTPS (the image's apt checks its signature
-//! when it installs).
+//! (by hash when the release offers `Acquire-By-Hash`), each version given
+//! the priority apt gives a release without pins. Either way, the choice
+//! within a spec is apt's rule over those priorities ([`Index::select`]),
+//! and a release file with no key to check it against is trusted as fetched
+//! over HTTPS (the image's apt checks its signature when it installs).
 //!
 //! Fetched files are cached: an `InRelease` is used for [`RELEASE_TTL`] before
 //! it is fetched again (an older one is used, with a warning, when the mirror
@@ -31,11 +31,12 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use bosun_core::{Arch, Ref, Scheme, Target, Version};
-use bosun_ports::{CommandRunner, HttpFetcher, HttpRequest, Index, PortError};
+use bosun_core::{Arch, Ref, Scheme, Target, Version, Want};
+use bosun_ports::{CommandRunner, HttpFetcher, HttpRequest, Index, PortError, Selection};
 use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 
+use super::policy::{Entry, Policy};
 use super::scratch::{self, Scratch};
 use super::sources::{self, SourceEntry};
 use crate::{errmsg, logmsg};
@@ -363,22 +364,6 @@ pub type Available = BTreeMap<String, Vec<(String, i32)>>;
 /// A release, as its distro, codename and arch.
 type ReleaseKey = (String, String, Arch);
 
-/// The versions apt would consider installing, with nothing installed: those
-/// of the highest priority among `versions`, none when that is negative.
-pub fn candidates(versions: &[(String, i32)]) -> Vec<&str> {
-    let Some(top) = versions.iter().map(|(_, p)| *p).max() else {
-        return Vec::new();
-    };
-    if top < 0 {
-        return Vec::new();
-    }
-    versions
-        .iter()
-        .filter(|(_, p)| *p == top)
-        .map(|(v, _)| v.as_str())
-        .collect()
-}
-
 /// The machine a render targets, read from its root filesystem (an image's
 /// files, or a directory): the release it is, and the root holding its
 /// `etc/apt`.
@@ -502,11 +487,7 @@ impl RemoteAptIndex {
     /// gives them for `key`'s release; `None` when apt isn't here, or when
     /// it can't read a stock image's sources (a release without an updates
     /// suite), which bosun then reads itself.
-    fn through_apt(
-        &self,
-        key: &ReleaseKey,
-        name: &str,
-    ) -> Result<Option<Vec<(String, i32)>>, PortError> {
+    fn through_apt(&self, key: &ReleaseKey, name: &str) -> Result<Option<Policy>, PortError> {
         let Some(runner) = &self.apt else {
             return Ok(None);
         };
@@ -544,7 +525,7 @@ impl RemoteAptIndex {
             return Ok(None);
         };
         match s.policy(runner.as_ref(), name) {
-            Ok(versions) => Ok(Some(versions)),
+            Ok(policy) => Ok(Some(policy)),
             // Lists fetched before, but no apt here now.
             Err(PortError::CommandNotFound { .. }) => {
                 info!(message = logmsg::APT_NO_LOCAL_APT);
@@ -780,25 +761,15 @@ fn release_of(pkg: &Ref, target: &Target) -> Result<ReleaseKey, PortError> {
     Ok((distro.to_string(), codename.clone(), arch))
 }
 
-impl Index for RemoteAptIndex {
-    fn refresh(&self) -> Result<(), PortError> {
-        self.refetch.set(true);
-        self.releases.borrow_mut().clear();
-        self.scratches.borrow_mut().clear();
-        Ok(())
-    }
-
-    fn query_available(&self, pkg: &Ref, target: &Target) -> Result<Vec<Version>, PortError> {
+impl RemoteAptIndex {
+    /// `pkg`'s versions on `target` and their priorities: as this machine's
+    /// apt gives them, else as bosun reads the mirrors (apt's priorities with
+    /// no pins).
+    fn policy(&self, pkg: &Ref, target: &Target) -> Result<Policy, PortError> {
         let key = release_of(pkg, target)?;
         let name = pkg.purl.name();
-        let parse = |versions: &[(String, i32)]| -> Vec<Version> {
-            candidates(versions)
-                .into_iter()
-                .filter_map(|v| Version::parse(v, Scheme::Debian).ok())
-                .collect()
-        };
-        if let Some(versions) = self.through_apt(&key, name)? {
-            return Ok(parse(&versions));
+        if let Some(policy) = self.through_apt(&key, name)? {
+            return Ok(policy);
         }
         let known = self.releases.borrow().get(&key).cloned();
         let available = match known {
@@ -819,9 +790,56 @@ impl Index for RemoteAptIndex {
                 read
             }
         };
-        Ok(parse(
+        Ok(policy_of(
             available.get(name).map(Vec::as_slice).unwrap_or_default(),
         ))
+    }
+}
+
+/// `versions` and their priorities as apt's policy: every one offered,
+/// nothing installed.
+fn policy_of(versions: &[(String, i32)]) -> Policy {
+    Policy {
+        installed: None,
+        entries: versions
+            .iter()
+            .filter_map(|(v, priority)| {
+                Some(Entry {
+                    version: Version::parse(v, Scheme::Debian).ok()?,
+                    priority: *priority,
+                    offered: true,
+                })
+            })
+            .collect(),
+    }
+}
+
+impl Index for RemoteAptIndex {
+    fn refresh(&self) -> Result<(), PortError> {
+        self.refetch.set(true);
+        self.releases.borrow_mut().clear();
+        self.scratches.borrow_mut().clear();
+        Ok(())
+    }
+
+    fn query_available(&self, pkg: &Ref, target: &Target) -> Result<Vec<Version>, PortError> {
+        Ok(self.policy(pkg, target)?.offered())
+    }
+
+    /// apt's choice among the versions `want` admits (§5.6): the highest
+    /// priority, then the newest, a locked version first while offered.
+    fn select(
+        &self,
+        pkg: &Ref,
+        target: &Target,
+        want: &Want,
+        prefer: &[Version],
+    ) -> Result<Selection, PortError> {
+        let policy = self.policy(pkg, target)?;
+        Ok(Selection {
+            chosen: policy.choose(want, prefer),
+            available: policy.offered(),
+        })
     }
 }
 

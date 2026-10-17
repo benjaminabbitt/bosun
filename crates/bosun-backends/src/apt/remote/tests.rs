@@ -180,19 +180,27 @@ fn a_stanza_needs_both_package_and_version() {
 }
 
 #[test]
-fn apt_considers_only_its_highest_priority_versions() {
-    let v = |list: &[(&str, i32)]| -> Vec<(String, i32)> {
-        list.iter().map(|(v, p)| (v.to_string(), *p)).collect()
+fn apt_chooses_by_priority_within_the_spec() {
+    let choose = |list: &[(&str, i32)], range: &str| -> Option<String> {
+        let versions: Vec<(String, i32)> = list.iter().map(|(v, p)| (v.to_string(), *p)).collect();
+        let want = Want::of(bosun_core::VersRange::parse(range).unwrap());
+        policy_of(&versions)
+            .choose(&want, &[])
+            .map(|v| v.as_str().to_string())
     };
+    let backports = [("2", 100), ("1", 500), ("1.1", 500)];
+    assert_eq!(choose(&backports, "vers:deb/*").as_deref(), Some("1.1"));
+    // A spec only the lower priority meets takes it, as `apt install pkg=ver` would.
+    assert_eq!(choose(&backports, "vers:deb/>=2").as_deref(), Some("2"));
+    assert_eq!(choose(&[("1", -1)], "vers:deb/*"), None);
+    assert_eq!(choose(&[], "vers:deb/*"), None);
+    // Every version is offered, and one apt can't read is left out.
     assert_eq!(
-        candidates(&v(&[("2", 100), ("1", 500), ("1.1", 500)])),
-        vec!["1", "1.1"]
+        policy_of(&[("1".to_string(), 1), ("".to_string(), 500)])
+            .offered()
+            .len(),
+        1
     );
-    assert_eq!(candidates(&v(&[("2", 100)])), vec!["2"]);
-    assert_eq!(candidates(&v(&[("2", 1), ("1", 0)])), vec!["2"]);
-    assert_eq!(candidates(&v(&[("1", 0)])), vec!["1"]);
-    assert!(candidates(&v(&[("1", -1)])).is_empty());
-    assert!(candidates(&[]).is_empty());
 }
 
 #[test]
@@ -374,6 +382,16 @@ fn versions(index: &RemoteAptIndex, purl: &str) -> Vec<String> {
         .collect();
     v.sort();
     v
+}
+
+/// The version `index` chooses for `purl` within `range`.
+fn chosen(index: &RemoteAptIndex, purl: &str, range: &str) -> Option<String> {
+    let want = Want::of(bosun_core::VersRange::parse(range).unwrap());
+    index
+        .select(&deb(purl), &AMD64, &want, &[])
+        .unwrap()
+        .chosen
+        .map(|v| v.as_str().to_string())
 }
 
 fn query_err(index: &RemoteAptIndex, purl: &str) -> String {
@@ -899,7 +917,7 @@ fn the_targets_own_sources_are_read_and_its_vendor_repositories_with_them() {
 }
 
 #[test]
-fn a_suite_apt_picks_only_when_asked_offers_only_what_nothing_else_does() {
+fn a_suite_apt_picks_only_when_asked_is_chosen_only_when_nothing_else_will_do() {
     let root = root_with(
         "a.list",
         &format!("deb https://deb.debian.org/debian bookworm main\ndeb {VENDOR} ./\n"),
@@ -911,10 +929,19 @@ fn a_suite_apt_picks_only_when_asked_offers_only_what_nothing_else_does() {
     ));
     let dir = tempfile::tempdir().unwrap();
     let idx = rooted(&fetcher, dir.path(), root.path());
-    assert_eq!(versions(&idx, JQ), vec!["1.6-2.1+deb12u2"]);
     assert_eq!(
-        versions(&idx, "pkg:deb/debian/only-here?arch=amd64&distro=bookworm"),
-        vec!["1.0"]
+        chosen(&idx, JQ, "vers:deb/*").as_deref(),
+        Some("1.6-2.1+deb12u2")
+    );
+    assert_eq!(chosen(&idx, JQ, "vers:deb/>=2").as_deref(), Some("9.9"));
+    assert_eq!(
+        chosen(
+            &idx,
+            "pkg:deb/debian/only-here?arch=amd64&distro=bookworm",
+            "vers:deb/*"
+        )
+        .as_deref(),
+        Some("1.0")
     );
 }
 
@@ -1022,8 +1049,8 @@ fn apts_own_choice_is_asked_when_apt_is_here() {
         &runner,
     );
     assert_eq!(
-        versions(&idx, JQ),
-        vec!["1.6-2.1+deb12u2", "1.6-2.1+deb12u3"]
+        chosen(&idx, JQ, "vers:deb/*").as_deref(),
+        Some("1.6-2.1+deb12u3")
     );
     // One update per release however many packages; nothing fetched by bosun.
     assert!(versions(&idx, "pkg:deb/debian/nope?arch=amd64&distro=bookworm").is_empty());
@@ -1084,7 +1111,7 @@ fn the_targets_root_is_what_apt_reads() {
         rooted(&Arc::new(FakeHttpFetcher::new()), dir.path(), r.path()),
         &runner,
     );
-    assert_eq!(versions(&idx, JQ).len(), 2);
+    assert_eq!(versions(&idx, JQ).len(), 3);
     let scratch = fs::read_dir(dir.path().join("scratch"))
         .unwrap()
         .next()

@@ -291,26 +291,6 @@ libc6:
         -10 http://x.example s/main amd64 Packages
 ";
 
-#[test]
-fn apt_cache_policy_gives_each_version_its_priority() {
-    let v = |s: &str, p: i32| (s.to_string(), p);
-    assert_eq!(
-        parse_policy(POLICY),
-        vec![
-            v("2.39-0ubuntu8.9", 500),
-            v("2.39-0ubuntu8", 500),
-            v("2.40-1", 100),
-            v("2.30", -10),
-        ]
-    );
-    assert!(parse_policy("").is_empty());
-    assert!(
-        parse_policy("x:\n  Installed: (none)\n  Candidate: (none)\n  Version table:\n").is_empty()
-    );
-    // Before the table, nothing is a version.
-    assert!(parse_policy("x:\n  Candidate: 1 500\n").is_empty());
-}
-
 fn ok(stdout: &str) -> Output {
     Output {
         code: Some(0),
@@ -411,7 +391,7 @@ fn policy_asks_apt_cache_for_the_package() {
     let cache = tempfile::tempdir().unwrap();
     let s = scratch(cache.path());
     let runner = FakeCommandRunner::new().with_output(ok(POLICY));
-    assert_eq!(s.policy(&runner, "libc6").unwrap().len(), 4);
+    assert_eq!(s.policy(&runner, "libc6").unwrap().offered().len(), 4);
     let call = &runner.calls()[0];
     assert_eq!(call.program, "apt-cache");
     assert_eq!(call.args, vec!["policy", "libc6"]);
