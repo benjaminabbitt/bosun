@@ -242,6 +242,48 @@ pub fn resolve_with_lock(
     })
 }
 
+/// The names of `manifest`'s entries that apply on `host`: an install block
+/// matches it and names a backend registered here (§5.3, §5.4). The rest
+/// resolve to [`Outcome::NotApplicable`], so these are what a complete lock
+/// for this machine pins.
+pub fn applicable<'m>(
+    manifest: &'m Manifest,
+    host: &Host<'_>,
+    backends: &[ResolvableBackend<'_>],
+    preference: &[BackendId],
+) -> Vec<&'m str> {
+    manifest
+        .packages
+        .iter()
+        .filter(|e| applying(e, manifest, host, backends, preference).is_ok())
+        .map(|e| e.name.as_str())
+        .collect()
+}
+
+/// The install block that applies to `entry` on `host`, defaults merged
+/// (§5.4), and the registered backend it installs with (§5.3); or why none
+/// does.
+fn applying<'b>(
+    entry: &ManifestEntry,
+    manifest: &Manifest,
+    host: &Host<'_>,
+    backends: &'b [ResolvableBackend<'b>],
+    preference: &[BackendId],
+) -> Result<(InstallBlock, &'b ResolvableBackend<'b>), NotApplicable> {
+    let block =
+        effective_block(entry, manifest, host, backends).ok_or(NotApplicable::NoSelector)?;
+    if block.backends.is_empty() {
+        return Err(NotApplicable::NoBackend);
+    }
+    // §5.3: first candidate that is registered and highest in preference.
+    let chosen = choose_backend(&block.backends, backends, preference).ok_or_else(|| {
+        NotApplicable::NoRegisteredBackend {
+            candidates: block.backends.keys().map(BackendId::new).collect(),
+        }
+    })?;
+    Ok((block, chosen))
+}
+
 /// Resolve a single entry. Returns its outcome and, when resolved, the target
 /// key and lockfile package to record.
 fn resolve_entry(
@@ -252,21 +294,9 @@ fn resolve_entry(
     preference: &[BackendId],
     pinned: Option<&LockPackage>,
 ) -> Result<(Outcome, Option<(Target, LockPackage)>), ResolveError> {
-    // §5.4: the most specific install block that applies here, defaults merged.
-    let Some(block) = effective_block(entry, manifest, host, backends) else {
-        return Ok((Outcome::NotApplicable(NotApplicable::NoSelector), None));
-    };
-    if block.backends.is_empty() {
-        return Ok((Outcome::NotApplicable(NotApplicable::NoBackend), None));
-    }
-    // §5.3: first candidate that is registered and highest in preference.
-    let Some(chosen) = choose_backend(&block.backends, backends, preference) else {
-        return Ok((
-            Outcome::NotApplicable(NotApplicable::NoRegisteredBackend {
-                candidates: block.backends.keys().map(BackendId::new).collect(),
-            }),
-            None,
-        ));
+    let (block, chosen) = match applying(entry, manifest, host, backends, preference) {
+        Ok(applies) => applies,
+        Err(na) => return Ok((Outcome::NotApplicable(na), None)),
     };
 
     // §5.6: parse the spec under the backend's vers type; build the identity.
@@ -2454,6 +2484,28 @@ mod tests {
             r.outcomes[0].outcome,
             Outcome::NotApplicable(NotApplicable::NoBackend)
         );
+    }
+
+    #[test]
+    fn applicable_names_the_entries_a_registered_backend_installs_here() {
+        let apt = FakeIndex::new(Scheme::Debian, &["1.0-1"]);
+        let distro = debian();
+        let host = Host {
+            os: Os::Linux,
+            arch: Arch::Amd64,
+            distro: Some(&distro),
+            libc: None,
+        };
+        let m = manifest(
+            &[],
+            vec![
+                entry("jq", Some("*"), &[("linux", block(&["apt"], None, None))]),
+                entry("fd", Some("*"), &[("linux", block(&["brew"], None, None))]),
+                entry("bat", Some("*"), &[("darwin", block(&["apt"], None, None))]),
+                entry("tree", Some("*"), &[("linux", block(&[], Some("t"), None))]),
+            ],
+        );
+        assert_eq!(applicable(&m, &host, &[deb_backend(&apt)], &[]), ["jq"]);
     }
 
     #[test]

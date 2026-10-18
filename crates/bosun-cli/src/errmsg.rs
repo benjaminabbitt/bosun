@@ -9,6 +9,11 @@ pub const RENDER_STALE_LOCK: &str = "changed since it was locked";
 /// The remedy for a missing or stale lock.
 pub const RUN_LOCK: &str = "run `bosun lock`";
 
+/// `install --frozen` found a lock without an entry the manifest applies on
+/// this machine (one `install --scope` wrote first, or an older bosun's).
+pub const FROZEN_LOCK_INCOMPLETE: &str =
+    "the lock has no entry for what the manifest installs on this machine";
+
 /// Resolving for another machine needs a remote index none of an entry's
 /// backends has (§4.7).
 pub const RENDER_NO_REMOTE_INDEX: &str =

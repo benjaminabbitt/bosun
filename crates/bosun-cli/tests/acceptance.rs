@@ -964,6 +964,16 @@ fn docstring(step: &Step) -> String {
 
 // ---- actions ----------------------------------------------------------------
 
+/// The runs that follow are elevated, as under `sudo`.
+#[when("later runs are elevated")]
+fn later_runs_elevated(world: &mut BosunWorld) {
+    world
+        .machine
+        .as_mut()
+        .expect("describe the machine first")
+        .elevated = true;
+}
+
 #[when("the manifest is deleted")]
 fn delete_manifest(world: &mut BosunWorld) {
     let p = world.path();

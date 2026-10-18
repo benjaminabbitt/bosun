@@ -10,7 +10,7 @@ use bosun_core::record::{LockDocument, LockLeaf, LockPackage, Package, StateDocu
 use bosun_core::{BackendId, Distro, Libc, Manifest, Os, Scope, Spec, Target, Version};
 use bosun_io::{check_options, load_manifest, lock, manifest_hash};
 use bosun_ports::Installer;
-use bosun_resolve::{resolve, resolve_with_lock, NotApplicable, Outcome, Resolution};
+use bosun_resolve::{applicable, resolve, resolve_with_lock, NotApplicable, Outcome, Resolution};
 use serde::Serialize;
 use tracing::{debug, info, warn};
 
@@ -728,28 +728,21 @@ pub(crate) struct PendingLock {
     doc: LockDocument,
     /// The lock this one replaces, if any.
     previous: Option<LockDocument>,
-    /// The install scope of each package `install` planned for; one it left
-    /// out (its state unreadable) has none.
+    /// The install scope of each package `install` resolved.
     scopes: BTreeMap<String, Scope>,
 }
 
 impl PendingLock {
-    /// Keep the previous lock's entry (or no entry) for each package this
-    /// install did not apply: one in a scope `requested` leaves out, one whose
-    /// state the run left out, or one with a record `plan` defers to the next
-    /// elevated run (§4.5, §5.5).
-    pub(crate) fn only_applied(&mut self, requested: Option<Scope>, plan: &Plan) {
-        let deferred: BTreeSet<String> = plan.deferred().into_iter().map(|o| o.name).collect();
-        let applied = |name: &str| {
-            !deferred.contains(name)
-                && self
-                    .scopes
-                    .get(name)
-                    .is_some_and(|s| requested.is_none_or(|r| r == *s))
-        };
+    /// Keep the previous lock's entry (or no entry) for each package in a
+    /// scope `requested` leaves out (`--scope`, §5.5). Every other package
+    /// takes its resolved entry, a deferred record's and one whose state the
+    /// run left out too, so the next elevated `install --frozen` applies them
+    /// (§4.6).
+    pub(crate) fn only_requested_scope(&mut self, requested: Option<Scope>) {
+        let Some(requested) = requested else { return };
         let mut packages = Vec::new();
         for pkg in std::mem::take(&mut self.doc.packages) {
-            if applied(&pkg.name) {
+            if self.scopes.get(&pkg.name).is_none_or(|s| *s == requested) {
                 packages.push(pkg);
                 continue;
             }
@@ -1086,7 +1079,6 @@ pub fn install_plan(
 ) -> Result<(Plan, Option<PendingLock>), CliError> {
     let file = manifest_file(opts.path)?;
     let manifest = load(env, &file)?;
-    let hash = manifest_hash(&manifest);
     // Read state lazily per scope: a user-scope install must not touch (and
     // lock) root-owned system state it has no business reading.
     let mut state = ScopeCache::new(env);
@@ -1096,7 +1088,7 @@ pub fn install_plan(
     let claim_path = canonical_manifest(&file);
 
     let (managed, carried, pending) = if opts.frozen {
-        let lock = frozen_lock(env, &file, &claim_path, &hash)?;
+        let lock = frozen_lock(env, &file, &claim_path, &manifest, pref)?;
         let (managed, carried) = managed_from_lock(env, &claim_path, &lock, &mut state)?;
         (managed, carried, None)
     } else {
@@ -1209,6 +1201,7 @@ fn managed_from_resolution<'a>(
                 })?;
                 let vers_type = env.vers_type(backend).unwrap_or("generic").to_string();
                 let purl = leaf.placement.purl.clone();
+                scopes.insert(entry.name.clone(), installer.scope());
                 // A scope this run leaves out is not planned for (§4.6).
                 let Some(doc) = state.get(installer.scope())? else {
                     continue;
@@ -1236,7 +1229,8 @@ fn managed_from_resolution<'a>(
                     )
                     .map_err(|e| CliError::Resolve(e.to_string()))?
                 } else {
-                    version.clone() // accepted: bosun does not install it
+                    accepted_version(&current, &claims, &vers_type)
+                        .unwrap_or_else(|| version.clone())
                 };
                 let resolved = following_the_tool(
                     &entry.name,
@@ -1254,7 +1248,6 @@ fn managed_from_resolution<'a>(
                 let checksum = (resolved == leaf.resolved)
                     .then(|| leaf.checksum.clone())
                     .flatten();
-                scopes.insert(entry.name.clone(), installer.scope());
                 managed.push(Managed {
                     name: entry.name.clone(),
                     purl,
@@ -1288,12 +1281,12 @@ fn managed_from_resolution<'a>(
 /// What [`managed_from_resolution`] decided: the packages to plan for, the
 /// diagnostics resolution carried, and each package whose end version follows
 /// the package manager's move or every claim's choice rather than the lock,
-/// by name and target, and the scope of each package planned for.
+/// by name and target, and the scope of each package resolved.
 struct Resolved<'a> {
     managed: Vec<Managed<'a>>,
     carried: Vec<Diagnostic>,
     followed: Vec<(String, Target, Version)>,
-    /// Each planned package's install scope.
+    /// Each resolved package's install scope.
     scopes: BTreeMap<String, Scope>,
 }
 
@@ -1465,6 +1458,18 @@ fn following_the_tool(
     resolved.max(now.clone())
 }
 
+/// The version an accepted package ends at: the one on the machine, when it is
+/// known and every claim admits it, so the lock pins what is installed (§4.6).
+fn accepted_version(current: &Current, claims: &[Claim], vers_type: &str) -> Option<Version> {
+    let Current::Present {
+        version: Some(now), ..
+    } = current
+    else {
+        return None;
+    };
+    bosun_apply::satisfies_all(now, claims, vers_type).then(|| now.clone())
+}
+
 /// Whether bosun would install/upgrade/downgrade (so it needs a resolved
 /// version). A package present but not bosun-owned (`accepted`) is left alone.
 fn needs_resolution(current: &Current) -> bool {
@@ -1526,7 +1531,8 @@ fn frozen_lock(
     env: &Env,
     file: &Path,
     claim_path: &Path,
-    hash: &str,
+    manifest: &Manifest,
+    pref: &[BackendId],
 ) -> Result<LockDocument, CliError> {
     let lock = this_lock(env, claim_path)?.ok_or_else(|| {
         CliError::Resolve(format!(
@@ -1534,10 +1540,23 @@ fn frozen_lock(
             file.display()
         ))
     })?;
-    if lock.manifest_hash != hash {
+    if lock.manifest_hash != manifest_hash(manifest) {
         return Err(CliError::Resolve(format!(
             "--frozen: {} changed since it was locked; run `bosun lock`",
             file.display()
+        )));
+    }
+    // A lock `install --scope` wrote first lacks the other scope's entries.
+    let missing: Vec<&str> = applicable(manifest, &env.host(), &env.resolvables(), pref)
+        .into_iter()
+        .filter(|name| !lock.packages.iter().any(|p| p.name == *name))
+        .collect();
+    if !missing.is_empty() {
+        return Err(CliError::Resolve(format!(
+            "--frozen: {}: {}; {}",
+            crate::errmsg::FROZEN_LOCK_INCOMPLETE,
+            missing.join(", "),
+            crate::errmsg::RUN_LOCK
         )));
     }
     Ok(lock)
@@ -1876,6 +1895,26 @@ mod tests {
     }
 
     #[test]
+    fn an_accepted_package_ends_at_the_version_on_the_machine_when_every_claim_admits_it() {
+        let accept = |v: Option<&str>, spec: &str| {
+            let current = Current::Present {
+                version: v.map(deb),
+                origin: Origin::Accepted,
+                claimed_by: Vec::new(),
+                held: false,
+            };
+            accepted_version(&current, &wanting(spec), "deb").map(|v| v.as_str().to_string())
+        };
+        assert_eq!(accept(Some("1.1-1"), ">=1.0").as_deref(), Some("1.1-1"));
+        assert_eq!(accept(Some("1.1-1"), ">=1.2"), None);
+        assert_eq!(accept(None, ">=1.0"), None);
+        assert_eq!(
+            accepted_version(&Current::Absent, &wanting(">=1.0"), "deb"),
+            None
+        );
+    }
+
+    #[test]
     fn a_package_the_package_manager_moved_up_within_the_spec_stays_there() {
         assert_eq!(
             follow(&at("1.2-1"), Some("1.1-1"), ">=1.0", "1.1-1"),
@@ -1962,13 +2001,13 @@ mod tests {
             .collect()
     }
 
-    /// A pending lock moving jq (system), rg (user) and fd (left out: no
-    /// scope) to 2.0-1, from a previous lock pinning jq and fd at 1.0-1.
+    /// A pending lock moving jq (system), rg (user) and fd (no scope
+    /// recorded) to 2.0-1, from a previous lock pinning jq and rg at 1.0-1.
     fn pending() -> PendingLock {
         PendingLock {
             path: PathBuf::from("/l.json"),
             doc: locked(&[("jq", "2.0-1"), ("rg", "2.0-1"), ("fd", "2.0-1")]),
-            previous: Some(locked(&[("jq", "1.0-1"), ("fd", "1.0-1")])),
+            previous: Some(locked(&[("jq", "1.0-1"), ("rg", "1.0-1")])),
             scopes: BTreeMap::from([
                 ("jq".to_string(), Scope::System),
                 ("rg".to_string(), Scope::User),
@@ -1976,61 +2015,37 @@ mod tests {
         }
     }
 
-    fn empty_plan() -> Plan {
-        Plan {
-            actions: Vec::new(),
-            diagnostics: Vec::new(),
-        }
-    }
-
     #[test]
-    fn the_lock_takes_every_applied_scope_and_keeps_what_was_left_out() {
+    fn without_scope_the_lock_takes_every_resolved_entry() {
         let mut lock = pending();
-        lock.only_applied(None, &empty_plan());
+        lock.only_requested_scope(None);
         assert_eq!(
             pins(&lock.doc),
-            owned(&[("jq", "2.0-1"), ("rg", "2.0-1"), ("fd", "1.0-1")])
+            owned(&[("jq", "2.0-1"), ("rg", "2.0-1"), ("fd", "2.0-1")])
         );
     }
 
     #[test]
-    fn a_scope_the_install_was_narrowed_away_from_keeps_its_pins_or_none() {
+    fn a_scope_the_install_was_narrowed_away_from_keeps_its_pins() {
         let mut user = pending();
-        user.only_applied(Some(Scope::User), &empty_plan());
+        user.only_requested_scope(Some(Scope::User));
         assert_eq!(
             pins(&user.doc),
-            owned(&[("jq", "1.0-1"), ("rg", "2.0-1"), ("fd", "1.0-1")])
+            owned(&[("jq", "1.0-1"), ("rg", "2.0-1"), ("fd", "2.0-1")])
         );
         let mut system = pending();
-        system.only_applied(Some(Scope::System), &empty_plan());
+        system.only_requested_scope(Some(Scope::System));
         assert_eq!(
             pins(&system.doc),
-            owned(&[("jq", "2.0-1"), ("fd", "1.0-1")])
+            owned(&[("jq", "2.0-1"), ("rg", "1.0-1"), ("fd", "2.0-1")])
         );
     }
 
     #[test]
-    fn a_deferred_record_keeps_its_pin() {
-        let plan = Plan {
-            actions: Vec::new(),
-            diagnostics: vec![Diagnostic::Deferred {
-                name: "jq".to_string(),
-                action: bosun_apply::ActionKind::Accept,
-            }],
-        };
-        let mut lock = pending();
-        lock.only_applied(None, &plan);
-        assert_eq!(
-            pins(&lock.doc),
-            owned(&[("jq", "1.0-1"), ("rg", "2.0-1"), ("fd", "1.0-1")])
-        );
-    }
-
-    #[test]
-    fn with_no_previous_lock_what_was_left_out_is_absent() {
+    fn with_no_previous_lock_a_scope_left_out_is_absent() {
         let mut lock = pending();
         lock.previous = None;
-        lock.only_applied(Some(Scope::User), &empty_plan());
-        assert_eq!(pins(&lock.doc), owned(&[("rg", "2.0-1")]));
+        lock.only_requested_scope(Some(Scope::User));
+        assert_eq!(pins(&lock.doc), owned(&[("rg", "2.0-1"), ("fd", "2.0-1")]));
     }
 }

@@ -181,7 +181,7 @@ fn dispatch(cli: &Cli, format: Format) -> Result<i32, CliError> {
                 Applied::Done(report) => {
                     // The lock follows what was installed, and only then.
                     if let Some(mut pending) = pending {
-                        pending.only_applied(requested, &built);
+                        pending.only_requested_scope(requested);
                         pending.write()?;
                     }
                     render(&report, format, &mut out).map_err(io_err)?;

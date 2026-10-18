@@ -144,6 +144,10 @@ Feature: accept, hold and privilege at system scope (apt)
     Then it succeeds
     And it does not say "jq"
     And the system state is unchanged
+    When I run `bosun install . --yes`
+    Then it succeeds
+    And the lock pins jq 1.7.1-6+deb13u2
+    And the system state is unchanged
 
   @unprivileged
   Scenario: elevated, system state that cannot be read is an error
@@ -270,11 +274,14 @@ Feature: accept, hold and privilege at system scope (apt)
     And the lock pins ripgrep 14.2.0
     And the lock pins jq 1.7.1-6+deb13u1
 
-  Scenario: a system record left to the next elevated run leaves the lock without it
+  # A deferred record still locks the package, at the version on the machine
+  # for an accept, so the elevated `install --frozen` that follows records it.
+  Scenario: a system record left to the next elevated run is locked, and --frozen records it
     Given a Debian trixie amd64 machine, not elevated
     And cargo 1.76.0 is available
     And cargo publishes ripgrep 14.1.1
-    And jq 1.7.1-6+deb13u2 is installed outside bosun
+    And apt publishes jq 1.7.1-6+deb13u1 and 1.7.1-6+deb13u2
+    And jq 1.7.1-6+deb13u1 is installed outside bosun
     And the manifest:
       """
       version: 2
@@ -292,4 +299,39 @@ Feature: accept, hold and privilege at system scope (apt)
     Then it succeeds
     And it says "accept     jq               recorded on the next elevated run"
     And the lock pins ripgrep 14.1.1
+    And the lock pins jq 1.7.1-6+deb13u1
+    When later runs are elevated
+    And I run `bosun --format text install . --frozen --yes`
+    Then it succeeds
+    And it says "accept     jq               applied"
+    And bosun has recorded jq 1.7.1-6+deb13u1
+
+  # The lock is written whole, so a lock without an entry that applies here
+  # (one --scope left out of a first lock) is not installed verbatim.
+  Scenario: install --frozen refuses a lock without an entry the manifest applies here
+    Given a Debian trixie amd64 machine, not elevated
+    And cargo 1.76.0 is available
+    And cargo publishes ripgrep 14.1.1
+    And the manifest:
+      """
+      version: 2
+      packages:
+        - name: jq
+          spec: ">=1.6"
+          install:
+            linux:debian: {backend: apt}
+        - name: ripgrep
+          spec: "*"
+          install:
+            linux: {backend: cargo}
+      """
+    When I run `bosun install . --scope user --yes`
+    Then it succeeds
+    And the lock pins ripgrep 14.1.1
     And the lock does not mention jq
+    When later runs are elevated
+    And I run `bosun --format text install . --frozen --yes`
+    Then it fails
+    And it reports "the lock has no entry for what the manifest installs on this machine: jq"
+    And it reports "run `bosun lock`"
+    And bosun has recorded nothing about jq

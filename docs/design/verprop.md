@@ -109,7 +109,7 @@ real to check later):
 |---|---|
 | `add <name> --backend … [--package] [--spec] [--on <selector>] [--opt k=v]` / `remove <name> [--plan] [--yes]` | edit one manifest entry, keeping every other byte, then run `lock` on the edited manifest. Both refuse a manifest older than the current version (run `migrate`). `add` writes under `any` when every backend is platform-independent, else this machine's OS, unless `--on` says; it checks the entry first (backend options, then a resolve on this machine) and writes nothing on error; without `--spec` it writes a default from the newest version: cargo and npm the caret range up to the next breaking one (`>=2.0.2\|<3.0.0`, below 1.0 the next minor), PyPI `>=X` as `uv add` writes, apt, dnf and apk `*`, following whatever the release's repositories carry (the distro's stable-update policy is the compatibility promise, and the selector already scopes the entry); it never installs. `remove` first releases the package (drops this manifest's claim, uninstalls only if bosun installed it and no other manifest claims it, behind the usual confirm), then edits and locks. Without elevation, a system-scope claim it would drop is refused before anything changes (`ReleaseNeedsElevation`, remedy `sudo bosun remove <name>`): unlike `install`'s records it cannot wait, since no later run would drop it (§5.5) |
 | `refresh` | explicit index refresh, per backend |
-| `install [path] [--plan] [--scope system\|user] [--yes]` | plan → privilege check → confirm → apply: resolve each entry against this machine's lock (its pins that still fit, the newest in spec for the rest), install, record in the machine state, then write the lock (only after a successful apply; never with `--plan`; a package whose scope the apply left out, by `--scope` or a record deferred without elevation, keeps its previous entry) (§4.8, §5.5, §7). **Never uninstalls** (except the old name in a `formerly` migration, §5.4) |
+| `install [path] [--plan] [--scope system\|user] [--yes]` | plan → privilege check → confirm → apply: resolve each entry against this machine's lock (its pins that still fit, the newest in spec for the rest), install, record in the machine state, then write the lock (only after a successful apply; never with `--plan`). The lock covers every entry that applies on this machine: only a package in a scope `--scope` left out keeps its previous entry, or stays absent; a record deferred without elevation and a package whose state the run left out are locked as resolved, an accept at the version on the machine (§4.6, §4.8, §5.5, §7). **Never uninstalls** (except the old name in a `formerly` migration, §5.4) |
 | `uninstall [path] [--plan] [--scope system\|user] [--yes]` | the inverse of `install` for one manifest: drop all of its claims, then uninstall each package bosun installed that no other manifest still claims; same plan → confirm → apply flow (§9) |
 | `prune [--plan] [--scope system\|user] [--yes]` | machine-wide cleanup: uninstall what bosun installed that no manifest claims any more, and drop claims whose manifest no longer exists (§9) |
 | `upgrade [pkg…] [--manifest]` | let go of the named pins (all, when none are named), re-resolve those packages to the newest version their spec allows, write this machine's lock, and show old → new; installs nothing |
@@ -118,7 +118,7 @@ real to check later):
 | `adopt <name>` | explicitly take ownership of an existing install: `accepted` → `installed` (§4.6) |
 | `lock` | resolve the manifest for this machine (its platform, plus platform-independent `any` entries) and write this machine's lock for it, keeping each version it already pins while that still fits (§4.5, §7). Warns when an older bosun's `bosun.lock` sits beside the manifest: it is no longer read |
 | `migrate [path] [--plan] [--yes]` | rewrite an older-version manifest as the current version (loading migrates in memory anyway; this writes it, so `add` / `remove` can edit it). annals edits only the entries the migration changes (`Loader::upgrade_keeping`), so comments elsewhere stay; when it can't edit in place it writes the whole file and says comments are not kept. It shows the result and confirms first (§4.8), and keeps the original as `<file>.v<N>` |
-| `install --frozen` | install exactly what this machine's lock records; never re-resolves, never writes the lock; errors when there is no lock for this manifest, or the manifest changed since it was locked (§7) |
+| `install --frozen` | install exactly what this machine's lock records; never re-resolves, never writes the lock; errors when there is no lock for this manifest, the manifest changed since it was locked, or the lock has no entry for one the manifest applies on this machine (naming it; remedy `bosun lock`) (§4.7, §7) |
 | `render args\|env [path] [--target <platform>]` / `render json [path] [--targets a,b]`, with `[--distro <id>@<release>] [--libc <family>]` | versions for a target platform as build args, env lines, or a JSON versions file (§8.3): this machine's from its lock, another machine's resolved through remote indexes (§4.7) |
 | `backends` | registered backends, their versions, and why others were skipped (§5.3) |
 
@@ -173,9 +173,9 @@ the same fields.
 > **DECIDED: the lock is the machine's own.** The manifest is about the packages and is
 > shared; the user config holds this machine's preferences; the lock records what *this
 > machine* resolved and is never shared or committed. `lock` and `upgrade` write it (`add` /
-> `remove` run `lock`), and `install` writes it after a successful apply, moving only the
-> packages that apply covered (§4.6); `install --frozen`
-> installs it verbatim. Earlier designs
+> `remove` run `lock`), and `install` writes it after a successful apply, for every entry
+> that applies on this machine but those in a scope `--scope` left out (§4.6);
+> `install --frozen` installs it verbatim. Earlier designs
 > committed one `bosun.lock` covering every declared platform (format version 1); that file
 > is no longer read, and `lock` warns when it finds one beside the manifest.
 
@@ -361,9 +361,12 @@ Only the header and the per-target leaf fields differ:
   end a package at a version this project's lock does not pin (the pin is outside their
   intersection), the lock pins the version installed, written once the install succeeds, so
   `install --frozen` afterwards changes nothing. A declined or failed install leaves the lock
-  as it was. Only what the install applied moves the lock: a package in a scope `--scope`
-  left out, one whose state the run left out (unreadable without elevation), or one whose
-  record waits for the next elevated run (§4.8) keeps its previous entry, or stays absent.
+  as it was. An accepted package is locked at the version on the machine, when every claim
+  admits it. Only `--scope` holds part of the lock back: a package in a scope it left out
+  keeps its previous entry, or stays absent. A package whose state the run left out
+  (unreadable without elevation) and one whose record waits for the next elevated run (§4.8)
+  are locked as resolved, so the elevated `install --frozen` that follows applies them rather
+  than skipping them under a lock whose manifest hash still matches.
 
 **Multiple OS users.** Claims in the *system* state file also record the claiming user
 (`"user": "babbitt"` alongside `manifest`), so prune and conflict checks in one user's project
@@ -398,7 +401,10 @@ writes an exact spec.
 
 **Freshness:** the lock records the `manifestHash` it was resolved against. Editing the
 manifest (not just its comments) makes it stale, and `install --frozen` refuses a stale or
-missing lock.
+missing lock, and one without an entry for a package the manifest applies on this machine (an
+install block matches it and names a registered backend, `bosun_resolve::applicable`): one
+`install --scope` wrote first, or an older bosun's that left deferred records out. The error
+names each missing entry (`FROZEN_LOCK_INCOMPLETE`), remedy `bosun lock`.
 
 **Remote indexes (apt built; the rest backend by backend)**, so one machine can resolve for
 another (`render --target`, §8.3, and container builds). Resolution is already split from
@@ -557,7 +563,8 @@ backend, package ID, from → to version, the claim(s) that drove it, and the pr
   or `drop-claim` changes only the system state, which only an elevated run writes (§4.6). It
   is left out of the plan as a note (`jq: accept recorded on the next elevated run`; JSON
   `deferred`), reported as such by apply, and planned again by the next elevated run; the
-  user-scope actions beside it still apply, and its lock entry stays as it was (§4.6). `install`, `uninstall` and `prune` defer;
+  user-scope actions beside it still apply, and it is locked as resolved, an accept at the
+  version on the machine (§4.6). `install`, `uninstall` and `prune` defer;
   `remove <name>` does not, since its manifest entry is gone afterwards: a system-scope
   claim it would drop is refused without elevation before the manifest is edited (§5.5).
 - **Index age** is shown for repo-bound backends, since planning uses whatever index is current
@@ -996,7 +1003,8 @@ root, because updating their index does.
   would land in root's home (and `$HOME` under sudo varies by distro), and Homebrew refuses to
   run as root. `--scope system|user` splits a mixed run:
   `sudo bosun install --scope system`, then `bosun install --scope user`. Each run moves
-  only its own scope's lock entries; the other scope's stay as they were (§4.6).
+  only its own scope's lock entries; the other scope's stay as they were (§4.6), and
+  `install --frozen` refuses a lock that lacks them (§4.7).
 - **Mixed plan, no `--scope` — DECIDED: fail**, printing the two commands to run. Never apply
   whichever half the current privilege allows, which would leave a half-applied manifest.
 - Under elevation, claims in system state are recorded for the **invoking user**, not root.
@@ -1737,7 +1745,8 @@ under a pty on Unix only.
 | TV-16 | `prune` (and `status`) count a claim whose manifest can't be checked (`try_exists` errors: permission denied) as present, logged at debug (`MANIFEST_UNCHECKED`) | landed; unit test with a directory this user may not search (skipped as root); red before: the claim counted as gone |
 | TV-17 | a release selector naming a derivative's own codename that is not its release warns with the release to use (`Distro::deb_release_for_own_codename`, `OWN_CODENAME_SELECTOR`), on load for this machine and in `render` for the target | landed; scenario: Mint 22 (`wilma`, `UBUNTU_CODENAME=noble`) with `linux:linuxmint@wilma` warns naming `linux:linuxmint@noble` and locks nothing; `@noble` locks jq without a warning |
 | TV-18 | without elevation, `remove <name>` whose release drops a system-scope claim fails before editing the manifest (`check_release_privilege`, `PrivilegeError::ReleaseNeedsElevation`, `RELEASE_NEEDS_ELEVATION`), remedy `sudo bosun remove <name>`; remove's other privilege remedies name the entry too | landed; scenario: jq accepted for this project in root's system state, `remove jq` fails naming `sudo bosun remove jq`, manifest and system state unchanged; red before: a raw state-lock permission error |
-| TV-19 | `install` writes only what it applied to the lock (`PendingLock::only_applied`): a package in a scope `--scope` left out, left out for unreadable state, or with a deferred record keeps its previous entry or stays absent | landed; scenarios: a mixed apt/cargo manifest, `install --scope user` moves ripgrep's pin to 14.2.0 and leaves jq's at 1.7.1-6+deb13u1 though its spec moved past it; an unelevated install deferring accept jq leaves jq out of a fresh lock; red before: both took the resolution's jq |
+| TV-19 | `install --scope` writes only its scope to the lock (`PendingLock::only_requested_scope`): a package in a scope it left out keeps its previous entry or stays absent | landed; scenario: a mixed apt/cargo manifest, `install --scope user` moves ripgrep's pin to 14.2.0 and leaves jq's at 1.7.1-6+deb13u1 though its spec moved past it; red before: it took the resolution's jq |
+| TV-20 | the lock covers every entry that applies here: a deferred record and a package whose state was left out are locked as resolved, an accept at the version on the machine (`accepted_version`); `install --frozen` refuses a lock without an entry the manifest applies here (`bosun_resolve::applicable`, `FROZEN_LOCK_INCOMPLETE`), remedy `bosun lock` | landed; scenarios: an unelevated install deferring accept jq locks jq 1.7.1-6+deb13u1 (on the machine; 13u2 published), then an elevated `install --frozen` records the accept; unreadable system state still locks jq; a first lock from `install --scope user` makes `install --frozen` fail naming jq; red before: jq left out of the lock, and `--frozen` planned nothing |
 
 **First real-host smoke run (2026-10-14, release build, Debian 13, read-only `--plan` and
 `lock` in a scratch dir).** `backends` found apt 3.0.3, cargo 1.96.1 and github-release; jq
