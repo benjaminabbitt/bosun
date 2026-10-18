@@ -221,6 +221,35 @@ Feature: bosun add and bosun remove edit the manifest, then lock
     And the manifest is unchanged
     And bosun has recorded ripgrep 14.1.1
 
+  # Removing an entry cleans up every scope it touches: a scope left behind
+  # would keep a claim no manifest entry stands for any more.
+  Scenario: remove refuses --scope before changing anything
+    Given the manifest:
+      """
+      version: 2
+      packages:
+        - name: ripgrep
+          spec: ">=14.0.0|<15.0.0"
+          install:
+            linux: {backend: cargo}
+      """
+    And bosun installed ripgrep 14.1.1 for this project wanting ">=14.0.0|<15.0.0"
+    When I run `bosun --format text remove ripgrep --scope user --yes`
+    Then it fails
+    And it reports "remove takes no --scope: removing an entry cleans up every install scope it touches"
+    And the manifest is unchanged
+    And bosun has recorded ripgrep 14.1.1
+    And no lock is written
+
+  Scenario: remove's help says why it takes no --scope, and uninstall's offers it
+    When I run `bosun remove --help`
+    Then it succeeds
+    And it says "every install scope the entry touches, so it takes no --scope"
+    And it does not say "--scope <"
+    When I run `bosun uninstall --help`
+    Then it succeeds
+    And it says "--scope <SCOPE>"
+
   Scenario: remove a name the manifest doesn't have fails
     Given the manifest:
       """

@@ -42,6 +42,7 @@ fn main() {
 
 /// Run the selected command, render its value, and return the exit code.
 fn dispatch(cli: &Cli, format: Format) -> Result<i32, CliError> {
+    refuse_remove_scope(&cli.command)?;
     // render may be for another machine, so it probes this one only when the
     // target is this machine (§4.7).
     if let Command::Render { style } = &cli.command {
@@ -76,8 +77,8 @@ fn dispatch(cli: &Cli, format: Format) -> Result<i32, CliError> {
             name,
             manifest,
             plan,
-            scope,
             yes,
+            ..
         } => {
             let removal = edit::prepare_remove(&env, name, manifest.clone())?;
             if *plan {
@@ -104,7 +105,7 @@ fn dispatch(cli: &Cli, format: Format) -> Result<i32, CliError> {
                 let m = Mutation {
                     command: &command,
                     plan_only: false,
-                    scope: scope.map(Into::into),
+                    scope: None,
                     yes: *yes,
                 };
                 match apply_mutation(&env, m, &removal.plan, format, &mut out)? {
@@ -234,6 +235,16 @@ fn dispatch(cli: &Cli, format: Format) -> Result<i32, CliError> {
             )
         }
     }
+}
+
+/// `remove --scope` is refused before anything runs: removing an entry cleans
+/// up every install scope it touches, and a scope left behind would keep a
+/// claim no entry stands for (§4.2).
+fn refuse_remove_scope(command: &Command) -> Result<(), CliError> {
+    if let Command::Remove { scope: Some(_), .. } = command {
+        return Err(CliError::Usage(errmsg::REMOVE_NO_SCOPE.to_string()));
+    }
+    Ok(())
 }
 
 /// Where `render` reads the target from, if anywhere: `--image` or `--rootfs`.

@@ -81,7 +81,8 @@ pub enum Command {
         manifest: Option<PathBuf>,
     },
     /// Remove a package from the manifest, uninstall it if bosun installed it
-    /// and nothing else wants it, then lock.
+    /// and nothing else wants it, then lock. It cleans up every install scope
+    /// the entry touches, so it takes no --scope.
     Remove {
         /// bosun's name for the package.
         name: String,
@@ -91,8 +92,8 @@ pub enum Command {
         /// Show what would happen and stop (changes nothing).
         #[arg(long)]
         plan: bool,
-        /// Restrict the uninstall to one install scope.
-        #[arg(long, value_enum)]
+        /// Refused: removing an entry cleans up every install scope it touches.
+        #[arg(long, value_enum, hide = true)]
         scope: Option<ScopeArg>,
         /// Skip the confirmation prompt.
         #[arg(long)]

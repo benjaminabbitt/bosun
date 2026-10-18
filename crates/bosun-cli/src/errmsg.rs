@@ -9,6 +9,9 @@ pub const RENDER_STALE_LOCK: &str = "changed since it was locked";
 /// The remedy for a missing or stale lock.
 pub const RUN_LOCK: &str = "run `bosun lock`";
 
+/// `remove` was given `--scope`, which it refuses.
+pub const REMOVE_NO_SCOPE: &str = "remove takes no --scope: removing an entry cleans up every install scope it touches, so no claim outlives it; run it without --scope (elevated when it drops a system-scope claim)";
+
 /// `install --frozen` found a lock without an entry the manifest applies on
 /// this machine (one `install --scope` wrote first, or an older bosun's).
 pub const FROZEN_LOCK_INCOMPLETE: &str =
