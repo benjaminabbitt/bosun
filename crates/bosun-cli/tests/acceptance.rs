@@ -1600,6 +1600,22 @@ fn installed_from(world: &mut BosunWorld, binary: String, asset: String) {
     assert_executable(&path);
 }
 
+/// An executable `binary` in the user's `~/.local/bin` that bosun did not
+/// put there.
+#[given(regex = r"^(\S+) is in ~/.local/bin, put there outside bosun$")]
+fn binary_outside_bosun(world: &mut BosunWorld, binary: String) {
+    world.path();
+    let dir = world.bin_dir();
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(&binary);
+    fs::write(&path, "#!/bin/sh\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
 #[then(regex = r"^(\S+) is not installed$")]
 fn not_installed(world: &mut BosunWorld, binary: String) {
     let path = world.bin_dir().join(&binary);

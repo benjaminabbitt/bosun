@@ -66,6 +66,22 @@ impl AsUser {
     pub fn uid(&self) -> u32 {
         self.uid
     }
+
+    /// The ids a child takes to become this user.
+    pub(crate) fn creds(&self) -> Creds {
+        Creds {
+            uid: Uid::from_raw(self.uid),
+            gid: Gid::from_raw(self.gid),
+            groups: self.groups.iter().copied().map(Gid::from_raw).collect(),
+        }
+    }
+}
+
+/// The ids a child drops to, made before the fork.
+pub(crate) struct Creds {
+    uid: Uid,
+    gid: Gid,
+    groups: Vec<Gid>,
 }
 
 /// `name`'s groups by the group database, with `gid` among them.
@@ -124,9 +140,7 @@ struct Prepared {
     dirs: Vec<CString>,
     /// The temp file a write goes to before it takes the file's name.
     tmp: CString,
-    uid: Uid,
-    gid: Gid,
-    groups: Vec<Gid>,
+    creds: Creds,
 }
 
 fn c_path(path: &Path) -> io::Result<CString> {
@@ -169,9 +183,7 @@ impl AsUser {
             path: c_path(path)?,
             dirs,
             tmp: c_path(&temp_beside(path))?,
-            uid: Uid::from_raw(self.uid),
-            gid: Gid::from_raw(self.gid),
-            groups: self.groups.iter().copied().map(Gid::from_raw).collect(),
+            creds: self.creds(),
         })
     }
 
@@ -214,7 +226,7 @@ impl AsUser {
 }
 
 /// Wait for the child; its exit code, or `-1` when a signal ended it.
-fn reap(child: nix::unistd::Pid) -> io::Result<i32> {
+pub(crate) fn reap(child: nix::unistd::Pid) -> io::Result<i32> {
     use nix::sys::wait::{waitpid, WaitStatus};
     loop {
         match waitpid(child, None) {
@@ -290,7 +302,7 @@ fn receive(sock: OwnedFd, op: &Op<'_>) -> io::Result<Answer> {
 
 /// Become the user, do `op`, answer on `sock`, and exit.
 fn child(p: &Prepared, op: &Op<'_>, sock: BorrowedFd<'_>) -> ! {
-    let code = match become_user(p) {
+    let code = match become_user(&p.creds) {
         Ok(()) => serve(p, op, sock),
         Err(e) => answer(sock, Err(e), None),
     };
@@ -302,7 +314,7 @@ fn child(p: &Prepared, op: &Op<'_>, sock: BorrowedFd<'_>) -> ! {
 /// Drop to the user's groups, group and user id. Root may set the groups;
 /// a process already the user keeps its own. Checked after, so a half-made
 /// change never does I/O.
-fn become_user(p: &Prepared) -> Result<(), Errno> {
+pub(crate) fn become_user(p: &Creds) -> Result<(), Errno> {
     let nix_errno = |e: nix::errno::Errno| Errno::from_raw_os_error(e as i32);
     if nix::unistd::geteuid().is_root() {
         set_groups(&p.groups)?;

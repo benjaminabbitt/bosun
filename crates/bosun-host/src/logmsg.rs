@@ -18,6 +18,16 @@ pub const OK_EXIT: &str = "command succeeded with a nonzero exit";
 /// in a child that has dropped to their ids.
 pub const AS_USER: &str = "file operation as the invoking user";
 
+/// A command runs as another user (the one who elevated this run), in a
+/// child that has dropped to their ids.
+pub const RUN_AS_USER: &str = "command as the invoking user";
+
+/// The environment commands run as the invoking user get: their `HOME`,
+/// `USER` and `LOGNAME`, and a `PATH` of their own tools' directories then
+/// this run's, each one they can reach; nothing else of root's.
+pub const RUN_AS_USER_ENV: &str =
+    "commands as the invoking user get their HOME, USER, LOGNAME and this PATH";
+
 /// The machine's C library was read from the loader `/bin/sh` asks for.
 pub const LIBC_DETECTED: &str = "libc detected";
 /// No libc could be read: no `/bin/sh`, a static one, or an unfamiliar loader.

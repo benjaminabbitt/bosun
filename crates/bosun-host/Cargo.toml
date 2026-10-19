@@ -25,9 +25,10 @@ ureq.workspace = true
 # euid/uid for the Linux privilege check; Windows asks `whoami /groups`. The passwd
 # database for the user who elevated a run, and their file I/O done as them:
 # nix forks and drops privileges, rustix makes the child's system calls without
-# allocating (paths as C strings, SCM_RIGHTS from a stack buffer).
+# allocating (paths as C strings, SCM_RIGHTS from a stack buffer, pipes and
+# dup2 onto the standard streams for a command run as the user).
 [target.'cfg(unix)'.dependencies]
-rustix = { workspace = true, features = ["fs", "net"] }
+rustix = { workspace = true, features = ["fs", "net", "pipe", "stdio"] }
 nix.workspace = true
 
 [lints]

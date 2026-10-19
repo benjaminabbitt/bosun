@@ -429,7 +429,8 @@ see every other user's claims on the same system package; under elevation that u
 who elevated (§5.5). User-scope state stays private to its user: an elevated run reads and
 writes the invoking user's, as them, never root's own (§4.5), so the drop-claim, claim and
 accept records an elevated `prune` or `install` makes at user scope land where the user's own
-runs read them. Changing a user-scope package itself still refuses elevation (§5.5).
+runs read them, and the user-scope backends report the user's installs, asked as them (§5.3).
+Changing a user-scope package itself still refuses elevation (§5.5).
 
 **Privilege — DECIDED: the user elevates bosun; bosun never elevates itself.** System scope
 runs under `sudo bosun …` (Linux/macOS) or from an Administrator terminal (Windows). bosun
@@ -755,6 +756,29 @@ trait BackendFactory {
 
 - An entry whose only allowed backend isn't registered is **not applicable here**: `install` and
   `status` report it ("apt not present"); it is not a crash.
+- **Under elevation, user-scope backends are probed and asked as the invoking user (DECIDED,
+  built).** What cargo, npm and uv report (installed versions, `cargo install --list`, `npm ls`,
+  `npm prefix -g`, `npm config get`, `npm pack --dry-run`, `uv tool list`, `uv pip compile`, and
+  each probe's `--version`) is the user's, so `sudo bosun status` shows the user's own installs at
+  their versions, not root's. Their commands go through `bosun_host::AsUserRunner`, a
+  `CommandRunner` that forks, drops to the user's groups, gid and uid exactly as `AsUser` does
+  (§4.5), moves to their home (`/` when it cannot) and execs. Everything the child needs is made
+  before the fork: the program's candidate paths along `PATH`, tried in order with `execve` as
+  `execvp` would (a missing one passed over, one the user may not run remembered and passed
+  over), the argument and environment arrays, and the pipes; the child resets the signal mask and
+  `SIGPIPE`, makes system calls only, and reports a failure to become the user or to run the
+  program on a close-on-exec status pipe before `_exit`. The environment is the user's, never
+  root's wholesale (`bosun_host::user_env`): `HOME`, `USER`, `LOGNAME`, and `PATH` =
+  `<home>/.local/bin`, `<home>/.cargo/bin` (where uv's, rustup's and bosun's own installers put
+  programs), then this run's `PATH` (sudo's `secure_path`), keeping only absolute directories the
+  user can reach (checked as them), each once, so `/root/.cargo/bin` is dropped; the command's
+  own variables are added. The `PATH` chosen is logged at debug (`RUN_AS_USER_ENV`). The user's
+  login `PATH` is not used: it would mean running their shell's startup files. A factory's probe
+  runs through the same runner (`ProbedBy`), so a tool only the user has (rustup's cargo) still
+  registers. github-release looks for a binary in the user's `<home>/.local/bin` as them
+  (`with_files`) and warns of it off the `PATH` above; cargo's config is read from
+  `<home>/.cargo`, not root's `CARGO_HOME`. Changing a user-scope package under elevation is still
+  refused (§5.5), and its steps would run through the run's own executor in any case.
 - `bosun backends` lists registered backends, their versions, and why the others were skipped
   (respects `--format`).
 
@@ -1066,7 +1090,9 @@ root, because updating their index does.
   command as given: `sudo bosun remove <name>`.
 - **Elevated, plan changes user scope** → `MustNotBeElevated`. Under sudo, user-scope installs
   would land in root's home (and `$HOME` under sudo varies by distro), and Homebrew refuses to
-  run as root. `--scope system|user` splits a mixed run:
+  run as root. Reading the user's scope is not changing it: an elevated run asks user-scope
+  backends what is installed as the invoking user (§5.3) and reads their state, lock, manifest
+  and config as them (§4.5), so planning and `status` see what the user's own runs would. `--scope system|user` splits a mixed run:
   `sudo bosun install --scope system`, then `bosun install --scope user`. Each run moves
   only its own scope's lock entries; the other scope's stay as they were (§4.6), and
   `install --frozen` refuses a lock that lacks them (§4.7).
@@ -1819,6 +1845,7 @@ under a pty on Unix only.
 | TV-25 | an elevating user the passwd database lacks (`SUDO_USER`, `DOAS_USER`) is an error before anything runs (`user_place` → `CliError::Environment`, `errmsg::INVOKER_UNKNOWN`, `INVOKER_NOT_IN_PASSWD`, `INVOKER_UNKNOWN_REMEDY`: add them to passwd, or run as root itself), not a warning and root's own state and lock; `XDG_STATE_HOME` set under elevation is warned of once (`logmsg::XDG_STATE_HOME_IGNORED`) | landed; scenarios: sudo by ghost makes `lock` fail naming ghost and the remedy, no lock anywhere; sudo with `XDG_STATE_HOME` set warns once and writes the user's lock under their home; unit test of the error text; red before: the lock went to root's state, and no warning |
 | TV-26 | under elevation the manifest is the invoking user's file too (§4.5): `FileAccess` gains `is_dir`, `canonicalize` and `write_in_place`; `manifest_file`, `load_checked`, `canonical_manifest`, `claim_manifest_path`, the `bosun.lock` warning, `add` / `remove` / `export` / `migrate` (and its `.v<N>` original) and `render` (`env::user_files`) go through `Env::user_files`; `AsUser` resolves by an `O_PATH` descriptor passed back by `SCM_RIGHTS` (`/proc/self/fd`, `F_GETPATH` on macOS) and writes in place, so a symlinked manifest stays one | landed; scenarios (seam, `-vv` logs the child's `exists` / `is directory` / `read` / `resolve` / `write in place` on the manifest; add through a symlinked manifest keeps the link and keys the lock by its target); real tier in `debian:13`: `sudo bosun install` of a manifest linked to a root-only `/etc` file fails `Permission denied`, `sudo bosun add` through a link to a root file in `/etc` fails and leaves it as it was; red before: the install read it and the add rewrote the `/etc` file |
 | TV-27 | under elevation the user config is the invoking user's (§5.3): `user_place` gives `<home>/.config/bosun/config.yaml` (`paths::config_under_home`), `XDG_CONFIG_HOME` set is warned of once (`logmsg::XDG_CONFIG_HOME_IGNORED`); `config_installer` reads it through `FileAccess` (`Env::user_side`, `env::user_side` for `render`). The seam gives elevated runs root's own `HOME` and drops `XDG_CONFIG_HOME`, as sudo does; the user's config is under their home | landed; scenarios: under sudo the user's `installer: [apt]` locks apt's ripgrep (read as them, logged), and with `XDG_CONFIG_HOME` naming a config preferring cargo, it is warned of once and not read; red before: the elevated run read root's own (none) and locked cargo's |
+| TV-28 | under elevation the user-scope backends' queries and probes run as the invoking user (§5.3): `bosun_host::AsUserRunner` (fork, `become_user` shared with `AsUser`, home as cwd, `execve` along prepared `PATH` candidates, status pipe; `RUN_AS_USER`, `RUN_AS_USER_ENV`, `RUN_AS_USER_CREDENTIALS` / `_STREAMS` / `_EXEC`) with `user_env` (`HOME`, `USER`, `LOGNAME`, `PATH` of `~/.local/bin`, `~/.cargo/bin`, then this run's, each reachable as them); `env::UserTools` gives cargo, npm and uv that runner and probes them through it (`ProbedBy`), github-release the user's `~/.local/bin` looked at as them (`GithubReleaseFactory::with_files`, `with_path_var`), cargo `<home>/.cargo`. The seam's github-release uses the invoking user's bin dir, root's own `state/root` home in root's login | landed; scenarios: under sudo a binary in the user's `~/.local/bin` is present, looked for as them (logged), and root's own login does not see it; real tier in `node:22-trixie-slim` (Debian 13): the user installs semver 7.6.0 with bosun, then 7.5.0 with npm under their `~/.npm-global`, and `sudo bosun status .` says `7.5.0 → 7.6.0 (outdated)`; red before: npm ran as root, found nothing under root's prefix, and status said `7.6.0 (up to date)` |
 
 **First real-host smoke run (2026-10-14, release build, Debian 13, read-only `--plan` and
 `lock` in a scratch dir).** `backends` found apt 3.0.3, cargo 1.96.1 and github-release; jq

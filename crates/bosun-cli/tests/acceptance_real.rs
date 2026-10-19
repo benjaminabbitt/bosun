@@ -930,6 +930,30 @@ fn binary_gone(w: &mut RealWorld, name: String) {
     assert!(!path.exists(), "{} still exists", path.display());
 }
 
+/// The non-root user runs `npm install -g <pkg>@<version>` themselves,
+/// outside bosun, with `HOME` their home (so npm reads their `~/.npmrc`).
+#[cfg(unix)]
+#[when(regex = r"^the non-root user has npm install (\S+)@(\S+) globally$")]
+fn npm_user_global(w: &mut RealWorld, pkg: String, version: String) {
+    let home = format!("HOME={}", w.home().display());
+    let spec = format!("{pkg}@{version}");
+    let (code, out) = run(
+        "runuser",
+        &[
+            "-u",
+            "bosuntest",
+            "--",
+            "env",
+            &home,
+            "npm",
+            "install",
+            "-g",
+            &spec,
+        ],
+    );
+    assert_eq!(code, 0, "npm install -g {spec}: {out}");
+}
+
 /// The non-root user's `~/.npmrc` sets npm's global prefix to `~/<dir>`.
 #[given(regex = r"^the non-root user's npm prefix is ~/(\S+)$")]
 fn npm_prefix(w: &mut RealWorld, dir: String) {

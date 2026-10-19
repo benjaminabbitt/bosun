@@ -840,6 +840,28 @@ Feature: real backends against a disposable container
 
   # npm resolves the spec itself: yarn's `latest` dist-tag is 1.22.22 though
   # 2.4.3 is published, and npm's picker prefers the tag.
+  # Under sudo a user-scope backend is asked as the invoking user (§5.3):
+  # npm runs as them with their HOME, reads their ~/.npmrc prefix and reports
+  # the version they have, not root's global packages.
+  @npm @useradd @runuser @sudo
+  Scenario: sudo bosun status shows the user's npm tool at the user's version
+    Given the manifest:
+      """
+      version: 2
+      packages:
+        - name: semver
+          spec: "7.6.0"
+          install: {backend: npm}
+      """
+    And the non-root user's npm prefix is ~/.npm-global
+    And a non-root user whose home is the project, and who may use sudo
+    When the non-root user runs `bosun install . --yes`
+    Then it succeeds
+    When the non-root user has npm install semver@7.5.0 globally
+    And the non-root user runs `sudo bosun --format text status .`
+    Then it succeeds
+    And it says "7.5.0 → 7.6.0 (outdated)"
+
   @npm @useradd @runuser
   Scenario: npm resolves the spec's range with its own picker
     Given the manifest:

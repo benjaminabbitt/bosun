@@ -17,6 +17,8 @@ pub mod machine;
 pub mod os_release;
 pub mod process;
 pub mod registry;
+#[cfg(unix)]
+pub mod run_as;
 
 #[cfg(unix)]
 pub use as_user::AsUser;
@@ -33,3 +35,5 @@ pub use machine::{
 pub use machine::{unix_privilege, LinuxMachine};
 pub use process::ProcessCommandRunner;
 pub use registry::{build_registry, RegisteredBackend, Registry, SkipReason, SkippedBackend};
+#[cfg(unix)]
+pub use run_as::{user_env, AsUserRunner};

@@ -74,7 +74,10 @@ impl Output {
 
 /// Runs external commands. The mutation side of a backend goes through this;
 /// it runs only on the local machine. `Send + Sync` so one runner can be
-/// shared across parallel backend probes (§5.3).
+/// shared across parallel backend probes (§5.3). Who a command runs as is
+/// the runner's: this process (`ProcessCommandRunner`), or, for an elevated
+/// run's user-scope backends, the user who elevated it, with their own
+/// environment (`bosun_host::AsUserRunner`).
 pub trait CommandRunner: Send + Sync {
     /// Run `command` to completion, capturing its output. A non-zero exit is
     /// **not** an `Err` — it is an `Output` with a non-zero `code`, so the

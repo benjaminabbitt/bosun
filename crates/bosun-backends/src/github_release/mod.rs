@@ -27,8 +27,8 @@ use bosun_core::{
     Target, Version,
 };
 use bosun_ports::{
-    ArchiveFormat, Backend, BackendFactory, HostInfo, HttpFetcher, HttpRequest, HttpResponse,
-    Index, Installer, PortError, Probe, Step, Steps, UserInstalls,
+    ArchiveFormat, Backend, BackendFactory, FileAccess, HostInfo, HttpFetcher, HttpRequest,
+    HttpResponse, Index, Installer, PortError, Probe, Step, Steps, UserInstalls,
 };
 use sha2::{Digest, Sha256};
 use tracing::warn;
@@ -41,6 +41,10 @@ mod template;
 
 const BACKEND: &str = "github-release";
 
+/// How the bin dir's files are asked after: as their user (§4.5), when an
+/// elevated run is for another.
+pub type BinFiles = Arc<dyn FileAccess + Send + Sync>;
+
 /// Builds the github-release backend. Always present (bosun does the fetching).
 pub struct GithubReleaseFactory {
     fetcher: Arc<dyn HttpFetcher>,
@@ -48,6 +52,8 @@ pub struct GithubReleaseFactory {
     os: Os,
     arch: Arch,
     libc: Option<LibcFamily>,
+    files: Option<BinFiles>,
+    path_var: Option<String>,
 }
 
 impl GithubReleaseFactory {
@@ -65,7 +71,23 @@ impl GithubReleaseFactory {
             os,
             arch,
             libc: None,
+            files: None,
+            path_var: None,
         }
+    }
+
+    /// Ask whether a binary is in the bin dir through `files`, as the bin
+    /// dir's user (§4.5), rather than as this process.
+    pub fn with_files(mut self, files: BinFiles) -> GithubReleaseFactory {
+        self.files = Some(files);
+        self
+    }
+
+    /// Warn of a bin dir off `path_var` (the `PATH` the bin dir's user runs
+    /// with), rather than off this process's `PATH`.
+    pub fn with_path_var(mut self, path_var: String) -> GithubReleaseFactory {
+        self.path_var = Some(path_var);
+        self
     }
 
     /// The host's C library family, for the `libc` and `rust_target` asset
@@ -100,7 +122,7 @@ impl BackendFactory for GithubReleaseFactory {
     }
 
     fn build(&self, _probe: Probe) -> Backend {
-        let path_var = std::env::var("PATH").unwrap_or_default();
+        let path_var = self.path_var();
         if needs_path_warning(&self.bin_dir, &path_var, self.os) {
             warn!(message = logmsg::BIN_DIR_NOT_ON_PATH, bin_dir = %self.bin_dir.display());
         }
@@ -118,6 +140,14 @@ impl BackendFactory for GithubReleaseFactory {
 }
 
 impl GithubReleaseFactory {
+    /// The `PATH` the bin dir is warned of being off: the one it was given,
+    /// else this process's.
+    fn path_var(&self) -> String {
+        self.path_var
+            .clone()
+            .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default())
+    }
+
     fn backend(&self) -> GithubReleaseBackend {
         GithubReleaseBackend {
             fetcher: self.fetcher.clone(),
@@ -126,6 +156,7 @@ impl GithubReleaseFactory {
             arch: self.arch,
             libc: self.libc,
             token: std::env::var("GITHUB_TOKEN").ok(),
+            files: self.files.clone(),
         }
     }
 }
@@ -160,6 +191,9 @@ struct GithubReleaseBackend {
     arch: Arch,
     libc: Option<LibcFamily>,
     token: Option<String>,
+    /// How a binary in the bin dir is looked for: as this process when
+    /// `None`.
+    files: Option<BinFiles>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -195,6 +229,7 @@ impl ReleaseLookup {
             arch,
             libc: None,
             token: std::env::var("GITHUB_TOKEN").ok(),
+            files: None,
         })
     }
 
@@ -641,7 +676,13 @@ impl Installer for GithubReleaseBackend {
         // no version — bosun state is the version authority (§4.6), so this can
         // never be mistaken for a version in a comparison.
         let path = self.bin_dir.join(self.installed_name(pkg));
-        Ok(if path.exists() {
+        let there = match &self.files {
+            Some(files) => files.exists(&path).map_err(|e| PortError::Backend {
+                detail: format!("{}: {e}", path.display()),
+            })?,
+            None => path.exists(),
+        };
+        Ok(if there {
             Installed::Present { version: None }
         } else {
             Installed::Absent
@@ -698,6 +739,7 @@ mod tests {
             arch: Arch::Amd64,
             libc: None,
             token: None,
+            files: None,
         }
     }
 
@@ -1379,6 +1421,96 @@ mod tests {
             b.verify_installed(&pkg).unwrap(),
             Installed::Present { version: None }
         );
+    }
+
+    /// File access that says what it was asked and finds only `there`.
+    struct Asked {
+        there: PathBuf,
+        asked: std::sync::Mutex<Vec<PathBuf>>,
+    }
+
+    impl FileAccess for Asked {
+        fn exists(&self, path: &Path) -> std::io::Result<bool> {
+            self.asked.lock().unwrap().push(path.to_path_buf());
+            if path.ends_with("denied") {
+                return Err(std::io::ErrorKind::PermissionDenied.into());
+            }
+            Ok(path == self.there)
+        }
+        fn is_dir(&self, _: &Path) -> std::io::Result<bool> {
+            unreachable!()
+        }
+        fn canonicalize(&self, _: &Path) -> std::io::Result<PathBuf> {
+            unreachable!()
+        }
+        fn read(&self, _: &Path) -> std::io::Result<Vec<u8>> {
+            unreachable!()
+        }
+        fn write(&self, _: &Path, _: &[u8]) -> std::io::Result<()> {
+            unreachable!()
+        }
+        fn write_in_place(&self, _: &Path, _: &[u8]) -> std::io::Result<()> {
+            unreachable!()
+        }
+        fn open_lock(&self, _: &Path, _: bosun_ports::LockOpen) -> std::io::Result<std::fs::File> {
+            unreachable!()
+        }
+    }
+
+    /// Under elevation the bin dir is the user's, asked after as them: what
+    /// this process sees there is not what counts.
+    #[test]
+    fn verify_installed_asks_the_bin_dir_s_files_when_given_them() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("ctxloom"), b"bin").unwrap();
+        let asked = Arc::new(Asked {
+            there: dir.path().join("duf"),
+            asked: std::sync::Mutex::default(),
+        });
+        let factory = GithubReleaseFactory::new(
+            Arc::new(FakeHttpFetcher::new()),
+            dir.path().to_path_buf(),
+            Os::Linux,
+            Arch::Amd64,
+        )
+        .with_files(asked.clone());
+        let b = factory.backend();
+        assert_eq!(
+            b.verify_installed(&gh("pkg:github/ctxloom/ctxloom"))
+                .unwrap(),
+            Installed::Absent
+        );
+        assert_eq!(
+            b.verify_installed(&gh("pkg:github/muesli/duf")).unwrap(),
+            Installed::Present { version: None }
+        );
+        assert_eq!(
+            *asked.asked.lock().unwrap(),
+            [dir.path().join("ctxloom"), dir.path().join("duf")]
+        );
+        let err = b.verify_installed(&gh("pkg:github/o/denied")).unwrap_err();
+        assert!(matches!(err, PortError::Backend { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn the_path_warning_reads_the_path_it_is_given() {
+        let factory = |path_var: &str| {
+            GithubReleaseFactory::new(
+                Arc::new(FakeHttpFetcher::new()),
+                PathBuf::from("/home/x/.local/bin"),
+                Os::Linux,
+                Arch::Amd64,
+            )
+            .with_path_var(path_var.to_string())
+        };
+        assert_eq!(factory("/usr/bin:/sbin").path_var(), "/usr/bin:/sbin");
+        let own = GithubReleaseFactory::new(
+            Arc::new(FakeHttpFetcher::new()),
+            PathBuf::from("/b"),
+            Os::Linux,
+            Arch::Amd64,
+        );
+        assert_eq!(own.path_var(), std::env::var("PATH").unwrap_or_default());
     }
 
     #[test]

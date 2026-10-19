@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use bosun_apply::{ApplyReport, Driver, HostApplier, Plan};
 use bosun_backends::apt::remote::TargetRoot;
+use bosun_backends::github_release::BinFiles;
 use bosun_backends::{
     AptFactory, CargoFactory, ChocoFactory, DnfFactory, GithubInstallerFactory,
     GithubPackageFactory, GithubReleaseFactory, NpmFactory, PackageKind, ScoopFactory, UvFactory,
@@ -31,8 +32,8 @@ use bosun_io::{DirectFiles, FileStateStore};
 use bosun_ports::backend::{Index, Installer};
 use bosun_ports::StateStore;
 use bosun_ports::{
-    Backend, BackendFactory, CommandRunner, Elevation, FileAccess, HostInfo, HttpFetcher, Machine,
-    PortError, Privilege, StepRunner, User,
+    Backend, BackendFactory, BackendMeta, CommandRunner, Elevation, FileAccess, HostInfo,
+    HttpFetcher, Machine, PortError, Privilege, Probe, StepRunner, User,
 };
 use bosun_resolve::{Host, ResolvableBackend};
 
@@ -529,8 +530,8 @@ pub fn remote(
             let fetcher: Arc<dyn HttpFetcher> = Arc::new(UreqHttpFetcher::new());
             let factories = factories_for(
                 Arc::new(NoPrograms),
+                &UserTools::own(home_dir(), Arc::new(NoPrograms)),
                 fetcher,
-                &home_dir(),
                 (os, arch, libc),
                 &host_cache()?,
                 RemoteApt {
@@ -579,8 +580,8 @@ fn remote_from_fixture(
     let fx = read_fixture(path)?;
     let factories = factories_for(
         Arc::new(NoPrograms),
+        &UserTools::own(PathBuf::from(state_dir).join("home"), Arc::new(NoPrograms)),
         canned_fetcher(&fx.http)?,
-        &PathBuf::from(state_dir).join("home"),
         (os, arch, libc),
         &PathBuf::from(state_dir).join("cache"),
         RemoteApt { root, local: None },
@@ -679,27 +680,150 @@ fn system_cache() -> PathBuf {
     }
 }
 
-/// Every compiled-in backend factory, built (not probed), for a user whose
-/// home is `home`. The schemes map is taken from these so a backend absent
-/// this run is still known (§6). `cache` is where remote indexes keep what
-/// they fetch (§4.7).
+/// Every compiled-in backend factory, built (not probed): system-scope ones
+/// running their programs through `runner`, user-scope ones for `user`. The
+/// schemes map is taken from these so a backend absent this run is still
+/// known (§6). `cache` is where remote indexes keep what they fetch (§4.7).
 fn compiled_in_factories(
     runner: Arc<dyn CommandRunner>,
+    user: &UserTools,
     fetcher: Arc<dyn HttpFetcher>,
-    home: &Path,
-    os: Os,
-    arch: Arch,
-    libc: Option<LibcFamily>,
+    (os, arch, libc): (Os, Arch, Option<LibcFamily>),
     cache: &Path,
 ) -> Vec<Box<dyn BackendFactory>> {
     factories_for(
         runner,
+        user,
         fetcher,
-        home,
         (os, arch, libc),
         cache,
         RemoteApt::default(),
     )
+}
+
+/// Whom a run's user-scope backends (cargo, npm, uv, github-release) are
+/// for (§5.3): the home they look in and its cargo home, how their programs
+/// run, to query and to probe, and how the release bin dir is looked at.
+struct UserTools {
+    home: PathBuf,
+    cargo_home: PathBuf,
+    runner: Arc<dyn CommandRunner>,
+    /// As the bin dir's user, when not this process.
+    bin_files: Option<BinFiles>,
+    /// The `PATH` the user's programs run with, when not this process's.
+    path_var: Option<String>,
+}
+
+impl UserTools {
+    /// This account's own: its home and `CARGO_HOME`, its programs run by
+    /// `runner`, its files its own.
+    fn own(home: PathBuf, runner: Arc<dyn CommandRunner>) -> UserTools {
+        UserTools {
+            cargo_home: cargo_home(&home, std::env::var_os("CARGO_HOME")),
+            home,
+            runner,
+            bin_files: None,
+            path_var: None,
+        }
+    }
+
+    /// The user's who elevated the run, as them (§5.3): their passwd home
+    /// and its `~/.cargo` (root's `CARGO_HOME` is not theirs), programs run
+    /// as them with their own environment ([`bosun_host::user_env`]), and
+    /// their bin dir looked at as them.
+    #[cfg(unix)]
+    fn invoker(user: &Invoker) -> UserTools {
+        let runner =
+            bosun_host::AsUserRunner::invoker(user, bosun_io::paths::env_var("PATH").as_deref());
+        UserTools {
+            home: user.home.clone(),
+            cargo_home: user.home.join(".cargo"),
+            path_var: Some(runner.path_var()),
+            runner: Arc::new(runner),
+            bin_files: Some(Arc::new(bosun_host::AsUser::invoker(user))),
+        }
+    }
+
+    /// For `place`'s user: the invoking user's under elevation, else this
+    /// account's, whose programs `runner` runs.
+    #[cfg(unix)]
+    fn for_place(place: &UserPlace, runner: Arc<dyn CommandRunner>) -> UserTools {
+        match &place.invoker {
+            Some(user) => UserTools::invoker(user),
+            None => UserTools::own(home_dir(), runner),
+        }
+    }
+
+    /// Windows elevation keeps the user's own account, so its own tools.
+    #[cfg(not(unix))]
+    fn for_place(_place: &UserPlace, runner: Arc<dyn CommandRunner>) -> UserTools {
+        UserTools::own(home_dir(), runner)
+    }
+
+    /// Where bosun installs release binaries for this user.
+    fn bin_dir(&self) -> PathBuf {
+        user_bin_dir(&self.home)
+    }
+
+    /// The release backend for this user: their bin dir, looked at as them.
+    fn release(
+        &self,
+        fetcher: Arc<dyn HttpFetcher>,
+        (os, arch, libc): (Os, Arch, Option<LibcFamily>),
+    ) -> GithubReleaseFactory {
+        let mut factory =
+            GithubReleaseFactory::new(fetcher, self.bin_dir(), os, arch).with_libc(libc);
+        if let Some(files) = &self.bin_files {
+            factory = factory.with_files(files.clone());
+        }
+        if let Some(path_var) = &self.path_var {
+            factory = factory.with_path_var(path_var.clone());
+        }
+        factory
+    }
+
+    /// `factory`, probed through this user's runner, as its queries run.
+    fn probed(&self, factory: impl BackendFactory + 'static) -> Box<dyn BackendFactory> {
+        Box::new(ProbedBy {
+            factory: Box::new(factory),
+            runner: self.runner.clone(),
+        })
+    }
+}
+
+/// A user-scope backend's factory whose probe runs its program through
+/// `runner`, as its queries do (§5.3): under elevation, as the invoking
+/// user, who has the tool root may not.
+struct ProbedBy {
+    factory: Box<dyn BackendFactory>,
+    runner: Arc<dyn CommandRunner>,
+}
+
+impl BackendFactory for ProbedBy {
+    fn id(&self) -> BackendId {
+        self.factory.id()
+    }
+
+    fn meta(&self) -> BackendMeta {
+        self.factory.meta()
+    }
+
+    fn probe(&self, host: &HostInfo) -> Result<Option<Probe>, PortError> {
+        self.factory.probe(&HostInfo {
+            os: host.os,
+            arch: host.arch,
+            distro: host.distro,
+            runner: self.runner.as_ref(),
+        })
+    }
+
+    fn build(&self, probe: Probe) -> Backend {
+        self.factory.build(probe)
+    }
+
+    fn remote_index(&self) -> Option<Box<dyn Index>> {
+        self.factory.remote_index()
+    }
 }
 
 /// What apt's remote index is given beyond the platform (§4.7).
@@ -715,8 +839,8 @@ struct RemoteApt {
 /// what apt's remote index is given of it.
 fn factories_for(
     runner: Arc<dyn CommandRunner>,
+    user: &UserTools,
     fetcher: Arc<dyn HttpFetcher>,
-    home: &Path,
     (os, arch, libc): (Os, Arch, Option<LibcFamily>),
     cache: &Path,
     apt: RemoteApt,
@@ -744,18 +868,15 @@ fn factories_for(
         Box::new(apt_factory),
         Box::new(DnfFactory::new(runner.clone())),
         Box::new(bosun_backends::ApkFactory::new(runner.clone())),
-        Box::new(
-            CargoFactory::new(runner.clone(), fetcher.clone()).with_config(
+        user.probed(
+            CargoFactory::new(user.runner.clone(), fetcher.clone()).with_config(
                 std::env::current_dir().unwrap_or_default(),
-                cargo_home(home, std::env::var_os("CARGO_HOME")),
+                user.cargo_home.clone(),
             ),
         ),
-        Box::new(NpmFactory::new(runner.clone(), fetcher.clone(), os)),
-        Box::new(UvFactory::new(runner.clone(), fetcher.clone())),
-        Box::new(
-            GithubReleaseFactory::new(fetcher.clone(), user_bin_dir(home), os, arch)
-                .with_libc(libc),
-        ),
+        user.probed(NpmFactory::new(user.runner.clone(), fetcher.clone(), os)),
+        user.probed(UvFactory::new(user.runner.clone(), fetcher.clone())),
+        Box::new(user.release(fetcher.clone(), (os, arch, libc))),
         package(PackageKind::Deb),
         package(PackageKind::Rpm),
         Box::new(WingetFactory::new(runner.clone())),
@@ -828,25 +949,14 @@ fn host_machine(
     distro: Option<Distro>,
     libc: Option<Libc>,
     system: PathBuf,
-    user: PathBuf,
+    place: &UserPlace,
     _runner: &dyn CommandRunner,
-) -> Result<(Box<dyn Machine>, UserPlace), CliError> {
-    let machine = LinuxMachine::new(arch, distro, libc, system, user.clone());
-    let place = user_place(
-        Os::Linux,
-        machine.privilege(),
-        Own {
-            state: user,
-            config: own_config(),
-        },
-        bosun_io::paths::env_var,
-        bosun_host::passwd_account,
-    )?;
-    let machine = match place.invoking_user() {
-        Some(invoker) => machine.invoked_by(invoker, place.state.clone()),
-        None => machine,
-    };
-    Ok((Box::new(machine), place))
+) -> Box<dyn Machine> {
+    let machine = LinuxMachine::new(arch, distro, libc, system, place.state.clone());
+    match place.invoking_user() {
+        Some(invoker) => Box::new(machine.invoked_by(invoker, place.state.clone())),
+        None => Box::new(machine),
+    }
 }
 
 /// The real machine for `os`: privilege, user and distro read once here.
@@ -857,26 +967,20 @@ fn host_machine(
     _distro: Option<Distro>,
     _libc: Option<Libc>,
     system: PathBuf,
-    user: PathBuf,
+    place: &UserPlace,
     runner: &dyn CommandRunner,
-) -> Result<(Box<dyn Machine>, UserPlace), CliError> {
+) -> Box<dyn Machine> {
     let invoking = User {
         name: std::env::var("USERNAME").unwrap_or_default(),
         uid: None,
     };
-    let place = UserPlace {
-        state: user.clone(),
-        config: own_config(),
-        invoker: None,
-    };
-    let machine = bosun_host::WindowsMachine::new(
+    Box::new(bosun_host::WindowsMachine::new(
         arch,
         bosun_host::windows_privilege(runner),
         invoking,
         system,
-        user,
-    );
-    Ok((Box::new(machine), place))
+        place.state.clone(),
+    ))
 }
 
 /// Whose user state, lock and files this host's run uses ([`user_place`]),
@@ -910,7 +1014,7 @@ fn from_host() -> Result<Env, CliError> {
     let runner: Arc<dyn CommandRunner> = Arc::new(ProcessCommandRunner);
     let arch = detect_arch(runner.as_ref()).map_err(env_err)?;
     let system = bosun_io::paths::state_path(Scope::System).map_err(env_err)?;
-    let user = bosun_io::paths::state_path(Scope::User).map_err(env_err)?;
+    let place = host_place()?;
 
     let (distro, libc) = match os {
         Os::Linux => (
@@ -922,11 +1026,9 @@ fn from_host() -> Result<Env, CliError> {
     let fetcher: Arc<dyn HttpFetcher> = Arc::new(UreqHttpFetcher::new());
     let factories = compiled_in_factories(
         runner.clone(),
+        &UserTools::for_place(&place, runner.clone()),
         fetcher.clone(),
-        &home_dir(),
-        os,
-        arch,
-        libc.as_ref().map(|l| l.family),
+        (os, arch, libc.as_ref().map(|l| l.family)),
         &host_cache()?,
     );
     // §6: the version scheme for a backend comes from its factory metadata and
@@ -967,7 +1069,7 @@ fn from_host() -> Result<Env, CliError> {
         })
         .collect();
 
-    let (machine, place) = host_machine(arch, distro, libc, system.clone(), user, runner.as_ref())?;
+    let machine = host_machine(arch, distro, libc, system.clone(), &place, runner.as_ref());
     let files = place.files();
     Ok(Env {
         state: FileStateStore::new(system, place.state.clone(), schemes.clone())
@@ -1026,6 +1128,44 @@ fn fixture_home(fx: &Fixture, state_dir: &str) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(state_dir).join("home"))
 }
 
+/// The home of the account the seam's run is: the seam's user's, or, when
+/// elevated, root's own, a home of its own in the state dir.
+fn fixture_own_home(fx: &Fixture, state_dir: &str) -> PathBuf {
+    match fixture_privilege(fx) {
+        Privilege::Elevated => PathBuf::from(state_dir).join("root"),
+        Privilege::Unelevated => fixture_home(fx, state_dir),
+    }
+}
+
+/// The seam's user-scope tools for `place`'s user: under elevation the
+/// invoking user's home and bin dir, looked at as them; else the home of
+/// the account the run is. The seam runs no programs of theirs.
+fn fixture_tools(place: &UserPlace, own_home: PathBuf) -> UserTools {
+    let runner: Arc<dyn CommandRunner> = Arc::new(bosun_ports::testing::FakeCommandRunner::new());
+    match &place.invoker {
+        Some(user) => UserTools {
+            home: user.home.clone(),
+            cargo_home: user.home.join(".cargo"),
+            runner,
+            bin_files: bin_files_as(user),
+            path_var: None,
+        },
+        None => UserTools::own(own_home, runner),
+    }
+}
+
+/// The bin dir's files as `user` (§4.5).
+#[cfg(unix)]
+fn bin_files_as(user: &Invoker) -> Option<BinFiles> {
+    Some(Arc::new(bosun_host::AsUser::invoker(user)))
+}
+
+/// Windows elevation keeps the user's own account, so its own files.
+#[cfg(not(unix))]
+fn bin_files_as(_user: &Invoker) -> Option<BinFiles> {
+    None
+}
+
 /// Whose user state, lock, config and files the seam's run uses
 /// ([`user_place`]). The seam's user keeps state under the default state dir
 /// of their home; an elevated run's own is root's, a home of its own in the
@@ -1035,10 +1175,7 @@ fn fixture_home(fx: &Fixture, state_dir: &str) -> PathBuf {
 fn fixture_place(fx: &Fixture, state_dir: &str) -> Result<UserPlace, CliError> {
     let (os, _) = fixture_platform(fx)?;
     let privilege = fixture_privilege(fx);
-    let own_home = match privilege {
-        Privilege::Elevated => PathBuf::from(state_dir).join("root"),
-        Privilege::Unelevated => fixture_home(fx, state_dir),
-    };
+    let own_home = fixture_own_home(fx, state_dir);
     user_place(
         os,
         privilege,
@@ -1063,6 +1200,7 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
     let place = fixture_place(&fx, state_dir)?;
     let privilege = fixture_privilege(&fx);
     let home = fixture_home(&fx, state_dir);
+    let own_home = fixture_own_home(&fx, state_dir);
     let distro = fx.distro.map(|d| Distro {
         id: d.id,
         id_like: d.id_like,
@@ -1086,9 +1224,10 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
     let user_name = fx.user.unwrap_or_else(|| "tester".to_string());
 
     let system = system_state_at(state_dir);
-    // Canned HTTP and a scratch bin dir for real backends (github-release).
+    // Canned HTTP and a scratch bin dir for real backends (github-release),
+    // the user's under elevation, as on a real host.
     let fetcher = canned_fetcher(&fx.http)?;
-    let bin_dir = user_bin_dir(&home);
+    let tools = fixture_tools(&place, own_home);
     let any_real = fx.backends.iter().any(|b| b.real);
     let packages: PackageDb = Arc::default();
     let cache_dir = PathBuf::from(state_dir).join("cache");
@@ -1107,7 +1246,7 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
             if b.real {
                 let places = RealPlaces {
                     fetcher: &fetcher,
-                    bin_dir: &bin_dir,
+                    user: &tools,
                     cache_dir: &cache_dir,
                     packages: &packages,
                 };
@@ -1153,12 +1292,10 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
     let fake_runner: Arc<dyn CommandRunner> =
         Arc::new(bosun_ports::testing::FakeCommandRunner::new());
     let mut option_keys = factory_option_keys(&compiled_in_factories(
-        fake_runner,
+        fake_runner.clone(),
+        &UserTools::own(home.clone(), fake_runner),
         fetcher.clone(),
-        &home,
-        os,
-        arch,
-        family,
+        (os, arch, family),
         &cache_dir,
     ));
     for b in &backends {
@@ -1217,11 +1354,16 @@ fn absent_backends(
 ) -> Result<Vec<Skipped>, CliError> {
     let no_programs: Arc<dyn CommandRunner> =
         Arc::new(bosun_ports::testing::FakeCommandRunner::new());
-    let factories: Vec<_> =
-        compiled_in_factories(no_programs.clone(), fetcher, home, os, arch, None, cache)
-            .into_iter()
-            .filter(|f| absent.iter().any(|id| id == f.id().as_str()))
-            .collect();
+    let factories: Vec<_> = compiled_in_factories(
+        no_programs.clone(),
+        &UserTools::own(home.to_path_buf(), no_programs.clone()),
+        fetcher,
+        (os, arch, None),
+        cache,
+    )
+    .into_iter()
+    .filter(|f| absent.iter().any(|id| id == f.id().as_str()))
+    .collect();
     if let Some(unknown) = absent
         .iter()
         .find(|id| !factories.iter().any(|f| f.id().as_str() == id.as_str()))
@@ -1255,7 +1397,8 @@ fn absent_backends(
 /// Where a fixture's real backends fetch from and install to.
 struct RealPlaces<'a> {
     fetcher: &'a Arc<dyn HttpFetcher>,
-    bin_dir: &'a std::path::Path,
+    /// Whose bin dir github-release installs to and looks in.
+    user: &'a UserTools,
     cache_dir: &'a std::path::Path,
     packages: &'a PackageDb,
 }
@@ -1287,13 +1430,9 @@ fn real_backend(
     };
     let factory: Box<dyn BackendFactory> = match id {
         "github-release" => Box::new(
-            GithubReleaseFactory::new(
-                places.fetcher.clone(),
-                places.bin_dir.to_path_buf(),
-                os,
-                arch,
-            )
-            .with_libc(libc),
+            places
+                .user
+                .release(places.fetcher.clone(), (os, arch, libc)),
         ),
         "github-deb" => package(PackageKind::Deb),
         "github-rpm" => package(PackageKind::Rpm),
@@ -1514,12 +1653,10 @@ mod tests {
         let runner: Arc<dyn CommandRunner> = Arc::new(ProcessCommandRunner);
         let fetcher: Arc<dyn HttpFetcher> = Arc::new(UreqHttpFetcher::new());
         let factories = compiled_in_factories(
-            runner,
+            runner.clone(),
+            &UserTools::own(PathBuf::from("/home/u"), runner),
             fetcher,
-            Path::new("/home/u"),
-            Os::Linux,
-            Arch::Amd64,
-            None,
+            (Os::Linux, Arch::Amd64, None),
             Path::new("/tmp/cache"),
         );
         let schemes = factory_schemes(&factories);
@@ -1537,12 +1674,10 @@ mod tests {
         let runner: Arc<dyn CommandRunner> = Arc::new(ProcessCommandRunner);
         let fetcher: Arc<dyn HttpFetcher> = Arc::new(UreqHttpFetcher::new());
         let factories = compiled_in_factories(
-            runner,
+            runner.clone(),
+            &UserTools::own(PathBuf::from("/home/u"), runner),
             fetcher,
-            Path::new("/home/u"),
-            Os::Linux,
-            Arch::Amd64,
-            None,
+            (Os::Linux, Arch::Amd64, None),
             Path::new("/tmp/cache"),
         );
         let keys = factory_option_keys(&factories);
@@ -1627,6 +1762,81 @@ mod tests {
             cargo_home(home, Some("/opt/cargo".into())),
             PathBuf::from("/opt/cargo")
         );
+    }
+
+    /// The programs `runner` was asked to run, each once.
+    fn programs(runner: &bosun_ports::testing::FakeCommandRunner) -> Vec<String> {
+        let mut seen: Vec<String> = runner.calls().into_iter().map(|c| c.program).collect();
+        seen.sort();
+        seen.dedup();
+        seen
+    }
+
+    /// The user-scope backends' probes run through the user's runner, as
+    /// their queries do; the system-scope ones through this process's.
+    #[test]
+    fn user_scope_backends_are_probed_through_the_user_s_runner() {
+        use bosun_ports::testing::{FakeCommandRunner, FakeHttpFetcher};
+        let root = Arc::new(FakeCommandRunner::new());
+        let user = Arc::new(FakeCommandRunner::new());
+        let tools = UserTools::own(PathBuf::from("/home/u"), user.clone());
+        let factories = compiled_in_factories(
+            root.clone(),
+            &tools,
+            Arc::new(FakeHttpFetcher::new()),
+            (Os::Linux, Arch::Amd64, None),
+            Path::new("/tmp/cache"),
+        );
+        let host = HostInfo {
+            os: Os::Linux,
+            arch: Arch::Amd64,
+            distro: None,
+            runner: root.as_ref(),
+        };
+        let registry = build_registry(factories, &host);
+        assert_eq!(programs(&user), ["cargo", "npm", "uv"]);
+        let by_root = programs(&root);
+        assert!(
+            by_root
+                .iter()
+                .any(|p| p == "apt-cache" || p == "apt-get" || p == "dpkg-query"),
+            "{by_root:?}"
+        );
+        assert!(
+            !by_root
+                .iter()
+                .any(|p| ["cargo", "npm", "uv"].contains(&p.as_str())),
+            "{by_root:?}"
+        );
+        let release = registry.get("github-release").expect("always present");
+        assert_eq!(release.meta.purl_type, "github");
+    }
+
+    #[test]
+    fn this_account_s_tools_are_its_own_and_the_invoking_user_s_are_theirs() {
+        let runner: Arc<dyn CommandRunner> =
+            Arc::new(bosun_ports::testing::FakeCommandRunner::new());
+        let mine_own = UserTools::own(PathBuf::from("/home/u"), runner.clone());
+        assert_eq!(mine_own.bin_dir(), PathBuf::from("/home/u/.local/bin"));
+        assert!(mine_own.bin_files.is_none() && mine_own.path_var.is_none());
+        let place = UserPlace {
+            state: PathBuf::from("/s/state.json"),
+            config: None,
+            invoker: Some(Invoker {
+                name: "bosun-no-such-user".to_string(),
+                uid: 4242,
+                gid: 4343,
+                home: PathBuf::from("/srv/ben"),
+            }),
+        };
+        let theirs = UserTools::for_place(&place, runner.clone());
+        assert_eq!(theirs.home, PathBuf::from("/srv/ben"));
+        assert_eq!(theirs.cargo_home, PathBuf::from("/srv/ben/.cargo"));
+        assert_eq!(theirs.bin_dir(), PathBuf::from("/srv/ben/.local/bin"));
+        assert!(theirs.bin_files.is_some() && theirs.path_var.is_some());
+        let mine = UserTools::for_place(&own(), runner);
+        assert!(mine.bin_files.is_none() && mine.path_var.is_none());
+        assert_eq!(mine.home, home_dir());
     }
 
     #[test]
