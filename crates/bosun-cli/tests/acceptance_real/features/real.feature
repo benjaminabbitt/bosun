@@ -678,6 +678,32 @@ Feature: real backends against a disposable container
     Then it fails
     And it reports "machine state is not readable by this user"
 
+  # The manifest is read as the user too (§4.5): one they point at a file
+  # only root may read is one they may not read.
+  @useradd @runuser @sudo
+  Scenario: sudo bosun install reads no manifest the user may not read
+    Given a non-root user whose home is the project, and who may use sudo
+    And the manifest is a symlink to a file only root may read
+    When the non-root user runs `sudo bosun install . --yes`
+    Then it fails
+    And it reports "Permission denied"
+
+  # An edit writes the manifest as the user, in place: through a symlink to
+  # a file of root's in /etc it is refused, and that file is as it was.
+  @apt-get @useradd @runuser @sudo
+  Scenario: sudo bosun add writes nothing through a manifest symlink into /etc
+    Given the apt index is refreshed
+    And a non-root user whose home is the project, and who may use sudo
+    And the manifest is a symlink to a file in /etc root owns:
+      """
+      version: 2
+      packages: []
+      """
+    When the non-root user runs `sudo bosun add hello --backend apt`
+    Then it fails
+    And it reports "Permission denied"
+    And the file in /etc is as it was
+
   @apt-get @useradd @runuser @sudo
   Scenario: sudo bosun lock follows the user's own symlinked ~/.local
     Given the apt index is refreshed

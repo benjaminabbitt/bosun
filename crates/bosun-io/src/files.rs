@@ -1,9 +1,10 @@
 //! [`FileAccess`] as this process (§4.5, §4.6): the files of the account bosun
-//! runs as, and the system state, read and written with plain std I/O.
+//! runs as (its manifest, config, lock and user state), and the system state,
+//! read and written with plain std I/O.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use bosun_ports::{FileAccess, LockOpen};
 
@@ -16,8 +17,24 @@ impl FileAccess for DirectFiles {
         path.try_exists()
     }
 
+    fn is_dir(&self, path: &Path) -> io::Result<bool> {
+        match fs::metadata(path) {
+            Ok(meta) => Ok(meta.is_dir()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        fs::canonicalize(path)
+    }
+
     fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
         fs::read(path)
+    }
+
+    fn write_in_place(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        fs::write(path, bytes)
     }
 
     fn write(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -114,6 +131,60 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
         fs::write(&path, "x").unwrap();
         assert!(DirectFiles.exists(&path).unwrap());
+    }
+
+    #[test]
+    fn is_dir_says_a_directory_and_nothing_or_a_file_is_not_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(DirectFiles.is_dir(tmp.path()).unwrap());
+        let file = tmp.path().join("f");
+        assert!(!DirectFiles.is_dir(&file).unwrap());
+        fs::write(&file, "x").unwrap();
+        assert!(!DirectFiles.is_dir(&file).unwrap());
+        assert!(DirectFiles.is_dir(&file.join("x")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonicalize_resolves_every_symlink_and_a_missing_path_is_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        fs::create_dir(&real).unwrap();
+        fs::write(real.join("bosun.yaml"), "").unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let want = fs::canonicalize(real.join("bosun.yaml")).unwrap();
+        assert_eq!(
+            DirectFiles.canonicalize(&link.join("bosun.yaml")).unwrap(),
+            want
+        );
+        let err = DirectFiles.canonicalize(&link.join("gone")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    /// A manifest kept behind a symlink stays one, its target rewritten in
+    /// place with its mode kept; a missing file is made.
+    #[cfg(unix)]
+    #[test]
+    fn write_in_place_writes_through_a_symlink_keeping_the_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("kept.yaml");
+        fs::write(&target, "old old old").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+        let link = tmp.path().join("bosun.yaml");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        DirectFiles.write_in_place(&link, b"new").unwrap();
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new");
+        let mode = fs::metadata(&target).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        let fresh = tmp.path().join("fresh.yaml");
+        DirectFiles.write_in_place(&fresh, b"made").unwrap();
+        assert_eq!(fs::read_to_string(&fresh).unwrap(), "made");
     }
 
     #[test]

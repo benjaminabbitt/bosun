@@ -63,13 +63,22 @@ pub fn rendered(req: Request) -> Result<(Vec<Target>, Rendered), CliError> {
             .map(|t| parse_target(t))
             .collect::<Result<Vec<_>, _>>()?
     };
-    let file = manifest_file(req.path)?;
     let foreign =
         |t: &Target| req.from.is_some() || flag_distro.is_some() || libc.is_some() || *t != here;
+    // This machine, when a target is it: its run reads the user's files as
+    // whoever it does them as (§4.5), as render for another machine does.
+    let mut local: Option<Env> = match targets.iter().all(foreign) {
+        true => None,
+        false => Some(env::assemble()?),
+    };
+    let files = match &local {
+        Some(env) => env.user_files(),
+        None => env::user_files()?,
+    };
+    let file = manifest_file(files.as_ref(), req.path)?;
 
     let mut manifest: Option<Manifest> = None;
     let mut locks: Vec<(Target, LockDocument)> = Vec::new();
-    let mut local: Option<Env> = None;
     for target in &targets {
         let lock = if foreign(target) {
             let root = req
@@ -83,7 +92,9 @@ pub fn rendered(req: Request) -> Result<(Vec<Target>, Rendered), CliError> {
             };
             let apt_root = root.as_ref().and_then(|r| r.apt(distro.as_ref()));
             let remote = remote_env(target, libc.as_ref(), apt_root)?;
-            let m = loaded(&mut manifest, || load_checked(remote.option_keys(), &file))?;
+            let m = loaded(&mut manifest, || {
+                load_checked(remote.option_keys(), files.as_ref(), &file)
+            })?;
             if libc.is_none() && has_selector(m, |s| s.libc().is_some()) {
                 tracing::warn!(message = logmsg::RENDER_NO_LIBC, target = %target);
             }
@@ -131,14 +142,15 @@ fn this_machines_lock(
     file: &Path,
     manifest: &Manifest,
 ) -> Result<LockDocument, CliError> {
-    let lock = this_lock(env, &canonical_manifest(file))?.ok_or_else(|| {
-        CliError::Resolve(format!(
-            "{} {}; {}",
-            errmsg::RENDER_NO_LOCK,
-            file.display(),
-            errmsg::RUN_LOCK
-        ))
-    })?;
+    let lock =
+        this_lock(env, &canonical_manifest(env.user_files().as_ref(), file))?.ok_or_else(|| {
+            CliError::Resolve(format!(
+                "{} {}; {}",
+                errmsg::RENDER_NO_LOCK,
+                file.display(),
+                errmsg::RUN_LOCK
+            ))
+        })?;
     if lock.manifest_hash != manifest_hash(manifest) {
         return Err(CliError::Resolve(format!(
             "{} {}; {}",

@@ -753,6 +753,14 @@ mod tests {
             self.note("exists", path);
             DirectFiles.exists(path)
         }
+        fn is_dir(&self, path: &Path) -> std::io::Result<bool> {
+            self.note("is_dir", path);
+            DirectFiles.is_dir(path)
+        }
+        fn canonicalize(&self, path: &Path) -> std::io::Result<std::path::PathBuf> {
+            self.note("canonicalize", path);
+            DirectFiles.canonicalize(path)
+        }
         fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
             self.note("read", path);
             DirectFiles.read(path)
@@ -760,6 +768,10 @@ mod tests {
         fn write(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
             self.note("write", path);
             DirectFiles.write(path, bytes)
+        }
+        fn write_in_place(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+            self.note("write_in_place", path);
+            DirectFiles.write_in_place(path, bytes)
         }
         fn open_lock(&self, path: &Path, how: LockOpen) -> std::io::Result<File> {
             self.note(&format!("{how:?}"), path);

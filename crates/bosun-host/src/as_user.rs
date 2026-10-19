@@ -5,8 +5,9 @@
 //! does the I/O, so the kernel allows exactly what the user could do: a
 //! symlink they planted resolves with their rights, never root's. The child
 //! answers over a socket pair: a status, then the file's bytes for a read,
-//! or the opened lock file's descriptor (`SCM_RIGHTS`) for a lock, which the
-//! parent then locks and holds.
+//! or an opened descriptor (`SCM_RIGHTS`): the lock file, which the parent
+//! then locks and holds, or the file a path resolves to, whose canonical
+//! path the parent reads from it.
 //!
 //! A fork, not a re-exec of bosun, so the binary need not be one the user
 //! may run, and nothing of the environment or the command line reaches the
@@ -22,7 +23,7 @@ use std::io::{self, IoSlice, IoSliceMut, Read};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bosun_ports::{FileAccess, LockOpen};
@@ -87,8 +88,11 @@ fn groups_of(_name: &str, gid: u32) -> Vec<u32> {
 /// What the child is asked to do.
 enum Op<'a> {
     Exists,
+    IsDir,
+    Resolve,
     Read,
     Write(&'a [u8]),
+    WriteInPlace(&'a [u8]),
     Lock(LockOpen),
 }
 
@@ -96,8 +100,11 @@ impl Op<'_> {
     fn name(&self) -> &'static str {
         match self {
             Op::Exists => "exists",
+            Op::IsDir => "is directory",
+            Op::Resolve => "resolve",
             Op::Read => "read",
             Op::Write(_) => "write",
+            Op::WriteInPlace(_) => "write in place",
             Op::Lock(LockOpen::Shared) => "open shared lock",
             Op::Lock(LockOpen::Exclusive) => "open exclusive lock",
         }
@@ -222,9 +229,9 @@ fn reap(child: nix::unistd::Pid) -> io::Result<i32> {
 /// What the child answered.
 enum Answer {
     Done,
-    Exists(bool),
+    Flag(bool),
     Bytes(Vec<u8>),
-    Lock(File),
+    Fd(OwnedFd),
 }
 
 /// The status the child sends first: `OK`, or `FAILED` and the errno.
@@ -262,19 +269,19 @@ fn receive(sock: OwnedFd, op: &Op<'_>) -> io::Result<Answer> {
         return Err(io::Error::from_raw_os_error(errno));
     }
     match op {
-        Op::Write(_) => Ok(Answer::Done),
-        Op::Exists => {
+        Op::Write(_) | Op::WriteInPlace(_) => Ok(Answer::Done),
+        Op::Exists | Op::IsDir => {
             let mut flag = [0u8; 1];
             sock.read_exact(&mut flag)?;
-            Ok(Answer::Exists(flag[0] == 1))
+            Ok(Answer::Flag(flag[0] == 1))
         }
         Op::Read => {
             let mut bytes = Vec::new();
             sock.read_to_end(&mut bytes)?;
             Ok(Answer::Bytes(bytes))
         }
-        Op::Lock(_) => fd
-            .map(|fd| Answer::Lock(File::from(fd)))
+        Op::Resolve | Op::Lock(_) => fd
+            .map(Answer::Fd)
             .ok_or_else(|| io::Error::other(errmsg::AS_USER_NO_ANSWER)),
     }
 }
@@ -343,6 +350,18 @@ fn serve(p: &Prepared, op: &Op<'_>, sock: BorrowedFd<'_>) -> i32 {
             Err(Errno::NOENT) => answer_with(sock, &[0]),
             Err(e) => answer(sock, Err(e), None),
         },
+        Op::IsDir => match rustix::fs::stat(p.path.as_c_str()) {
+            Ok(st) => {
+                let dir = rustix::fs::FileType::from_raw_mode(st.st_mode).is_dir();
+                answer_with(sock, &[u8::from(dir)])
+            }
+            Err(Errno::NOENT) => answer_with(sock, &[0]),
+            Err(e) => answer(sock, Err(e), None),
+        },
+        Op::Resolve => match open(&p.path, RESOLVE) {
+            Ok(file) => answer(sock, Ok(()), Some(file.as_fd())),
+            Err(e) => answer(sock, Err(e), None),
+        },
         Op::Read => match open(&p.path, OFlags::RDONLY) {
             Ok(file) => {
                 let code = answer(sock, Ok(()), None);
@@ -354,6 +373,7 @@ fn serve(p: &Prepared, op: &Op<'_>, sock: BorrowedFd<'_>) -> i32 {
             Err(e) => answer(sock, Err(e), None),
         },
         Op::Write(bytes) => answer(sock, write(p, bytes), None),
+        Op::WriteInPlace(bytes) => answer(sock, write_in_place(p, bytes), None),
         Op::Lock(how) => match open_lock(p, *how) {
             Ok(file) => answer(sock, Ok(()), Some(file.as_fd())),
             Err(e) => answer(sock, Err(e), None),
@@ -363,6 +383,27 @@ fn serve(p: &Prepared, op: &Op<'_>, sock: BorrowedFd<'_>) -> i32 {
 
 fn open(path: &CString, flags: OFlags) -> Result<OwnedFd, Errno> {
     rustix::fs::open(path.as_c_str(), flags | OFlags::CLOEXEC, Mode::from(0o644))
+}
+
+/// How a path is opened to resolve it: for no access but the right to
+/// reach it (`O_PATH`), so a file the user may not read still resolves.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const RESOLVE: OFlags = OFlags::PATH;
+
+/// Without `O_PATH`, read-only and non-blocking, so a FIFO does not wait.
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+const RESOLVE: OFlags = OFlags::RDONLY.union(OFlags::NONBLOCK);
+
+/// Write `bytes` over the file at its path, as `std::fs::write` does:
+/// through a symlink, keeping the file's mode, making it (0666 less the
+/// umask) when missing.
+fn write_in_place(p: &Prepared, bytes: &[u8]) -> Result<(), Errno> {
+    let file = rustix::fs::open(
+        p.path.as_c_str(),
+        OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC | OFlags::CLOEXEC,
+        Mode::from(0o666),
+    )?;
+    write_all(file.as_fd(), bytes)
 }
 
 /// Make the missing directories among `dirs` (deepest first), outermost
@@ -482,12 +523,55 @@ fn answer_with(sock: BorrowedFd<'_>, bytes: &[u8]) -> i32 {
     }
 }
 
-impl FileAccess for AsUser {
-    fn exists(&self, path: &Path) -> io::Result<bool> {
-        match self.run(path, Op::Exists)? {
-            Answer::Exists(there) => Ok(there),
+/// The canonical path of the file `fd` was opened on, as the kernel
+/// names it.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn path_of(fd: &OwnedFd) -> io::Result<PathBuf> {
+    use std::os::fd::AsRawFd;
+    std::fs::read_link(format!("/proc/self/fd/{}", fd.as_raw_fd()))
+}
+
+#[cfg(target_vendor = "apple")]
+fn path_of(fd: &OwnedFd) -> io::Result<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    let path = rustix::fs::getpath(fd)?;
+    Ok(PathBuf::from(std::ffi::OsString::from_vec(
+        path.into_bytes(),
+    )))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+fn path_of(_fd: &OwnedFd) -> io::Result<PathBuf> {
+    Err(io::ErrorKind::Unsupported.into())
+}
+
+impl AsUser {
+    fn flag(&self, path: &Path, op: Op<'_>) -> io::Result<bool> {
+        match self.run(path, op)? {
+            Answer::Flag(set) => Ok(set),
             _ => Err(io::Error::other(errmsg::AS_USER_NO_ANSWER)),
         }
+    }
+
+    fn fd(&self, path: &Path, op: Op<'_>) -> io::Result<OwnedFd> {
+        match self.run(path, op)? {
+            Answer::Fd(fd) => Ok(fd),
+            _ => Err(io::Error::other(errmsg::AS_USER_NO_ANSWER)),
+        }
+    }
+}
+
+impl FileAccess for AsUser {
+    fn exists(&self, path: &Path) -> io::Result<bool> {
+        self.flag(path, Op::Exists)
+    }
+
+    fn is_dir(&self, path: &Path) -> io::Result<bool> {
+        self.flag(path, Op::IsDir)
+    }
+
+    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        path_of(&self.fd(path, Op::Resolve)?)
     }
 
     fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
@@ -501,11 +585,12 @@ impl FileAccess for AsUser {
         self.run(path, Op::Write(bytes)).map(|_| ())
     }
 
+    fn write_in_place(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        self.run(path, Op::WriteInPlace(bytes)).map(|_| ())
+    }
+
     fn open_lock(&self, path: &Path, how: LockOpen) -> io::Result<File> {
-        match self.run(path, Op::Lock(how))? {
-            Answer::Lock(file) => Ok(file),
-            _ => Err(io::Error::other(errmsg::AS_USER_NO_ANSWER)),
-        }
+        self.fd(path, Op::Lock(how)).map(File::from)
     }
 }
 
@@ -770,6 +855,124 @@ mod tests {
     }
 
     #[test]
+    fn says_whether_a_path_is_a_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(me().is_dir(tmp.path()).unwrap());
+        let file = tmp.path().join("f");
+        assert!(!me().is_dir(&file).unwrap());
+        fs::write(&file, "").unwrap();
+        assert!(!me().is_dir(&file).unwrap());
+    }
+
+    /// Resolution needs only the right to reach the file, not to read it.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn canonicalizes_through_every_symlink_and_a_missing_path_is_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let file = real.join("bosun.yaml");
+        fs::write(&file, "").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let want = fs::canonicalize(&file).unwrap();
+        assert_eq!(me().canonicalize(&link.join("bosun.yaml")).unwrap(), want);
+        assert_eq!(
+            me().canonicalize(&link).unwrap(),
+            fs::canonicalize(&real).unwrap()
+        );
+        let err = me().canonicalize(&link.join("gone")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn writes_in_place_through_a_symlink_keeping_the_mode_and_makes_a_missing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("kept.yaml");
+        fs::write(&target, "old old old").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+        let link = tmp.path().join("bosun.yaml");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        me().write_in_place(&link, b"new").unwrap();
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new");
+        let mode = fs::metadata(&target).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        let fresh = tmp.path().join("fresh.yaml");
+        me().write_in_place(&fresh, b"made").unwrap();
+        assert_eq!(fs::read_to_string(&fresh).unwrap(), "made");
+        let names: Vec<_> = fs::read_dir(tmp.path()).unwrap().collect();
+        assert_eq!(names.len(), 3, "{names:?}");
+    }
+
+    #[test]
+    fn a_write_in_place_the_user_may_not_make_fails_and_changes_nothing() {
+        if root() {
+            eprintln!("skipped: root may write anywhere");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("theirs.yaml");
+        fs::write(&target, "kept").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o444)).unwrap();
+        let link = tmp.path().join("bosun.yaml");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let err = me().write_in_place(&link, b"new").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(fs::read_to_string(&target).unwrap(), "kept");
+        let missing_dir = tmp.path().join("no").join("bosun.yaml");
+        let err = me().write_in_place(&missing_dir, b"new").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    /// Root becomes `nobody`, who may neither write a root file through a
+    /// symlink of theirs nor reach a root-only directory to resolve a path
+    /// in it. Runs as root only (the real tier's container).
+    #[test]
+    fn root_writes_in_place_and_resolves_as_the_user_with_their_rights_alone() {
+        if !root() {
+            eprintln!("skipped: needs root to become another user");
+            return;
+        }
+        let nobody = AsUser::new(65534, 65534, vec![65534]);
+        let tmp = tempfile::tempdir().unwrap();
+        fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        let roots = tmp.path().join("roots.yaml");
+        fs::write(&roots, "kept").unwrap();
+        fs::set_permissions(&roots, fs::Permissions::from_mode(0o644)).unwrap();
+        let theirs = tmp.path().join("theirs");
+        fs::create_dir(&theirs).unwrap();
+        let link = theirs.join("bosun.yaml");
+        std::os::unix::fs::symlink(&roots, &link).unwrap();
+        std::os::unix::fs::lchown(&link, Some(65534), Some(65534)).unwrap();
+        std::os::unix::fs::chown(&theirs, Some(65534), Some(65534)).unwrap();
+        let err = nobody.write_in_place(&link, b"new").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(fs::read_to_string(&roots).unwrap(), "kept");
+        let private = tmp.path().join("private");
+        fs::create_dir(&private).unwrap();
+        fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(private.join("x"), "").unwrap();
+        let err = nobody.canonicalize(&private.join("x")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        let err = nobody.is_dir(&private.join("x")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn a_write_in_place_makes_no_directories() {
+        let path = Path::new("/h/u/proj/bosun.yaml");
+        let prepared = me().prepare(path, &Op::WriteInPlace(b"")).unwrap();
+        assert!(prepared.dirs.is_empty());
+        assert!(me().prepare(path, &Op::Resolve).unwrap().dirs.is_empty());
+        assert!(me().prepare(path, &Op::IsDir).unwrap().dirs.is_empty());
+    }
+
+    #[test]
     fn each_operation_is_named_for_the_log() {
         let names = [
             Op::Exists.name(),
@@ -777,6 +980,9 @@ mod tests {
             Op::Write(b"").name(),
             Op::Lock(LockOpen::Shared).name(),
             Op::Lock(LockOpen::Exclusive).name(),
+            Op::IsDir.name(),
+            Op::Resolve.name(),
+            Op::WriteInPlace(b"").name(),
         ];
         assert_eq!(
             names,
@@ -785,7 +991,10 @@ mod tests {
                 "read",
                 "write",
                 "open shared lock",
-                "open exclusive lock"
+                "open exclusive lock",
+                "is directory",
+                "resolve",
+                "write in place",
             ]
         );
     }

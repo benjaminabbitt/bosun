@@ -148,9 +148,14 @@ fn dispatch(cli: &Cli, format: Format) -> Result<i32, CliError> {
             let value = commands::upgrade(&env, names, manifest.clone(), &pref)?;
             emit(&value, format, &mut out)
         }
-        Command::Migrate { path, plan, yes } => {
-            migrate::run(path.clone(), *plan, *yes, format, &mut out)
-        }
+        Command::Migrate { path, plan, yes } => migrate::run(
+            env.user_files().as_ref(),
+            path.clone(),
+            *plan,
+            *yes,
+            format,
+            &mut out,
+        ),
         Command::Install {
             path,
             plan,

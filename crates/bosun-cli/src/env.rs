@@ -94,8 +94,8 @@ pub struct Env {
     option_keys: bosun_io::BackendOptionKeys,
     /// Where this run's locks live (§4.5).
     lock_dir: PathBuf,
-    /// How the lock is read and written: as this account, or as the user
-    /// who elevated the run (§4.5).
+    /// How the user's files (manifest, lock) are read and written: as this
+    /// account, or as the user who elevated the run (§4.5).
     user_files: Rc<dyn FileAccess>,
     machine: Box<dyn Machine>,
     exec: Exec,
@@ -201,9 +201,10 @@ impl Env {
         bosun_io::paths::lock_file(&self.lock_dir, manifest)
     }
 
-    /// How this run reads and writes its lock: as the user who elevated it,
-    /// whose lock it is (§4.5), else as this account.
-    pub fn lock_files(&self) -> Rc<dyn FileAccess> {
+    /// How this run reads and writes the user's files, the manifest and its
+    /// canonical path, and the lock: as the user who elevated it, whose files
+    /// they are (§4.5), else as this account.
+    pub fn user_files(&self) -> Rc<dyn FileAccess> {
         self.user_files.clone()
     }
 
@@ -350,6 +351,17 @@ pub fn assemble() -> Result<Env, CliError> {
         Some((fixture, state_dir)) => from_fixture(&fixture, &state_dir),
         None => from_host(),
     }
+}
+
+/// How this run reads and writes the user's files (§4.5), without probing
+/// the rest of the host, for `render` of another machine: as the user who
+/// elevated the run, else as this account.
+pub fn user_files() -> Result<Rc<dyn FileAccess>, CliError> {
+    let place = match seam()? {
+        Some((fixture, state_dir)) => fixture_place(&read_fixture(&fixture)?, &state_dir)?,
+        None => host_place()?,
+    };
+    Ok(place.files())
 }
 
 /// The test seam's fixture and state dir when it is active, said on stderr;
@@ -806,6 +818,28 @@ fn host_machine(
     Ok((Box::new(machine), place))
 }
 
+/// Whose user state, lock and files this host's run uses ([`user_place`]),
+/// from this process's privilege alone.
+#[cfg(unix)]
+fn host_place() -> Result<UserPlace, CliError> {
+    user_place(
+        Os::Linux,
+        bosun_host::unix_privilege(),
+        bosun_io::paths::state_path(Scope::User).map_err(env_err)?,
+        bosun_io::paths::env_var,
+        bosun_host::passwd_account,
+    )
+}
+
+/// Windows elevation keeps the user's own account, so its own files.
+#[cfg(not(unix))]
+fn host_place() -> Result<UserPlace, CliError> {
+    Ok(UserPlace {
+        state: bosun_io::paths::state_path(Scope::User).map_err(env_err)?,
+        invoker: None,
+    })
+}
+
 fn from_host() -> Result<Env, CliError> {
     let os = host_os();
     let runner: Arc<dyn CommandRunner> = Arc::new(ProcessCommandRunner);
@@ -910,9 +944,55 @@ fn scope_of(raw: Option<&str>) -> Scope {
     }
 }
 
+/// The fixture machine's privilege.
+fn fixture_privilege(fx: &Fixture) -> Privilege {
+    match fx.privilege.as_deref() {
+        Some("elevated") => Privilege::Elevated,
+        _ => Privilege::Unelevated,
+    }
+}
+
+/// The scratch home of the seam's user: the fixture's, else `home` in the
+/// state dir.
+fn fixture_home(fx: &Fixture, state_dir: &str) -> PathBuf {
+    fx.home
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(state_dir).join("home"))
+}
+
+/// Whose user state, lock and files the seam's run uses ([`user_place`]).
+/// The seam's user keeps state under the default state dir of their home;
+/// an elevated run's own is root's, a home of its own in the seam. Under
+/// sudo it is the invoking user's, by the fixture's passwd, read and
+/// written as them.
+fn fixture_place(fx: &Fixture, state_dir: &str) -> Result<UserPlace, CliError> {
+    let (os, _) = fixture_platform(fx)?;
+    let privilege = fixture_privilege(fx);
+    let own_home = match privilege {
+        Privilege::Elevated => PathBuf::from(state_dir).join("root"),
+        Privilege::Unelevated => fixture_home(fx, state_dir),
+    };
+    user_place(
+        os,
+        privilege,
+        bosun_io::paths::state_under_home(&own_home),
+        bosun_io::paths::env_var,
+        |name| {
+            fx.passwd.get(name).map(|a| Account {
+                uid: a.uid,
+                gid: a.gid,
+                home: a.home.clone(),
+            })
+        },
+    )
+}
+
 fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
     let fx = read_fixture(path)?;
     let (os, arch) = fixture_platform(&fx)?;
+    let place = fixture_place(&fx, state_dir)?;
+    let privilege = fixture_privilege(&fx);
+    let home = fixture_home(&fx, state_dir);
     let distro = fx.distro.map(|d| Distro {
         id: d.id,
         id_like: d.id_like,
@@ -933,19 +1013,11 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
         })
         .transpose()?;
     let family = libc.as_ref().map(|l| l.family);
-    let privilege = match fx.privilege.as_deref() {
-        Some("elevated") => Privilege::Elevated,
-        _ => Privilege::Unelevated,
-    };
     let user_name = fx.user.unwrap_or_else(|| "tester".to_string());
 
     let system = system_state_at(state_dir);
     // Canned HTTP and a scratch bin dir for real backends (github-release).
     let fetcher = canned_fetcher(&fx.http)?;
-    let home = fx
-        .home
-        .clone()
-        .unwrap_or_else(|| PathBuf::from(state_dir).join("home"));
     let bin_dir = user_bin_dir(&home);
     let any_real = fx.backends.iter().any(|b| b.real);
     let packages: PackageDb = Arc::default();
@@ -1023,26 +1095,6 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
         option_keys.entry(b.id.as_str().to_string()).or_default();
     }
     let skipped = absent_backends(&fx.absent, fetcher.clone(), &home, &cache_dir, os, arch)?;
-    // The seam's user keeps state under the default state dir of their home;
-    // an elevated run's own is root's, a home of its own in the seam. Under
-    // sudo it is the invoking user's, read and written as them.
-    let own_home = match privilege {
-        Privilege::Elevated => PathBuf::from(state_dir).join("root"),
-        Privilege::Unelevated => home.clone(),
-    };
-    let place = user_place(
-        os,
-        privilege,
-        bosun_io::paths::state_under_home(&own_home),
-        bosun_io::paths::env_var,
-        |name| {
-            fx.passwd.get(name).map(|a| Account {
-                uid: a.uid,
-                gid: a.gid,
-                home: a.home.clone(),
-            })
-        },
-    )?;
     let files = place.files();
     let store = FileStateStore::new(system.clone(), place.state.clone(), schemes.clone())
         .with_user_files(files.clone());

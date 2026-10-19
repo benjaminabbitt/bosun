@@ -1128,6 +1128,9 @@ fn bosun_command(world: &mut BosunWorld, cmdline: &str, cwd: &Path) -> Command {
         // the user config is this scenario's own, never the developer's.
         .env("XDG_CONFIG_HOME", p.join("config"))
         .env("APPDATA", p.join("config"))
+        // plain logs, which some steps read.
+        .env("NO_COLOR", "1")
+        .env_remove("RUST_LOG")
         .current_dir(cwd)
         .args(&args);
     for var in [
@@ -1602,6 +1605,75 @@ fn file_reads(world: &mut BosunWorld, step: &Step, name: String) {
     let got =
         fs::read_to_string(world.path().join(&name)).unwrap_or_else(|e| panic!("{name}: {e}"));
     assert_eq!(got.trim_end(), docstring(step).trim_end(), "{name}:\n{got}");
+}
+
+/// Where a manifest kept behind a symlink is.
+fn kept_elsewhere(project: &Path) -> PathBuf {
+    project.join("dotfiles").join("bosun.yaml")
+}
+
+/// The manifest moves to a directory of its own, with a symlink to it at
+/// its old name.
+#[cfg(unix)]
+#[given("the manifest is a symlink to one kept elsewhere")]
+fn manifest_symlinked(world: &mut BosunWorld) {
+    let p = world.path();
+    let kept = kept_elsewhere(&p);
+    fs::create_dir_all(kept.parent().unwrap()).unwrap();
+    fs::rename(p.join("bosun.yaml"), &kept).unwrap();
+    std::os::unix::fs::symlink(&kept, p.join("bosun.yaml")).unwrap();
+}
+
+#[then("the manifest is still a symlink to the one kept elsewhere")]
+fn manifest_still_symlinked(world: &mut BosunWorld) {
+    let p = world.path();
+    let link = p.join("bosun.yaml");
+    assert!(
+        fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "bosun.yaml is no longer a symlink"
+    );
+    assert_eq!(fs::read_link(&link).unwrap(), kept_elsewhere(&p));
+}
+
+#[then(regex = r"^the manifest names (\S+)$")]
+fn manifest_names(world: &mut BosunWorld, name: String) {
+    let got = fs::read_to_string(world.path().join("bosun.yaml")).unwrap();
+    assert!(
+        got.contains(&format!("- name: {name}\n")),
+        "bosun.yaml:\n{got}"
+    );
+}
+
+#[then("the lock records the manifest at the one kept elsewhere")]
+fn lock_names_kept(world: &mut BosunWorld) {
+    let kept = fs::canonicalize(kept_elsewhere(&world.path())).unwrap();
+    let (text, doc) = world.lock();
+    assert_eq!(doc["manifest"], kept.display().to_string(), "lock:\n{text}");
+}
+
+/// bosun logged (at debug) that it did `op` on a path ending in `name` (or
+/// on the project directory) in the child that is the invoking user.
+#[then(regex = r#"^it does "([^"]+)" on (the project|\S+) as the invoking user$"#)]
+fn did_as_user(world: &mut BosunWorld, op: String, name: String) {
+    let ends = match name.as_str() {
+        "the project" => world.path().display().to_string(),
+        _ => format!("/{name}"),
+    };
+    let done = world.stderr.lines().any(|line| {
+        line.contains("file operation as the invoking user")
+            && (line.contains(&format!("op=\"{op}\"")) || line.contains(&format!("op={op} ")))
+            && line
+                .split_whitespace()
+                .any(|w| w.strip_prefix("path=").is_some_and(|p| p.ends_with(&ends)))
+    });
+    assert!(
+        done,
+        "want {op} on {name} as the invoking user in:\n{}",
+        world.stderr
+    );
 }
 
 #[then("the manifest is unchanged")]

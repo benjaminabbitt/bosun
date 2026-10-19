@@ -71,6 +71,17 @@ pub fn arch_from_windows(
     }
 }
 
+/// This process's privilege on Linux and macOS: elevated when its effective
+/// user id is root's (§5.5).
+#[cfg(unix)]
+pub fn unix_privilege() -> Privilege {
+    if rustix::process::geteuid().is_root() {
+        Privilege::Elevated
+    } else {
+        Privilege::Unelevated
+    }
+}
+
 /// The real Linux host. State-file paths are injected (bosun-io resolves the
 /// §4.6 locations), so the OS logic here stays free of path policy.
 #[cfg(unix)]
@@ -152,11 +163,7 @@ impl Machine for LinuxMachine {
     }
 
     fn privilege(&self) -> Privilege {
-        if rustix::process::geteuid().is_root() {
-            Privilege::Elevated
-        } else {
-            Privilege::Unelevated
-        }
+        unix_privilege()
     }
 
     fn invoking_user(&self) -> User {

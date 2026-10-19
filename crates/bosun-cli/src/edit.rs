@@ -3,7 +3,6 @@
 //! operations, so only `lock` ever writes `bosun.lock` (§4.4).
 
 use std::collections::BTreeMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use bosun_apply::{build_release_plan, ApplyReport, Plan};
@@ -12,6 +11,7 @@ use bosun_core::platform::Selector;
 use bosun_core::{default_spec, BackendId, Manifest};
 use bosun_io::manifest_edit::{add_entry, remove_entry};
 use bosun_io::{check_options, load_manifest, manifest_hash};
+use bosun_ports::FileAccess;
 use bosun_resolve::{resolve, Outcome};
 use serde::Serialize;
 
@@ -69,7 +69,8 @@ impl Render for AddOutput {
 /// by loading the edited manifest and resolving the entry on this machine;
 /// on any error nothing is written. `add` never installs.
 pub fn add(env: &Env, opts: AddOpts, pref: &[BackendId]) -> Result<AddOutput, CliError> {
-    let file = commands::manifest_file(opts.manifest.clone())?;
+    let files = env.user_files();
+    let file = commands::manifest_file(files.as_ref(), opts.manifest.clone())?;
     let manifest = commands::load(env, &file)?;
     if manifest.packages.iter().any(|e| e.name == opts.name) {
         return Err(io_error(bosun_io::IoError::DuplicateEntry {
@@ -120,14 +121,14 @@ pub fn add(env: &Env, opts: AddOpts, pref: &[BackendId]) -> Result<AddOutput, Cl
         entry.spec = Some(default_spec(&latest));
     }
 
-    let text = read(&file)?;
+    let text = read(files.as_ref(), &file)?;
     let edited = add_entry(&text, &file, &entry).map_err(io_error)?;
     let reloaded = load_manifest(&edited, &file).map_err(io_error)?;
     check_options(&reloaded, env.option_keys()).map_err(|e| CliError::Parse {
         what: "manifest".to_string(),
         detail: format!("{}: {e}", file.display()),
     })?;
-    write(&file, &edited)?;
+    write(files.as_ref(), &file, &edited)?;
 
     let lock = commands::lock(env, Some(file.clone()), pref)?;
     Ok(AddOutput {
@@ -264,14 +265,15 @@ pub fn prepare_remove(
     name: &str,
     manifest: Option<PathBuf>,
 ) -> Result<Removal, CliError> {
-    let file = commands::manifest_file(manifest)?;
+    let files = env.user_files();
+    let file = commands::manifest_file(files.as_ref(), manifest)?;
     commands::load(env, &file)?;
-    let text = read(&file)?;
+    let text = read(files.as_ref(), &file)?;
     let edited = remove_entry(&text, &file, name).map_err(io_error)?;
     load_manifest(&edited, &file).map_err(io_error)?;
 
     let state = commands::combined_state(env)?;
-    let claim = commands::canonical_manifest(&file);
+    let claim = commands::canonical_manifest(files.as_ref(), &file);
     let plan = build_release_plan(&claim, name, &state, &env.installers())
         .map_err(|e| CliError::Resolve(e.to_string()))?;
     Ok(Removal {
@@ -344,7 +346,7 @@ impl Removal {
         report: Option<ApplyReport>,
         pref: &[BackendId],
     ) -> Result<RemoveOutput, CliError> {
-        write(&self.file, &self.edited)?;
+        write(env.user_files().as_ref(), &self.file, &self.edited)?;
         let lock = commands::lock(env, Some(self.file.clone()), pref)?;
         Ok(RemoveOutput {
             name: self.name,
@@ -357,18 +359,26 @@ impl Removal {
     }
 }
 
-pub(crate) fn read(file: &Path) -> Result<String, CliError> {
-    fs::read_to_string(file).map_err(|e| CliError::Io {
+/// The manifest (or another file a person keeps) at `file`, read through
+/// `files`, as its user (§4.5).
+pub(crate) fn read(files: &dyn FileAccess, file: &Path) -> Result<String, CliError> {
+    let io_err = |detail: String| CliError::Io {
         path: file.to_path_buf(),
-        detail: e.to_string(),
-    })
+        detail,
+    };
+    let bytes = files.read(file).map_err(|e| io_err(e.to_string()))?;
+    String::from_utf8(bytes).map_err(|e| io_err(e.to_string()))
 }
 
-pub(crate) fn write(file: &Path, text: &str) -> Result<(), CliError> {
-    fs::write(file, text).map_err(|e| CliError::Io {
-        path: file.to_path_buf(),
-        detail: e.to_string(),
-    })
+/// Write `text` over the manifest at `file` in place, through `files`, as
+/// its user (§4.5): a manifest behind a symlink stays one.
+pub(crate) fn write(files: &dyn FileAccess, file: &Path, text: &str) -> Result<(), CliError> {
+    files
+        .write_in_place(file, text.as_bytes())
+        .map_err(|e| CliError::Io {
+            path: file.to_path_buf(),
+            detail: e.to_string(),
+        })
 }
 
 pub(crate) fn io_error(e: bosun_io::IoError) -> CliError {

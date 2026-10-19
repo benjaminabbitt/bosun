@@ -13,7 +13,7 @@ use bosun_core::record::StateDocument;
 use bosun_core::{default_spec, BackendId, Manifest, Target, Version};
 use bosun_io::manifest_edit::add_entry;
 use bosun_io::{check_options, load_manifest, manifest_hash};
-use bosun_ports::UserInstalls;
+use bosun_ports::{FileAccess, UserInstalls};
 use bosun_resolve::{resolve, Outcome};
 use serde::Serialize;
 use tracing::info;
@@ -159,7 +159,7 @@ impl Export {
 
     /// Write the manifest, then lock it.
     pub fn finish(self, env: &Env, pref: &[BackendId]) -> Result<ExportOutput, CliError> {
-        write(&self.file, &self.edited)?;
+        write(env.user_files().as_ref(), &self.file, &self.edited)?;
         let lock = commands::lock(env, Some(self.file.clone()), pref)?;
         Ok(ExportOutput {
             planned: false,
@@ -170,11 +170,11 @@ impl Export {
 }
 
 /// The manifest file `export` writes: `path` when it names a file, else
-/// `bosun.yaml` in the directory (default: the current one). It need not
-/// exist yet.
-fn export_file(path: Option<PathBuf>) -> PathBuf {
+/// `bosun.yaml` in the directory (default: the current one), asked through
+/// `files`, as its user (§4.5). It need not exist yet.
+fn export_file(files: &dyn FileAccess, path: Option<PathBuf>) -> PathBuf {
     let base = path.unwrap_or_else(|| PathBuf::from("."));
-    if base.is_dir() {
+    if files.is_dir(&base).unwrap_or(false) {
         base.join("bosun.yaml")
     } else {
         base
@@ -185,9 +185,14 @@ fn export_file(path: Option<PathBuf>) -> PathBuf {
 /// installed, as entries for the manifest at `path`, each checked to resolve
 /// on this machine. Changes nothing.
 pub fn prepare(env: &Env, path: Option<PathBuf>, pref: &[BackendId]) -> Result<Export, CliError> {
-    let file = export_file(path);
-    let (text, manifest) = if file.exists() {
-        (read(&file)?, commands::load(env, &file)?)
+    let files = env.user_files();
+    let file = export_file(files.as_ref(), path);
+    let there = files.exists(&file).map_err(|e| CliError::Io {
+        path: file.clone(),
+        detail: e.to_string(),
+    })?;
+    let (text, manifest) = if there {
+        (read(files.as_ref(), &file)?, commands::load(env, &file)?)
     } else {
         let manifest = load_manifest(SEED, &file).map_err(io_error)?;
         (SEED.to_string(), manifest)
@@ -551,12 +556,18 @@ mod tests {
     fn the_file_is_bosun_yaml_in_a_directory_else_the_path_given() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(
-            export_file(Some(dir.path().to_path_buf())),
+            export_file(&bosun_io::DirectFiles, Some(dir.path().to_path_buf())),
             dir.path().join("bosun.yaml")
         );
         let file = dir.path().join("tools.yaml");
-        assert_eq!(export_file(Some(file.clone())), file);
-        assert_eq!(export_file(None), PathBuf::from("./bosun.yaml"));
+        assert_eq!(
+            export_file(&bosun_io::DirectFiles, Some(file.clone())),
+            file
+        );
+        assert_eq!(
+            export_file(&bosun_io::DirectFiles, None),
+            PathBuf::from("./bosun.yaml")
+        );
     }
 
     fn output(added: usize, planned: bool) -> ExportOutput {

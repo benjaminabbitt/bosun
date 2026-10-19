@@ -1,6 +1,7 @@
 //! The file port (§4.5, §4.6): every read and write of one owner's files —
-//! the lock, the user-scope machine state, and the directories they need —
-//! goes through a [`FileAccess`], so who does the I/O is chosen once. A run
+//! the manifest and the path that keys its lock, the user config, the lock,
+//! the user-scope machine state, and the directories they need — goes
+//! through a [`FileAccess`], so who does the I/O is chosen once. A run
 //! does its own files itself; an elevated run does the files of the user who
 //! elevated it as that user, so the kernel allows exactly what the user could
 //! do and a symlink they planted cannot steer a write as root. The adapters
@@ -8,7 +9,7 @@
 
 use std::fs::File;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// How a lock file is opened for an advisory lock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,12 +28,27 @@ pub trait FileAccess {
     /// Whether `path` exists (following symlinks).
     fn exists(&self, path: &Path) -> io::Result<bool>;
 
+    /// Whether `path` is a directory (following symlinks); `false` when
+    /// nothing is there.
+    fn is_dir(&self, path: &Path) -> io::Result<bool>;
+
+    /// The absolute path `path` names with every symlink resolved, as its
+    /// owner reaches it.
+    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf>;
+
     /// The whole of the file at `path`.
     fn read(&self, path: &Path) -> io::Result<Vec<u8>>;
 
     /// Replace `path` with `bytes` atomically, making its directory: a temp
     /// file beside it, synced, renamed over it, readable by all (mode 0644).
     fn write(&self, path: &Path, bytes: &[u8]) -> io::Result<()>;
+
+    /// Write `bytes` over the file at `path` in place, as `std::fs::write`
+    /// does: through a symlink there, keeping the file's mode and owner, and
+    /// making it (mode 0666 less the umask) when it is missing. For a file a
+    /// person keeps, such as a manifest, which may be a link to where they
+    /// keep it.
+    fn write_in_place(&self, path: &Path, bytes: &[u8]) -> io::Result<()>;
 
     /// Open the lock file at `path` for an advisory lock (see [`LockOpen`]).
     fn open_lock(&self, path: &Path, how: LockOpen) -> io::Result<File>;

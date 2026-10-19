@@ -9,6 +9,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use bosun_io::{manifest_version, upgrade_manifest, MANIFEST_VERSION};
+use bosun_ports::FileAccess;
 use serde::Serialize;
 
 use crate::commands;
@@ -70,16 +71,18 @@ fn backup_path(file: &Path, version: u32) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// Run `bosun migrate [path] [--plan] [--yes]`.
+/// Run `bosun migrate [path] [--plan] [--yes]`, reading and writing the
+/// manifest, and the original kept beside it, through `files` (§4.5).
 pub fn run(
+    files: &dyn FileAccess,
     path: Option<PathBuf>,
     plan: bool,
     yes: bool,
     format: Format,
     out: &mut impl Write,
 ) -> Result<i32, CliError> {
-    let file = commands::manifest_file(path)?;
-    let text = read(&file)?;
+    let file = commands::manifest_file(files, path)?;
+    let text = read(files, &file)?;
     let from = manifest_version(&text, &file).map_err(io_error)?;
     let upgraded = upgrade_manifest(&text, &file).map_err(io_error)?;
     let comments_kept = upgraded.as_ref().is_some_and(|u| u.comments_kept);
@@ -102,8 +105,8 @@ pub fn run(
         return Ok(0);
     }
     let backup = backup_path(&file, from);
-    write(&backup, &text)?;
-    write(&file, &new_text)?;
+    write(files, &backup, &text)?;
+    write(files, &file, &new_text)?;
     output.backup = Some(backup.display().to_string());
     emit(&output, format, out)
 }

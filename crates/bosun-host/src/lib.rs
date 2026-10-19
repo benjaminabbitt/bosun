@@ -26,10 +26,10 @@ pub use http::UreqHttpFetcher;
 #[cfg(unix)]
 pub use invoker::passwd_account;
 pub use invoker::{invoker, Account, Invoker, UnknownUser};
-#[cfg(unix)]
-pub use machine::LinuxMachine;
 pub use machine::{
     detect_arch, privilege_from_whoami, windows_privilege, FakeMachine, WindowsMachine,
 };
+#[cfg(unix)]
+pub use machine::{unix_privilege, LinuxMachine};
 pub use process::ProcessCommandRunner;
 pub use registry::{build_registry, RegisteredBackend, Registry, SkipReason, SkippedBackend};

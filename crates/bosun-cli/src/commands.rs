@@ -117,24 +117,33 @@ pub(crate) fn config_installer(path: &Path) -> Result<Vec<String>, CliError> {
         })
 }
 
-pub(crate) fn manifest_file(path: Option<PathBuf>) -> Result<PathBuf, CliError> {
+/// The manifest `path` names: `bosun.yaml` in it when it is a directory
+/// (default: the current one), else the file itself, which must exist. Asked
+/// through `files`, as the manifest's user (§4.5).
+pub(crate) fn manifest_file(
+    files: &dyn FileAccess,
+    path: Option<PathBuf>,
+) -> Result<PathBuf, CliError> {
     let base = path.unwrap_or_else(|| PathBuf::from("."));
-    let file = if base.is_dir() {
+    let file = if files.is_dir(&base).unwrap_or(false) {
         base.join("bosun.yaml")
     } else {
         base
     };
-    if file.exists() {
-        Ok(file)
-    } else {
-        Err(CliError::ManifestNotFound(file))
+    match files.exists(&file) {
+        Ok(true) => Ok(file),
+        Ok(false) => Err(CliError::ManifestNotFound(file)),
+        Err(e) => Err(CliError::Io {
+            path: file,
+            detail: e.to_string(),
+        }),
     }
 }
 
-/// Load the manifest at `file` and check its backend options against the
-/// backends this build has (§5.4).
+/// Load the manifest at `file`, read as its user, and check its backend
+/// options against the backends this build has (§5.4).
 pub(crate) fn load(env: &Env, file: &Path) -> Result<Manifest, CliError> {
-    let manifest = load_checked(env.option_keys(), file)?;
+    let manifest = load_checked(env.option_keys(), env.user_files().as_ref(), file)?;
     warn_of_own_codenames(&manifest, env.machine().distro());
     Ok(manifest)
 }
@@ -170,15 +179,14 @@ pub(crate) fn warn_of_own_codenames(manifest: &Manifest, distro: Option<&Distro>
     }
 }
 
-/// Load the manifest at `file`, checking its backend options against `keys`.
+/// Load the manifest at `file`, read through `files`, checking its backend
+/// options against `keys`.
 pub(crate) fn load_checked(
     keys: &bosun_io::BackendOptionKeys,
+    files: &dyn FileAccess,
     file: &Path,
 ) -> Result<Manifest, CliError> {
-    let text = fs::read_to_string(file).map_err(|e| CliError::Io {
-        path: file.to_path_buf(),
-        detail: e.to_string(),
-    })?;
+    let text = crate::edit::read(files, file)?;
     let parse_err = |detail: String| CliError::Parse {
         what: "manifest".to_string(),
         detail,
@@ -362,7 +370,7 @@ fn claim_lines(claims: &[ClaimStatus], lines: &mut Vec<String>) {
 /// but not in bosun state is shown as present-but-unmanaged (it would be
 /// accepted, §4.6), not "not installed".
 pub fn status(env: &Env, path: PathBuf, pref: &[BackendId]) -> Result<StatusOutput, CliError> {
-    let file = manifest_file(Some(path))?;
+    let file = manifest_file(env.user_files().as_ref(), Some(path))?;
     let manifest = load(env, &file)?;
     let hash = manifest_hash(&manifest);
     let resolution = resolve(&manifest, &hash, &env.host(), &env.resolvables(), pref)
@@ -598,7 +606,7 @@ struct ResolvedInfo {
 /// this machine's lock for it (§4.5). A version the lock already pins is kept
 /// while it still fits (§7); `upgrade` moves pins forward.
 pub fn lock(env: &Env, path: Option<PathBuf>, pref: &[BackendId]) -> Result<LockOutput, CliError> {
-    let file = manifest_file(path)?;
+    let file = manifest_file(env.user_files().as_ref(), path)?;
     let manifest = load(env, &file)?;
     let relocked = relock(env, &file, &manifest, pref, &Release::None)?;
     let written = match &relocked.pending {
@@ -659,7 +667,7 @@ pub fn upgrade(
     path: Option<PathBuf>,
     pref: &[BackendId],
 ) -> Result<UpgradeOutput, CliError> {
-    let file = manifest_file(path)?;
+    let file = manifest_file(env.user_files().as_ref(), path)?;
     let manifest = load(env, &file)?;
     if let Some(missing) = names
         .iter()
@@ -811,9 +819,10 @@ pub(crate) fn relock(
     release: &Release,
 ) -> Result<Relocked, CliError> {
     let hash = manifest_hash(manifest);
-    let claim_path = canonical_manifest(file);
+    let files = env.user_files();
+    let claim_path = canonical_manifest(files.as_ref(), file);
     let lock_path = env.lock_path(&claim_path);
-    warn_of_a_project_lock(file, &lock_path);
+    warn_of_a_project_lock(files.as_ref(), file, &lock_path);
     let previous = this_lock(env, &claim_path)?;
     let released = |name: &str| match release {
         Release::None => false,
@@ -860,7 +869,7 @@ pub(crate) fn relock(
             doc,
             previous: previous.clone(),
             scopes: BTreeMap::new(),
-            files: env.lock_files(),
+            files: env.user_files(),
         }
     });
     Ok(Relocked {
@@ -923,7 +932,7 @@ fn installed_pin(state: &StateDocument, name: &str) -> Option<LockPackage> {
 /// This machine's lock for the manifest at `claim_path`, if it has one: a lock
 /// file recording another manifest (a path-hash clash) is not this one's.
 pub(crate) fn this_lock(env: &Env, claim_path: &Path) -> Result<Option<LockDocument>, CliError> {
-    let files = env.lock_files();
+    let files = env.user_files();
     Ok(
         read_lock(files.as_ref(), &env.lock_path(claim_path), &env.schemes())?
             .filter(|l| Path::new(&l.manifest) == claim_path),
@@ -932,12 +941,13 @@ pub(crate) fn this_lock(env: &Env, claim_path: &Path) -> Result<Option<LockDocum
 
 /// A `bosun.lock` beside the manifest is the shared lock of older bosun
 /// builds, which this one no longer reads; say so, and where the lock is now.
-fn warn_of_a_project_lock(manifest: &Path, lock_path: &Path) {
+/// Looked for through `files`, as the manifest's user.
+fn warn_of_a_project_lock(files: &dyn FileAccess, manifest: &Path, lock_path: &Path) {
     let old = manifest
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join("bosun.lock");
-    if old.exists() {
+    if files.exists(&old).unwrap_or(false) {
         tracing::warn!(
             message = crate::logmsg::PROJECT_LOCK_IGNORED,
             path = %old.display(),
@@ -1091,7 +1101,7 @@ pub fn install_plan(
     opts: InstallOpts,
     pref: &[BackendId],
 ) -> Result<(Plan, Option<PendingLock>), CliError> {
-    let file = manifest_file(opts.path)?;
+    let file = manifest_file(env.user_files().as_ref(), opts.path)?;
     let manifest = load(env, &file)?;
     // Read state lazily per scope: a user-scope install must not touch (and
     // lock) root-owned system state it has no business reading.
@@ -1099,7 +1109,7 @@ pub fn install_plan(
 
     // §4.6: a claim records the manifest by its canonical absolute path, so two
     // projects' `./bosun.yaml` never collide and uninstall/prune can match it.
-    let claim_path = canonical_manifest(&file);
+    let claim_path = canonical_manifest(env.user_files().as_ref(), &file);
 
     let (managed, carried, pending) = if opts.frozen {
         let lock = frozen_lock(env, &file, &claim_path, &manifest, pref)?;
@@ -1154,7 +1164,7 @@ impl<'a> ScopeCache<'a> {
 /// Build the `uninstall` plan for one manifest (§9), from state, so it works
 /// after the manifest is edited or deleted.
 pub fn uninstall_plan(env: &Env, path: Option<PathBuf>) -> Result<Plan, CliError> {
-    let manifest_path = claim_manifest_path(path);
+    let manifest_path = claim_manifest_path(env.user_files().as_ref(), path);
     let state = combined_state(env)?;
     let installers = env.installers();
     build_uninstall_plan(&manifest_path, &state, &installers)
@@ -1578,21 +1588,23 @@ fn frozen_lock(
 
 /// Resolve the manifest path for a claim without requiring the file to exist
 /// (uninstall works after the repo is gone, §9).
-fn claim_manifest_path(path: Option<PathBuf>) -> PathBuf {
+fn claim_manifest_path(files: &dyn FileAccess, path: Option<PathBuf>) -> PathBuf {
     let base = path.unwrap_or_else(|| PathBuf::from("."));
     let file = match base.extension().and_then(|e| e.to_str()) {
         Some("yaml") | Some("yml") => base,
         _ => base.join("bosun.yaml"),
     };
-    canonical_manifest(&file)
+    canonical_manifest(files, &file)
 }
 
-/// The canonical absolute form of a manifest path for a claim (§4.6): resolve
-/// symlinks when the file exists, else make it absolute without resolving (the
-/// repo is gone — uninstall/prune then match the path bosun recorded while it
+/// The canonical absolute form of a manifest path for a claim and the lock it
+/// keys (§4.5, §4.6): its symlinks resolved through `files`, as the manifest's
+/// user, when the file exists; else made absolute without resolving (the repo
+/// is gone — uninstall/prune then match the path bosun recorded while it
 /// still existed, or prune's "manifest no longer exists" check takes over, §9).
-pub(crate) fn canonical_manifest(file: &Path) -> PathBuf {
-    fs::canonicalize(file)
+pub(crate) fn canonical_manifest(files: &dyn FileAccess, file: &Path) -> PathBuf {
+    files
+        .canonicalize(file)
         .or_else(|_| std::path::absolute(file))
         .unwrap_or_else(|_| file.to_path_buf())
 }

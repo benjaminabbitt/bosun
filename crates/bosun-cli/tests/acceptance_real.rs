@@ -39,6 +39,9 @@ struct RealWorld {
     sudoers: bool,
     /// The names in `/etc` when a step pointed the user's locks there.
     etc: Option<BTreeSet<std::ffi::OsString>>,
+    /// A manifest of root's in `/etc` the user's links to, and what it
+    /// held, gone once the scenario ends.
+    etc_manifest: Option<(PathBuf, String)>,
     /// A directory of the non-root user's outside their home.
     #[cfg(unix)]
     elsewhere: Option<TempDir>,
@@ -538,6 +541,44 @@ fn state_to_shadow(w: &mut RealWorld) {
     fs::create_dir_all(&dir).unwrap();
     std::os::unix::fs::symlink("/etc/shadow", dir.join("state.json")).unwrap();
     give_to_user(&w.home().join(".local"));
+}
+
+/// Put a manifest of root's at `path`, with `mode`, and make the user's
+/// manifest a symlink to it.
+#[cfg(unix)]
+fn link_manifest_to(w: &mut RealWorld, path: &str, mode: u32, text: &str) {
+    let path = PathBuf::from(path);
+    fs::write(&path, text).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+    let link = w.home().join("bosun.yaml");
+    let _ = fs::remove_file(&link);
+    std::os::unix::fs::symlink(&path, &link).unwrap();
+    give_to_user(&link);
+    w.etc_manifest = Some((path, text.to_string()));
+}
+
+/// The user's manifest is a symlink to a manifest in `/etc` only root may
+/// read (mode 0600).
+#[cfg(unix)]
+#[given("the manifest is a symlink to a file only root may read")]
+fn manifest_to_root_only(w: &mut RealWorld) {
+    let text = "version: 2\npackages: []\n";
+    link_manifest_to(w, "/etc/bosun-test-root-only.yaml", 0o600, text);
+}
+
+/// The user's manifest is a symlink to a manifest in `/etc` that is root's,
+/// which every user may read (mode 0644).
+#[cfg(unix)]
+#[given("the manifest is a symlink to a file in /etc root owns:")]
+fn manifest_to_etc(w: &mut RealWorld, step: &Step) {
+    let text = step.docstring.clone().expect("docstring");
+    link_manifest_to(w, "/etc/bosun-test.yaml", 0o644, &text);
+}
+
+#[then("the file in /etc is as it was")]
+fn etc_manifest_unchanged(w: &mut RealWorld) {
+    let (path, text) = w.etc_manifest.as_ref().expect("link the manifest first");
+    assert_eq!(&fs::read_to_string(path).unwrap(), text, "{path:?} changed");
 }
 
 #[then("/etc is as it was")]
@@ -1330,6 +1371,9 @@ fn main() {
                     }
                     if w.sudoers {
                         let _ = fs::remove_file(SUDOERS);
+                    }
+                    if let Some((path, _)) = &w.etc_manifest {
+                        let _ = fs::remove_file(path);
                     }
                 }
                 Box::pin(async {})
