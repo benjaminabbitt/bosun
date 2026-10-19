@@ -39,6 +39,8 @@ struct Machine {
     /// Elevated in root's own login rather than through `sudo`, so no
     /// invoking user is in the environment.
     root_login: bool,
+    /// Elevated through doas by this user (`DOAS_USER`) rather than sudo.
+    doas_by: Option<String>,
 }
 
 /// A machine's os-release facts: `ID`, `ID_LIKE`, `VERSION_CODENAME` and `VERSION_ID`.
@@ -250,7 +252,10 @@ impl BosunWorld {
             "absent": self.absent,
             "http": self.http(),
             "home": self.home(),
-            "passwd": {"ben": {"uid": self.ids().0, "gid": self.ids().1, "home": self.home()}},
+            "passwd": {
+                "ben": {"uid": self.ids().0, "gid": self.ids().1, "home": self.home()},
+                "ann": {"uid": self.ids().0, "gid": self.ids().1, "home": self.home()},
+            },
         });
         if let Some(d) = &m.distro {
             fx["distro"] = json!({
@@ -430,7 +435,7 @@ impl BosunWorld {
         let p = self.path();
         let mut all = String::new();
         for scope in ["system", "user"] {
-            let f = p.join("state").join(scope).join("state.json");
+            let f = state_file(&p, scope);
             if let Ok(text) = fs::read_to_string(&f) {
                 all.push_str(&text);
             }
@@ -442,9 +447,7 @@ impl BosunWorld {
         let p = self.path();
         ["system", "user"]
             .iter()
-            .filter_map(|scope| {
-                fs::read_to_string(p.join("state").join(scope).join("state.json")).ok()
-            })
+            .filter_map(|scope| fs::read_to_string(state_file(&p, scope)).ok())
             .map(|t| serde_json::from_str(&t).expect("state is JSON"))
             .collect()
     }
@@ -478,13 +481,23 @@ fn lock_files(project: &Path) -> Vec<PathBuf> {
     locks_in(&project.join("home"))
 }
 
+/// The state dir under `home`: the user's state file and locks.
+fn state_dir_in(home: &Path) -> PathBuf {
+    home.join(".local").join("state").join("bosun")
+}
+
+/// The machine-state file for `scope` (`system`, `user`): the system's in
+/// the seam's state dir, the user's under their home, as on a real host.
+fn state_file(project: &Path, scope: &str) -> PathBuf {
+    match scope {
+        "user" => state_dir_in(&project.join("home")).join("state.json"),
+        _ => project.join("state").join(scope).join("state.json"),
+    }
+}
+
 /// The locks in the state dir under `home`.
 fn locks_in(home: &Path) -> Vec<PathBuf> {
-    let dir = home
-        .join(".local")
-        .join("state")
-        .join("bosun")
-        .join("locks");
+    let dir = state_dir_in(home).join("locks");
     match fs::read_dir(&dir) {
         Ok(entries) => entries.map(|e| e.unwrap().path()).collect(),
         Err(_) => Vec::new(),
@@ -556,6 +569,7 @@ fn a_machine(world: &mut BosunWorld, os: String, arch: String, privilege: String
         libc: None,
         elevated: privilege == "elevated",
         root_login: false,
+        doas_by: None,
     });
 }
 
@@ -576,6 +590,7 @@ fn a_mint_machine(world: &mut BosunWorld, codename: String, arch: String, base: 
         libc: None,
         elevated: false,
         root_login: false,
+        doas_by: None,
     });
 }
 
@@ -605,6 +620,7 @@ fn a_debian_machine_without_release(world: &mut BosunWorld, arch: String) {
         libc: None,
         elevated: false,
         root_login: false,
+        doas_by: None,
     });
 }
 
@@ -928,9 +944,9 @@ fn bosun_recorded(
         .unwrap()
         .push(claim);
     let doc = json!({"stateVersion": 1, "packages": packages});
-    let dir = p.join("state").join(scope);
-    fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("state.json"), doc.to_string()).unwrap();
+    let file = state_file(&p, &scope);
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    fs::write(&file, doc.to_string()).unwrap();
 }
 
 /// What an elevated run leaves: the system state and its lock root's, the
@@ -1018,6 +1034,15 @@ fn later_runs_root_login(world: &mut BosunWorld) {
     m.root_login = true;
 }
 
+/// The runs that follow are elevated through doas, which names only the
+/// user (`DOAS_USER`).
+#[when(regex = r"^later runs are elevated through doas by (\S+)$")]
+fn later_runs_doas(world: &mut BosunWorld, name: String) {
+    let m = world.machine.as_mut().expect("describe the machine first");
+    m.elevated = true;
+    m.doas_by = Some(name);
+}
+
 #[when("the manifest is deleted")]
 fn delete_manifest(world: &mut BosunWorld) {
     let p = world.path();
@@ -1090,11 +1115,18 @@ fn bosun_command(world: &mut BosunWorld, cmdline: &str, cwd: &Path) -> Command {
     // root's own login.
     let m = world.machine();
     if m.elevated && !m.root_login {
-        let (uid, gid) = world.ids();
-        command
-            .env("SUDO_USER", "ben")
-            .env("SUDO_UID", uid.to_string())
-            .env("SUDO_GID", gid.to_string());
+        match &m.doas_by {
+            Some(name) => {
+                command.env("DOAS_USER", name);
+            }
+            None => {
+                let (uid, gid) = world.ids();
+                command
+                    .env("SUDO_USER", "ben")
+                    .env("SUDO_UID", uid.to_string())
+                    .env("SUDO_GID", gid.to_string());
+            }
+        }
     }
     command
 }
@@ -1605,6 +1637,45 @@ fn root_lock(world: &mut BosunWorld, count: String) {
     let locks = locks_in(&world.path().join("state").join("root"));
     let want = usize::from(count == "a");
     assert_eq!(locks.len(), want, "root's locks: {locks:?}");
+}
+
+/// Root's own user state, in its home inside the seam.
+#[then(regex = r"^root's state holds (a|no) user state$")]
+fn root_user_state(world: &mut BosunWorld, count: String) {
+    let file = state_dir_in(&world.path().join("state").join("root")).join("state.json");
+    assert_eq!(file.exists(), count == "a", "{file:?}");
+}
+
+/// The package's leaf in the `scope` state file.
+fn recorded_leaf(world: &mut BosunWorld, scope: &str, pkg: &str) -> Value {
+    let file = state_file(&world.path(), scope);
+    let text = fs::read_to_string(&file).unwrap_or_else(|e| panic!("{file:?}: {e}"));
+    let doc: Value = serde_json::from_str(&text).expect("state is JSON");
+    let entry = doc["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == pkg)
+        .unwrap_or_else(|| panic!("{pkg} not recorded: {text}"));
+    let leaf = entry["targets"].as_object().unwrap().values().next();
+    leaf.expect("a target").clone()
+}
+
+#[then(regex = r"^the user state records (\S+) with no claims$")]
+fn user_state_no_claims(world: &mut BosunWorld, pkg: String) {
+    let leaf = recorded_leaf(world, "user", &pkg);
+    assert_eq!(leaf["claimedBy"], json!([]), "{leaf}");
+}
+
+/// Every claim on the package in the system state names `user`.
+#[then(regex = r"^the system state claims (\S+) for (\S+)$")]
+fn system_state_claims_for(world: &mut BosunWorld, pkg: String, user: String) {
+    let leaf = recorded_leaf(world, "system", &pkg);
+    let claims = leaf["claimedBy"].as_array().unwrap();
+    assert!(!claims.is_empty(), "{leaf}");
+    for claim in claims {
+        assert_eq!(claim["user"], json!(user), "{leaf}");
+    }
 }
 
 fn lock_leaves(doc: &Value) -> impl Iterator<Item = (&Value, &Value)> {

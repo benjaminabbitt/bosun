@@ -57,7 +57,8 @@ fn bosun(dir: &Path) -> Command {
 /// project).
 fn lock_files(dir: &Path) -> Vec<PathBuf> {
     let home = dir.join("state").join("home");
-    match fs::read_dir(bosun_io::paths::locks_under_home(&home)) {
+    let state = bosun_io::paths::state_under_home(&home);
+    match fs::read_dir(bosun_io::paths::locks_beside(&state)) {
         Ok(entries) => entries.map(|e| e.unwrap().path()).collect(),
         Err(_) => Vec::new(),
     }
@@ -456,7 +457,7 @@ fn apply_project(manifest: &str) -> TempDir {
 }
 
 fn state_file(dir: &Path) -> PathBuf {
-    dir.join("state").join("user").join("state.json")
+    bosun_io::paths::state_under_home(&dir.join("state").join("home"))
 }
 
 #[test]
@@ -650,9 +651,9 @@ fn a_failed_step_mid_apply_keeps_the_earlier_package() {
 }
 
 fn write_user_state(dir: &Path, json: &str) {
-    let d = dir.join("state").join("user");
-    fs::create_dir_all(&d).unwrap();
-    fs::write(d.join("state.json"), json).unwrap();
+    let file = state_file(dir);
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    fs::write(&file, json).unwrap();
 }
 
 #[test]

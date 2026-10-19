@@ -658,6 +658,26 @@ Feature: real backends against a disposable container
     And it reports "Permission denied"
     And /etc is as it was
 
+  # The user state is the invoking user's too (§4.6), read as them: a state
+  # file they point at /etc/shadow is one they may not read.
+  @apt-get @useradd @runuser @sudo
+  Scenario: sudo bosun status reads the user's state as the user
+    Given the apt index is refreshed
+    And the manifest:
+      """
+      version: 2
+      packages:
+        - name: hello
+          spec: "*"
+          install:
+            linux:debian: {backend: apt}
+      """
+    And a non-root user whose home is the project, and who may use sudo
+    And the non-root user's state file is a symlink to /etc/shadow
+    When the non-root user runs `sudo bosun --format text status .`
+    Then it fails
+    And it reports "machine state is not readable by this user"
+
   @apt-get @useradd @runuser @sudo
   Scenario: sudo bosun lock follows the user's own symlinked ~/.local
     Given the apt index is refreshed

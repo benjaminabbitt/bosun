@@ -80,6 +80,8 @@ pub struct LinuxMachine {
     libc: Option<Libc>,
     system_state: PathBuf,
     user_state: PathBuf,
+    /// The user who elevated this run ([`LinuxMachine::invoked_by`]).
+    invoker: Option<User>,
 }
 
 #[cfg(unix)]
@@ -99,6 +101,18 @@ impl LinuxMachine {
             libc,
             system_state,
             user_state,
+            invoker: None,
+        }
+    }
+
+    /// The machine of a run elevated by `user` (found by
+    /// [`crate::invoker`], §5.5): it runs for them, so system claims are
+    /// theirs, and its user state is theirs, at `user_state` (§4.6).
+    pub fn invoked_by(self, user: User, user_state: PathBuf) -> LinuxMachine {
+        LinuxMachine {
+            user_state,
+            invoker: Some(user),
+            ..self
         }
     }
 
@@ -146,10 +160,9 @@ impl Machine for LinuxMachine {
     }
 
     fn invoking_user(&self) -> User {
-        // Under sudo the real uid is root's; the human is in SUDO_USER (§5.5).
-        if let Ok(name) = std::env::var("SUDO_USER") {
-            let uid = std::env::var("SUDO_UID").ok().and_then(|s| s.parse().ok());
-            return User { name, uid };
+        // Under sudo or doas the human is the user who elevated (§5.5).
+        if let Some(user) = &self.invoker {
+            return user.clone();
         }
         let uid = rustix::process::getuid().as_raw();
         let name = std::env::var("USER").unwrap_or_else(|_| uid.to_string());
@@ -484,6 +497,28 @@ mod tests {
             m.state_path(Scope::User),
             PathBuf::from("/home/x/.local/state/bosun/state.json")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_linux_machine_invoked_by_a_user_runs_for_them_with_their_user_state() {
+        let own = LinuxMachine::new(
+            Arch::Amd64,
+            None,
+            None,
+            PathBuf::from("/s"),
+            PathBuf::from("/root/u"),
+        );
+        let me = own.invoking_user();
+        assert_eq!(me.uid, Some(rustix::process::getuid().as_raw()));
+        let ann = User {
+            name: "ann".into(),
+            uid: Some(1001),
+        };
+        let m = own.invoked_by(ann.clone(), PathBuf::from("/home/ann/u"));
+        assert_eq!(m.invoking_user(), ann);
+        assert_eq!(m.state_path(Scope::User), PathBuf::from("/home/ann/u"));
+        assert_eq!(m.state_path(Scope::System), PathBuf::from("/s"));
     }
 
     #[cfg(unix)]

@@ -530,6 +530,16 @@ fn locks_to_etc(w: &mut RealWorld) {
     w.etc = Some(etc_names());
 }
 
+/// The user's state file, theirs, is a symlink to `/etc/shadow`.
+#[cfg(unix)]
+#[given("the non-root user's state file is a symlink to /etc/shadow")]
+fn state_to_shadow(w: &mut RealWorld) {
+    let dir = user_state(w).join("bosun");
+    fs::create_dir_all(&dir).unwrap();
+    std::os::unix::fs::symlink("/etc/shadow", dir.join("state.json")).unwrap();
+    give_to_user(&w.home().join(".local"));
+}
+
 #[then("/etc is as it was")]
 fn etc_unchanged(w: &mut RealWorld) {
     let before = w.etc.as_ref().expect("note /etc first");

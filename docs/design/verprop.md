@@ -187,39 +187,44 @@ filesystem-safe name; the lock records the path too, and a lock whose `manifest`
 one is treated as absent. Moving a project leaves its old lock behind (harmless; a future
 `prune` can drop locks whose manifest is gone).
 
-**Under elevation — DECIDED: the lock is the invoking user's.** Under `sudo` the user state
-directory is root's, but the lock an elevated run reads and writes is the one the user's own
-runs do, so `bosun install` then `sudo bosun install --frozen` installs what the user locked.
-On Linux and macOS, when the effective UID is 0 and the elevating tool names a user other than
-root (`SUDO_USER`, with `SUDO_UID` / `SUDO_GID` for the ids; doas's `DOAS_USER`, ids from the
-account), the lock is `<home>/.local/state/bosun/locks/<id>.json`, with `<home>` from the
-passwd database (`getpwnam_r`), never guessed from the name. Their `XDG_STATE_HOME` is not
-read: sudo's default `env_reset` drops it, and one that survives (`sudo -E`, `env_keep`)
-cannot be told from root's, so a user who moves their state dir with it has an elevated run
-miss their lock (`--frozen` then fails asking for `bosun lock`). A name the passwd database
-lacks is warned of, and the run uses its own lock.
+**Under elevation — DECIDED: the lock and the user state are the invoking user's.** Under
+`sudo` the user state directory is root's, but the lock and user-scope state (§4.6) an elevated
+run reads and writes are the ones the user's own runs do, so `bosun install` then
+`sudo bosun install --frozen` installs what the user locked, and `sudo bosun status`, `prune`
+and `lock` see what the user's runs recorded. On Linux and macOS, when the effective UID is 0
+and the elevating tool names a user other than root (`SUDO_USER`, with `SUDO_UID` /
+`SUDO_GID` for the ids; doas's `DOAS_USER`, ids from the account; `bosun_host::invoker`), the
+user state is `<home>/.local/state/bosun/state.json` and the lock
+`<home>/.local/state/bosun/locks/<id>.json`, with `<home>` from the passwd database
+(`getpwnam_r`), never guessed from the name. Their `XDG_STATE_HOME` is not read: sudo's
+default `env_reset` drops it, and one that survives (`sudo -E`, `env_keep`) cannot be told
+from root's, so a user who moves their state dir with it has an elevated run miss their state
+and lock (`--frozen` then fails asking for `bosun lock`). A name the passwd database lacks is
+warned of, and the run uses its own. `pkexec` (`PKEXEC_UID` only) is not read: a run under it
+uses root's own. Windows needs nothing: an elevated terminal runs as the same user with the
+same `%LOCALAPPDATA%` (over-the-shoulder elevation with another account's credentials runs as
+that account, whose state and lock they then are). The user config and the cache keep their
+rules, so under `sudo` they are root's.
 
 **The user's files are read and written as the user — DECIDED, built.** Root never does I/O
 in the user's tree: a symlink the user planted (`locks` → `/etc`) would have root write, and
-then hand them, a file in a root directory. Every read and write of the lock, and the
-directories it needs, goes through the `FileAccess` port; an elevated run's adapter
-(`bosun_host::AsUser`) runs each operation in a short-lived forked child that drops for good
-to the user's groups (`getgrouplist`; on macOS their primary group alone), group id and user
-id (`setgroups`, `setgid`, `setuid`, checked after), then makes the missing directories, writes
-a temp file beside the lock (`O_EXCL|O_NOFOLLOW`, mode 0644, synced) and renames it over the
-lock, or reads it, answering over a socket pair (a status and errno, then the bytes, or an
-opened lock file's descriptor by `SCM_RIGHTS` for an advisory lock the parent holds). The
-kernel then allows exactly what the user could do, and what is written is theirs because they
-wrote it. A fork rather than a re-exec of bosun, so the binary need not be one the user may
-run (a root-only `/root/.cargo/bin`) and no environment or arguments reach the child; rather
-than per-thread credentials (`setfsuid`), which are Linux-only and keep root's supplementary
-groups. The child may share the process with other threads, so it only makes system calls
-(rustix, nix) on buffers made before the fork, allocates nothing, and leaves by `_exit`. A run
-not elevated, and Windows, do their own files (`bosun_io::DirectFiles`). `pkexec` (`PKEXEC_UID` only) is not read: a run under it uses root's
-own lock. Windows needs nothing: an elevated terminal runs as the same user with the same
-`%LOCALAPPDATA%` (over-the-shoulder elevation with another account's credentials runs as that
-account, whose lock it then is). Only the lock moves: machine state (§4.6), user config and the
-cache keep their rules, so under `sudo` user-scope state and the cache are root's.
+then hand them, a file in a root directory, or read one they may not (`state.json` →
+`/etc/shadow`). Every read and write of the lock and the user state, and the directories they
+need, goes through the `FileAccess` port; an elevated run's adapter (`bosun_host::AsUser`) runs
+each operation in a short-lived forked child that drops for good to the user's groups
+(`getgrouplist`; on macOS their primary group alone), group id and user id (`setgroups`,
+`setgid`, `setuid`, checked after), then makes the missing directories, writes a temp file
+beside the file (`O_EXCL|O_NOFOLLOW`, mode 0644, synced) and renames it over it, reads it, or
+opens a lock file, answering over a socket pair (a status and errno, then the bytes, or the
+opened lock file's descriptor by `SCM_RIGHTS`, which the parent locks and holds across the
+transaction). The kernel then allows exactly what the user could do, and what is written is
+theirs because they wrote it. A fork rather than a re-exec of bosun, so the binary need not be
+one the user may run (a root-only `/root/.cargo/bin`) and no environment or arguments reach the
+child; rather than per-thread credentials (`setfsuid`), which are Linux-only and keep root's
+supplementary groups. The child may share the process with other threads, so it only makes
+system calls (rustix, nix) on buffers made before the fork, allocates nothing, and leaves by
+`_exit`. A run not elevated, the system state, and Windows use this process's own I/O
+(`bosun_io::DirectFiles`).
 
 Each package is locked under this machine's platform, or under `any` for platform-independent
 backends (cargo, go, npm, …). Because the backend and package ID can differ per platform
@@ -403,8 +408,11 @@ Only the header and the per-target leaf fields differ:
 
 **Multiple OS users.** Claims in the *system* state file also record the claiming user
 (`"user": "babbitt"` alongside `manifest`), so prune and conflict checks in one user's project
-see every other user's claims on the same system package. User-scope state stays private to
-its user.
+see every other user's claims on the same system package; under elevation that user is the one
+who elevated (§5.5). User-scope state stays private to its user: an elevated run reads and
+writes the invoking user's, as them, never root's own (§4.5), so the drop-claim, claim and
+accept records an elevated `prune` or `install` makes at user scope land where the user's own
+runs read them. Changing a user-scope package itself still refuses elevation (§5.5).
 
 **Privilege — DECIDED: the user elevates bosun; bosun never elevates itself.** System scope
 runs under `sudo bosun …` (Linux/macOS) or from an Administrator terminal (Windows). bosun
@@ -997,7 +1005,7 @@ trait Machine {
 | | Linux | macOS | Windows |
 |---|---|---|---|
 | elevated when | effective UID is 0 | effective UID is 0 | process token is elevated |
-| invoking user under elevation | `SUDO_USER` / `SUDO_UID` (the lock also reads doas's `DOAS_USER`, §4.5) | `SUDO_USER` / `SUDO_UID` | the token's user |
+| invoking user under elevation | `SUDO_USER` / `SUDO_UID`, or doas's `DOAS_USER` (id from passwd); `bosun_host::invoker`, as the user state and lock use (§4.5) | the same | the token's user |
 | how to elevate (error text) | re-run with `sudo` | re-run with `sudo` | open a terminal with "Run as administrator" and re-run (Windows 11's opt-in `sudo` may work, but is not relied on) |
 
 **Architecture is the machine's, not bosun's build (DECIDED).** An x86_64 bosun can run
@@ -1783,6 +1791,7 @@ under a pty on Unix only.
 | TV-21 | `remove --scope` is refused before anything runs (`refuse_remove_scope`, `REMOVE_NO_SCOPE`): removing an entry cleans up every scope it touches; the flag is hidden from `remove --help`, which says why, and stays on `install`, `uninstall` and `prune` | landed; scenarios: `remove ripgrep --scope user` fails with the reason, manifest, state and lock untouched; `remove --help` says it takes no `--scope` and shows no flag, `uninstall --help` still offers it; red before: the remove applied |
 | TV-22 | an elevated run reads and writes the invoking user's lock (§4.5): `bosun_host::invoker` (`SUDO_USER`/`SUDO_UID`/`SUDO_GID`, `DOAS_USER`; home by `passwd_account`, nix `getpwnam_r`), `lock_place` → `paths::locks_under_home`, `INVOKER_LOCK` / `INVOKER_UNKNOWN`; the lock is written by `bosun_io::write_owned` (temp file, `fchown`, rename; made dirs `chownat` no-follow). The seam models it: its user's lock is under their home, an elevated run's own under root's (`state/root`), and an elevated scenario runs with `SUDO_USER` and a fixture `passwd` unless it is root's own login | landed; scenarios: under sudo `lock` writes the user's lock and keeps its pins, root's own login writes root's; real tier (debian 13, sudo): the non-root user's `bosun install` defers accept hello, `sudo bosun install --frozen` applies it from their lock, root has none, everything under their `.local/state` is theirs, and `sudo bosun lock` after deleting it remakes it theirs; red before: `--frozen needs this machine's lock` (seam, both elevated `--frozen` scenarios; real tier) |
 | TV-23 | an elevated run reads and writes the invoking user's lock as that user, never as root (§4.5): the `FileAccess` port (`bosun_ports`), `bosun_io::DirectFiles` for a run's own files, `bosun_host::AsUser` for the user's (a forked child: `setgroups`/`setgid`/`setuid` to the user, then the I/O with rustix on buffers made before the fork; answers by socket pair, a lock file's descriptor by `SCM_RIGHTS`); `write_owned`'s chown is gone. The seam's elevated runs name this test's own ids, so their lock I/O runs through the real child | landed; unit tests as this user (write, replace, a 1 MB read, exists, both lock opens, a write into a 0555 directory through a symlink refused and nothing left, another uid or gid refused without root) and as root (nobody: a root-owned 0775 directory refused, a directory of theirs takes files theirs, a 0640 root file unreadable); real tier (debian 13, sudo): a `locks` symlink to `/etc` makes `sudo bosun lock` fail with "Permission denied" and leaves `/etc` as it was, a `~/.local` symlinked to a directory of the user's takes their lock; red before: the lock was written into `/etc` |
+| TV-24 | under elevation the user-scope state is the invoking user's too (§4.5, §4.6): `user_place` gives `<home>/.local/state/bosun/state.json` (`paths::state_under_home`) and its locks beside it, `FileStateStore::with_user_files` reads, locks and writes it through `AsUser` (the system state stays `DirectFiles`), and `LinuxMachine::invoked_by` makes `Machine::invoking_user` the same invoker (`DOAS_USER` too) with that user state; `INVOKER_STATE`. The seam keeps every user's state under their home, root's own under `state/root` | landed; scenarios: under sudo `status` reports the ripgrep the user's run installed, `prune` drops a gone manifest's claim in the user's state, `lock` keeps the version the user's state records, root holds no user state; under doas an elevated install's system claim names ann; unit tests: the user state goes through its files and the system state does not, `invoked_by`; real tier (debian 13): a user `state.json` symlinked to `/etc/shadow` makes `sudo bosun status` fail as not readable by this user; red before: root's own (empty) user state (seam: not installed, nothing to apply, lock pins 14.1.1; real tier: status succeeded), and the doas claim named the fixture's own user |
 
 **First real-host smoke run (2026-10-14, release build, Debian 13, read-only `--plan` and
 `lock` in a scratch dir).** `backends` found apt 3.0.3, cargo 1.96.1 and github-release; jq

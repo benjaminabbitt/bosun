@@ -100,15 +100,16 @@ pub fn locks_beside(state_file: &Path) -> PathBuf {
         .map_or_else(|| PathBuf::from("locks"), |dir| dir.join("locks"))
 }
 
-/// The locks of the user whose home is `home`, in the default state dir:
-/// `<home>/.local/state/bosun/locks`. Where an elevated run finds the lock
-/// of the user who elevated it (§4.5): their `XDG_STATE_HOME` is not in the
+/// The user state file of the user whose home is `home`, in the default
+/// state dir: `<home>/.local/state/bosun/state.json`, their locks beside it
+/// ([`locks_beside`]). Where an elevated run finds the state and lock of the
+/// user who elevated it (§4.5, §4.6): their `XDG_STATE_HOME` is not in the
 /// environment sudo leaves, and one that is cannot be told from root's.
-pub fn locks_under_home(home: &Path) -> PathBuf {
+pub fn state_under_home(home: &Path) -> PathBuf {
     home.join(".local")
         .join("state")
         .join("bosun")
-        .join("locks")
+        .join("state.json")
 }
 
 /// The lock for the manifest at `manifest` (its canonical path) in `dir`:
@@ -199,9 +200,14 @@ mod tests {
     }
 
     #[test]
-    fn a_users_locks_under_their_home_are_in_the_default_state_dir() {
+    fn a_users_state_and_locks_under_their_home_are_in_the_default_state_dir() {
+        let state = state_under_home(Path::new("/home/ben"));
         assert_eq!(
-            locks_under_home(Path::new("/home/ben")),
+            state,
+            PathBuf::from("/home/ben/.local/state/bosun/state.json")
+        );
+        assert_eq!(
+            locks_beside(&state),
             PathBuf::from("/home/ben/.local/state/bosun/locks")
         );
     }

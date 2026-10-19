@@ -5,16 +5,17 @@
 //! reader never sees a torn file. Locking uses std `File::lock` (Rust 1.89+).
 
 use std::collections::BTreeMap;
-use std::fs::{self, File, TryLockError};
-use std::io::Write;
+use std::fs::{File, TryLockError};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use bosun_core::record::{Package, Placement, StateDocument, StateLeaf, StatePackage};
 use bosun_core::{BackendId, Claim, Origin, Purl, Scheme, Scope, Version};
-use bosun_ports::{PortError, StateStore, StateTransaction};
+use bosun_ports::{FileAccess, LockOpen, PortError, StateStore, StateTransaction};
 use serde::{Deserialize, Serialize};
 
 use crate::error::IoError;
+use crate::files::DirectFiles;
 use crate::BackendSchemes;
 
 /// The newest machine-state format version this build reads and writes.
@@ -198,31 +199,45 @@ pub fn from_json(
 }
 
 /// A [`StateStore`] backed by one JSON file per scope (§4.6). Carries the
-/// backend→scheme map (§6) used to read versions under each backend's vers type.
+/// backend→scheme map (§6) used to read versions under each backend's vers type,
+/// and how each scope's files are read and written: the system state by this
+/// process, the user state as its user ([`FileStateStore::with_user_files`]).
 pub struct FileStateStore {
     system: PathBuf,
     user: PathBuf,
     schemes: BackendSchemes,
+    user_files: Rc<dyn FileAccess>,
 }
 
 impl FileStateStore {
     /// Construct with explicit per-scope paths (injected by the machine) and the
-    /// backend→scheme map for reading versions (§6).
+    /// backend→scheme map for reading versions (§6). Both scopes' files are
+    /// this process's own until [`FileStateStore::with_user_files`].
     pub fn new(system: PathBuf, user: PathBuf, schemes: BackendSchemes) -> FileStateStore {
         FileStateStore {
             system,
             user,
             schemes,
+            user_files: Rc::new(DirectFiles),
         }
     }
 
     /// Construct with the default §4.6 locations for this host.
     pub fn with_default_paths(schemes: BackendSchemes) -> Result<FileStateStore, IoError> {
-        Ok(FileStateStore {
-            system: crate::paths::state_path(Scope::System)?,
-            user: crate::paths::state_path(Scope::User)?,
+        Ok(FileStateStore::new(
+            crate::paths::state_path(Scope::System)?,
+            crate::paths::state_path(Scope::User)?,
             schemes,
-        })
+        ))
+    }
+
+    /// Read and write the user state through `files`: as the user who
+    /// elevated the run, whose state it is (§4.6).
+    pub fn with_user_files(self, files: Rc<dyn FileAccess>) -> FileStateStore {
+        FileStateStore {
+            user_files: files,
+            ..self
+        }
     }
 
     fn path(&self, scope: Scope) -> &Path {
@@ -231,23 +246,47 @@ impl FileStateStore {
             Scope::User => &self.user,
         }
     }
+
+    fn files(&self, scope: Scope) -> Rc<dyn FileAccess> {
+        match scope {
+            Scope::System => Rc::new(DirectFiles),
+            Scope::User => self.user_files.clone(),
+        }
+    }
+
+    /// Open (creating, with its directory) the lock file beside `scope`'s
+    /// state, for an exclusive lock.
+    fn open_lock(&self, scope: Scope) -> Result<Opened, IoError> {
+        let path = self.path(scope).to_path_buf();
+        let files = self.files(scope);
+        let lock_path = path.with_extension("lock");
+        let lock = files
+            .open_lock(&lock_path, LockOpen::Exclusive)
+            .map_err(|source| IoError::Lock {
+                path: lock_path,
+                source,
+            })?;
+        Ok(Opened { path, files, lock })
+    }
 }
 
-impl FileStateStore {
-    /// Create the parent dir and open (creating) the sibling lock file.
-    fn open_lock(&self, scope: Scope) -> Result<(PathBuf, File), IoError> {
-        let path = self.path(scope).to_path_buf();
-        let dir = path.parent().unwrap_or_else(|| Path::new("."));
-        fs::create_dir_all(dir).map_err(|source| IoError::Write {
-            path: dir.to_path_buf(),
-            source,
-        })?;
-        let lock_path = path.with_extension("lock");
-        let lock = File::create(&lock_path).map_err(|source| IoError::Lock {
-            path: lock_path,
-            source,
-        })?;
-        Ok((path, lock))
+/// A scope's state file, how it is read and written, and its opened lock.
+struct Opened {
+    path: PathBuf,
+    files: Rc<dyn FileAccess>,
+    lock: File,
+}
+
+impl Opened {
+    /// The transaction over the state, once its lock is held.
+    fn locked(self, schemes: &BackendSchemes) -> Result<FileStateTxn, IoError> {
+        let state = read_or_empty(self.files.as_ref(), &self.path, schemes)?;
+        Ok(FileStateTxn {
+            path: self.path,
+            files: self.files,
+            lock: self.lock,
+            state,
+        })
     }
 }
 
@@ -255,25 +294,21 @@ impl StateStore for FileStateStore {
     type Transaction = FileStateTxn;
 
     fn begin(&self, scope: Scope) -> Result<FileStateTxn, PortError> {
-        let (path, lock) = self.open_lock(scope)?;
-        lock.lock().map_err(|source| IoError::Lock {
-            path: path.with_extension("lock"),
+        let opened = self.open_lock(scope)?;
+        opened.lock.lock().map_err(|source| IoError::Lock {
+            path: opened.path.with_extension("lock"),
             source,
         })?;
-        let state = read_or_empty(&path, &self.schemes)?;
-        Ok(FileStateTxn { path, lock, state })
+        Ok(opened.locked(&self.schemes)?)
     }
 
     fn try_begin(&self, scope: Scope) -> Result<Option<FileStateTxn>, PortError> {
-        let (path, lock) = self.open_lock(scope)?;
-        match lock.try_lock() {
-            Ok(()) => {
-                let state = read_or_empty(&path, &self.schemes)?;
-                Ok(Some(FileStateTxn { path, lock, state }))
-            }
+        let opened = self.open_lock(scope)?;
+        match opened.lock.try_lock() {
+            Ok(()) => Ok(Some(opened.locked(&self.schemes)?)),
             Err(TryLockError::WouldBlock) => Ok(None),
             Err(TryLockError::Error(source)) => Err(IoError::Lock {
-                path: path.with_extension("lock"),
+                path: opened.path.with_extension("lock"),
                 source,
             }
             .into()),
@@ -282,38 +317,37 @@ impl StateStore for FileStateStore {
 
     fn read(&self, scope: Scope) -> Result<StateDocument, PortError> {
         let path = self.path(scope);
-        match path.try_exists() {
+        let files = self.files(scope);
+        match files.exists(path) {
             Ok(true) => {}
             Ok(false) => return Ok(empty_state()),
             Err(source) => return Err(read_error(path, source).into()),
         }
         let lock_path = path.with_extension("lock");
-        let lock = open_for_shared_lock(&lock_path)?;
+        let lock = open_for_shared_lock(files.as_ref(), &lock_path)?;
         lock.lock_shared().map_err(|source| IoError::Lock {
             path: lock_path,
             source,
         })?;
-        Ok(read_or_empty(path, &self.schemes)?)
+        Ok(read_or_empty(files.as_ref(), path, &self.schemes)?)
     }
 }
 
 /// Open the lock file for a shared lock: read-only, since an elevated run
 /// leaves it writable only by root while every user may read the state
 /// (§4.6). Created only when missing.
-fn open_for_shared_lock(lock_path: &Path) -> Result<File, IoError> {
-    let opened = match File::open(lock_path) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => File::create(lock_path),
-        other => other,
-    };
-    opened.map_err(|source| match source.kind() {
-        std::io::ErrorKind::PermissionDenied => IoError::Denied {
-            path: lock_path.to_path_buf(),
-        },
-        _ => IoError::Lock {
-            path: lock_path.to_path_buf(),
-            source,
-        },
-    })
+fn open_for_shared_lock(files: &dyn FileAccess, lock_path: &Path) -> Result<File, IoError> {
+    files
+        .open_lock(lock_path, LockOpen::Shared)
+        .map_err(|source| match source.kind() {
+            std::io::ErrorKind::PermissionDenied => IoError::Denied {
+                path: lock_path.to_path_buf(),
+            },
+            _ => IoError::Lock {
+                path: lock_path.to_path_buf(),
+                source,
+            },
+        })
 }
 
 /// A failure reading `path`: [`IoError::Denied`] when this user may not.
@@ -330,11 +364,24 @@ fn read_error(path: &Path, source: std::io::Error) -> IoError {
 }
 
 /// A held read-modify-write transaction (§4.6): the exclusive lock, the path,
-/// and the state loaded when it began.
+/// how it is written, and the state loaded when it began.
 pub struct FileStateTxn {
     path: PathBuf,
+    files: Rc<dyn FileAccess>,
     lock: File,
     state: StateDocument,
+}
+
+impl FileStateTxn {
+    /// Atomically replace the state file with `state`, through its files.
+    fn save(&self, state: &StateDocument) -> Result<(), IoError> {
+        self.files
+            .write(&self.path, to_json(state).as_bytes())
+            .map_err(|source| IoError::Write {
+                path: self.path.clone(),
+                source,
+            })
+    }
 }
 
 impl StateTransaction for FileStateTxn {
@@ -345,19 +392,14 @@ impl StateTransaction for FileStateTxn {
     fn checkpoint(&mut self, state: &StateDocument) -> Result<(), PortError> {
         // Atomic write; the lock stays held so the next action continues the
         // same transaction (Appendix B crash-safety).
-        save_atomic(&self.path, to_json(state).as_bytes())?;
+        self.save(state)?;
         Ok(())
     }
 
     fn commit(self, state: StateDocument) -> Result<(), PortError> {
-        let FileStateTxn {
-            path,
-            lock,
-            state: _,
-        } = self;
         // The lock is still held across the atomic write; released below.
-        save_atomic(&path, to_json(&state).as_bytes())?;
-        drop(lock);
+        self.save(&state)?;
+        drop(self.lock);
         Ok(())
     }
 }
@@ -369,34 +411,29 @@ fn empty_state() -> StateDocument {
     }
 }
 
-fn read_or_empty(path: &Path, schemes: &BackendSchemes) -> Result<StateDocument, IoError> {
-    match fs::read_to_string(path) {
-        Ok(text) => from_json(&text, path, schemes),
+fn read_or_empty(
+    files: &dyn FileAccess,
+    path: &Path,
+    schemes: &BackendSchemes,
+) -> Result<StateDocument, IoError> {
+    match files.read(path) {
+        Ok(bytes) => {
+            let text = String::from_utf8(bytes).map_err(|e| IoError::Parse {
+                path: path.to_path_buf(),
+                detail: e.to_string(),
+            })?;
+            from_json(&text, path, schemes)
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(empty_state()),
         Err(source) => Err(read_error(path, source)),
     }
-}
-
-/// Atomically replace `path`: temp file in the same dir, fsync, rename. The
-/// caller holds the exclusive lock, so the temp name cannot collide.
-fn save_atomic(path: &Path, bytes: &[u8]) -> Result<(), IoError> {
-    let write = |p: &Path, src| IoError::Write {
-        path: p.to_path_buf(),
-        source: src,
-    };
-    let tmp = path.with_extension("json.tmp");
-    let mut f = File::create(&tmp).map_err(|e| write(&tmp, e))?;
-    f.write_all(bytes).map_err(|e| write(&tmp, e))?;
-    f.sync_all().map_err(|e| write(&tmp, e))?;
-    drop(f);
-    fs::rename(&tmp, path).map_err(|e| write(path, e))?;
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use bosun_core::Scheme;
+    use std::fs;
 
     /// The sample records an apt (deb) package, so its version reads as Debian.
     fn schemes() -> BackendSchemes {
@@ -534,7 +571,7 @@ mod tests {
         std::fs::create_dir(&dir).unwrap();
         // Reading a directory errors with a kind other than NotFound, so it
         // must surface rather than be treated as "empty state".
-        assert!(read_or_empty(&dir, &schemes()).is_err());
+        assert!(read_or_empty(&DirectFiles, &dir, &schemes()).is_err());
     }
 
     fn store(tmp: &tempfile::TempDir) -> FileStateStore {
@@ -563,7 +600,7 @@ mod tests {
         txn.checkpoint(&sample()).unwrap();
         // Persisted and readable mid-transaction (a crash now keeps this).
         assert_eq!(
-            read_or_empty(store.path(Scope::User), &schemes()).unwrap(),
+            read_or_empty(&DirectFiles, store.path(Scope::User), &schemes()).unwrap(),
             sample()
         );
         // The lock is still held, so another run still backs off.
@@ -698,5 +735,80 @@ mod tests {
         fs::remove_file(&lock).unwrap();
         assert_eq!(store.read(Scope::User).unwrap(), sample());
         assert!(lock.exists());
+    }
+
+    /// File access that does this process's I/O and notes each operation.
+    #[derive(Default)]
+    struct Noted(std::cell::RefCell<Vec<String>>);
+
+    impl Noted {
+        fn note(&self, op: &str, path: &Path) {
+            let name = path.file_name().unwrap().to_string_lossy();
+            self.0.borrow_mut().push(format!("{op} {name}"));
+        }
+    }
+
+    impl FileAccess for Noted {
+        fn exists(&self, path: &Path) -> std::io::Result<bool> {
+            self.note("exists", path);
+            DirectFiles.exists(path)
+        }
+        fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
+            self.note("read", path);
+            DirectFiles.read(path)
+        }
+        fn write(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+            self.note("write", path);
+            DirectFiles.write(path, bytes)
+        }
+        fn open_lock(&self, path: &Path, how: LockOpen) -> std::io::Result<File> {
+            self.note(&format!("{how:?}"), path);
+            DirectFiles.open_lock(path, how)
+        }
+    }
+
+    #[test]
+    fn the_user_state_goes_through_its_files_and_the_system_state_does_not() {
+        let tmp = tempfile::tempdir().unwrap();
+        let noted = Rc::new(Noted::default());
+        let store = store(&tmp).with_user_files(noted.clone());
+        store
+            .begin(Scope::System)
+            .unwrap()
+            .commit(sample())
+            .unwrap();
+        assert_eq!(store.read(Scope::System).unwrap(), sample());
+        assert!(noted.0.borrow().is_empty(), "{:?}", noted.0.borrow());
+        let mut txn = store.begin(Scope::User).unwrap();
+        txn.checkpoint(&sample()).unwrap();
+        txn.commit(sample()).unwrap();
+        assert!(store.try_begin(Scope::User).unwrap().is_some());
+        assert_eq!(store.read(Scope::User).unwrap(), sample());
+        assert_eq!(
+            *noted.0.borrow(),
+            [
+                "Exclusive state.lock",
+                "read state.json",
+                "write state.json",
+                "write state.json",
+                "Exclusive state.lock",
+                "read state.json",
+                "exists state.json",
+                "Shared state.lock",
+                "read state.json",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_state_file_that_is_not_text_is_a_parse_error_naming_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = store(&tmp);
+        let path = store.path(Scope::User).to_path_buf();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, [0xff, 0xfe]).unwrap();
+        let err = store.read(Scope::User).unwrap_err().to_string();
+        assert!(err.contains("state.json"), "{err}");
+        assert!(err.contains(crate::errmsg::PARSE), "{err}");
     }
 }

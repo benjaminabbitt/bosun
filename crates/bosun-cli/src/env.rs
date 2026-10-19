@@ -96,7 +96,7 @@ pub struct Env {
     lock_dir: PathBuf,
     /// How the lock is read and written: as this account, or as the user
     /// who elevated the run (§4.5).
-    lock_files: Rc<dyn FileAccess>,
+    user_files: Rc<dyn FileAccess>,
     machine: Box<dyn Machine>,
     exec: Exec,
     /// Whether this run found the system state unreadable and left it out.
@@ -204,7 +204,7 @@ impl Env {
     /// How this run reads and writes its lock: as the user who elevated it,
     /// whose lock it is (§4.5), else as this account.
     pub fn lock_files(&self) -> Rc<dyn FileAccess> {
-        self.lock_files.clone()
+        self.user_files.clone()
     }
 
     /// The options each known backend declares, for checking a manifest.
@@ -244,19 +244,33 @@ impl Env {
     }
 }
 
-/// Where a run keeps its locks (§4.5), and whose they are: the user who
-/// elevated it, as whom they are read and written, or this account.
+/// The user-scope state file (§4.6) a run reads and writes, its locks beside
+/// it (§4.5), and whose they are: the user who elevated the run, as whom
+/// they are read and written, or this account.
 #[derive(Debug, PartialEq, Eq)]
-struct LockPlace {
-    dir: PathBuf,
+struct UserPlace {
+    state: PathBuf,
     invoker: Option<Invoker>,
 }
 
-impl LockPlace {
-    /// How the lock is read and written: as its user when the run was
-    /// elevated by one, else as this account.
+impl UserPlace {
+    /// Where the locks are: beside the user state.
+    fn lock_dir(&self) -> PathBuf {
+        bosun_io::paths::locks_beside(&self.state)
+    }
+
+    /// How the user state and the lock are read and written: as their user
+    /// when the run was elevated by one, else as this account.
     fn files(&self) -> Rc<dyn FileAccess> {
         files_as(self.invoker.as_ref())
+    }
+
+    /// The human the run is for (§5.5): the user who elevated it, if any.
+    fn invoking_user(&self) -> Option<User> {
+        self.invoker.as_ref().map(|u| User {
+            name: u.name.clone(),
+            uid: Some(u.uid),
+        })
     }
 }
 
@@ -275,20 +289,20 @@ fn files_as(_user: Option<&Invoker>) -> Rc<dyn FileAccess> {
     Rc::new(DirectFiles)
 }
 
-/// Where a run keeps its locks: `own`, the locks beside this account's
-/// state, unless the run is elevated by a user the elevating tool names
-/// (`env`, found by `lookup`; §5.5). Then it is that user's, in the default
-/// state dir of their home, read and written as them. Elevation on Windows
-/// keeps the user's own profile, so its own lock.
-fn lock_place(
+/// Whose user state and lock a run uses: `own`, this account's user state,
+/// unless the run is elevated by a user the elevating tool names (`env`,
+/// found by `lookup`; §5.5). Then they are that user's, in the default state
+/// dir of their home, read and written as them. Elevation on Windows keeps
+/// the user's own profile, so its own state.
+fn user_place(
     os: Os,
     privilege: Privilege,
     own: PathBuf,
     env: impl Fn(&str) -> Option<String>,
     lookup: impl Fn(&str) -> Option<Account>,
-) -> LockPlace {
-    let own = LockPlace {
-        dir: own,
+) -> UserPlace {
+    let own = UserPlace {
+        state: own,
         invoker: None,
     };
     if privilege != Privilege::Elevated || os == Os::Windows {
@@ -296,14 +310,14 @@ fn lock_place(
     }
     match bosun_host::invoker(env, lookup) {
         Ok(Some(user)) => {
-            let dir = bosun_io::paths::locks_under_home(&user.home);
+            let state = bosun_io::paths::state_under_home(&user.home);
             tracing::debug!(
-                message = crate::logmsg::INVOKER_LOCK,
+                message = crate::logmsg::INVOKER_STATE,
                 user = %user.name,
-                dir = %dir.display()
+                state = %state.display()
             );
-            LockPlace {
-                dir,
+            UserPlace {
+                state,
                 invoker: Some(user),
             }
         }
@@ -312,23 +326,10 @@ fn lock_place(
             tracing::warn!(
                 message = crate::logmsg::INVOKER_UNKNOWN,
                 user = %unknown.name,
-                dir = %own.dir.display()
+                state = %own.state.display()
             );
             own
         }
-    }
-}
-
-/// The passwd entry of `name` on this host; Windows has no passwd database.
-fn host_account(name: &str) -> Option<Account> {
-    #[cfg(unix)]
-    {
-        bosun_host::passwd_account(name)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = name;
-        None
     }
 }
 
@@ -573,12 +574,10 @@ fn host_cache() -> Result<PathBuf, CliError> {
     bosun_io::paths::cache_dir().map_err(env_err)
 }
 
-fn state_paths_at(dir: &str) -> (PathBuf, PathBuf) {
-    let d = PathBuf::from(dir);
-    (
-        d.join("system").join("state.json"),
-        d.join("user").join("state.json"),
-    )
+/// The seam's system state file under its state dir; the user state is under
+/// the user's home, as on a real host.
+fn system_state_at(dir: &str) -> PathBuf {
+    PathBuf::from(dir).join("system").join("state.json")
 }
 
 /// The backend→scheme map (§6) that lock/state reads use: a version's scheme
@@ -743,7 +742,9 @@ fn host_os() -> Os {
     }
 }
 
-/// The real machine for `os`: privilege, user and distro read once here.
+/// The real machine for `os`: privilege, user and distro read once here;
+/// and whose user state it uses, `user` unless a user elevated the run
+/// ([`user_place`]), when it is theirs and runs for them.
 #[cfg(unix)]
 fn host_machine(
     arch: Arch,
@@ -752,11 +753,24 @@ fn host_machine(
     system: PathBuf,
     user: PathBuf,
     _runner: &dyn CommandRunner,
-) -> Box<dyn Machine> {
-    Box::new(LinuxMachine::new(arch, distro, libc, system, user))
+) -> (Box<dyn Machine>, UserPlace) {
+    let machine = LinuxMachine::new(arch, distro, libc, system, user.clone());
+    let place = user_place(
+        Os::Linux,
+        machine.privilege(),
+        user,
+        bosun_io::paths::env_var,
+        bosun_host::passwd_account,
+    );
+    let machine = match place.invoking_user() {
+        Some(invoker) => machine.invoked_by(invoker, place.state.clone()),
+        None => machine,
+    };
+    (Box::new(machine), place)
 }
 
 /// The real machine for `os`: privilege, user and distro read once here.
+/// An elevated terminal runs as the same user, so the user state is theirs.
 #[cfg(windows)]
 fn host_machine(
     arch: Arch,
@@ -765,18 +779,23 @@ fn host_machine(
     system: PathBuf,
     user: PathBuf,
     runner: &dyn CommandRunner,
-) -> Box<dyn Machine> {
+) -> (Box<dyn Machine>, UserPlace) {
     let invoking = User {
         name: std::env::var("USERNAME").unwrap_or_default(),
         uid: None,
     };
-    Box::new(bosun_host::WindowsMachine::new(
+    let place = UserPlace {
+        state: user.clone(),
+        invoker: None,
+    };
+    let machine = bosun_host::WindowsMachine::new(
         arch,
         bosun_host::windows_privilege(runner),
         invoking,
         system,
         user,
-    ))
+    );
+    (Box::new(machine), place)
 }
 
 fn from_host() -> Result<Env, CliError> {
@@ -841,29 +860,17 @@ fn from_host() -> Result<Env, CliError> {
         })
         .collect();
 
-    let machine = host_machine(
-        arch,
-        distro,
-        libc,
-        system.clone(),
-        user.clone(),
-        runner.as_ref(),
-    );
-    let lock = lock_place(
-        os,
-        machine.privilege(),
-        bosun_io::paths::locks_beside(&user),
-        bosun_io::paths::env_var,
-        host_account,
-    );
+    let (machine, place) = host_machine(arch, distro, libc, system.clone(), user, runner.as_ref());
+    let files = place.files();
     Ok(Env {
-        state: FileStateStore::new(system, user, schemes.clone()),
+        state: FileStateStore::new(system, place.state.clone(), schemes.clone())
+            .with_user_files(files.clone()),
         backends,
         skipped,
         schemes,
         option_keys,
-        lock_files: lock.files(),
-        lock_dir: lock.dir,
+        lock_dir: place.lock_dir(),
+        user_files: files,
         machine,
         exec: Exec::Host { runner, fetcher },
         system_hidden: Cell::new(false),
@@ -924,7 +931,7 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
     };
     let user_name = fx.user.unwrap_or_else(|| "tester".to_string());
 
-    let (system, user) = state_paths_at(state_dir);
+    let system = system_state_at(state_dir);
     // Canned HTTP and a scratch bin dir for real backends (github-release).
     let fetcher = canned_fetcher(&fx.http)?;
     let home = fx
@@ -1008,17 +1015,17 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
         option_keys.entry(b.id.as_str().to_string()).or_default();
     }
     let skipped = absent_backends(&fx.absent, fetcher.clone(), &home, &cache_dir, os, arch)?;
-    let store = FileStateStore::new(system.clone(), user.clone(), schemes.clone());
     // The seam's user keeps state under the default state dir of their home;
-    // an elevated run's own is root's, a home of its own in the seam.
+    // an elevated run's own is root's, a home of its own in the seam. Under
+    // sudo it is the invoking user's, read and written as them.
     let own_home = match privilege {
         Privilege::Elevated => PathBuf::from(state_dir).join("root"),
         Privilege::Unelevated => home.clone(),
     };
-    let lock = lock_place(
+    let place = user_place(
         os,
         privilege,
-        bosun_io::paths::locks_under_home(&own_home),
+        bosun_io::paths::state_under_home(&own_home),
         bosun_io::paths::env_var,
         |name| {
             fx.passwd.get(name).map(|a| Account {
@@ -1028,18 +1035,21 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
             })
         },
     );
+    let files = place.files();
+    let store = FileStateStore::new(system.clone(), place.state.clone(), schemes.clone())
+        .with_user_files(files.clone());
     let machine = FakeMachine {
         os,
         arch,
         distro,
         libc,
         privilege,
-        invoking_user: User {
+        invoking_user: place.invoking_user().unwrap_or(User {
             name: user_name,
             uid: None,
-        },
+        }),
         system_state: system,
-        user_state: user,
+        user_state: place.state.clone(),
         elevation: match os {
             Os::Windows => Elevation::AdministratorTerminal,
             _ => Elevation::Sudo,
@@ -1051,8 +1061,8 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
         skipped,
         schemes,
         option_keys,
-        lock_files: lock.files(),
-        lock_dir: lock.dir,
+        lock_dir: place.lock_dir(),
+        user_files: files,
         machine: Box::new(machine),
         exec: Exec::Fixture(Box::new(FixtureStepRunner::new(
             fx.fail_step,
@@ -1212,25 +1222,50 @@ mod tests {
         })
     }
 
-    fn own() -> LockPlace {
-        LockPlace {
-            dir: PathBuf::from("/root/.local/state/bosun/locks"),
+    /// The invoking user's files go through a child that is them: another
+    /// uid, which this process may not become without root, is refused,
+    /// where this account's own files are not.
+    #[cfg(unix)]
+    #[test]
+    fn the_invoking_user_s_files_are_done_as_them() {
+        use std::os::unix::fs::MetadataExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let mine = std::fs::metadata(tmp.path()).unwrap();
+        let (uid, gid) = (mine.uid(), mine.gid());
+        if uid == 0 {
+            eprintln!("skipped: root may become anyone");
+            return;
+        }
+        let other = Invoker {
+            name: "bosun-no-such-user".to_string(),
+            uid: uid + 1,
+            gid,
+            home: tmp.path().to_path_buf(),
+        };
+        let err = files_as(Some(&other)).exists(tmp.path()).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(files_as(None).exists(tmp.path()).unwrap());
+    }
+
+    fn own() -> UserPlace {
+        UserPlace {
+            state: PathBuf::from("/root/.local/state/bosun/state.json"),
             invoker: None,
         }
     }
 
     #[test]
-    fn an_elevated_run_keeps_the_lock_of_the_user_who_elevated_it_theirs() {
+    fn an_elevated_run_keeps_the_state_and_lock_of_the_user_who_elevated_it_as_them() {
         assert_eq!(
-            lock_place(
+            user_place(
                 Os::Linux,
                 Privilege::Elevated,
-                own().dir,
+                own().state,
                 sudo_by("ben"),
                 ben
             ),
-            LockPlace {
-                dir: PathBuf::from("/srv/ben/.local/state/bosun/locks"),
+            UserPlace {
+                state: PathBuf::from("/srv/ben/.local/state/bosun/state.json"),
                 invoker: Some(Invoker {
                     name: "ben".to_string(),
                     uid: 1000,
@@ -1242,39 +1277,39 @@ mod tests {
     }
 
     #[test]
-    fn a_run_not_elevated_on_windows_or_by_an_unknown_user_keeps_its_own_lock() {
+    fn a_run_not_elevated_on_windows_or_by_an_unknown_user_keeps_its_own_state() {
         assert_eq!(
-            lock_place(
+            user_place(
                 Os::Linux,
                 Privilege::Unelevated,
-                own().dir,
+                own().state,
                 sudo_by("ben"),
                 ben
             ),
             own()
         );
         assert_eq!(
-            lock_place(
+            user_place(
                 Os::Windows,
                 Privilege::Elevated,
-                own().dir,
+                own().state,
                 sudo_by("ben"),
                 ben
             ),
             own()
         );
         assert_eq!(
-            lock_place(
+            user_place(
                 Os::Linux,
                 Privilege::Elevated,
-                own().dir,
+                own().state,
                 sudo_by("ghost"),
                 ben
             ),
             own()
         );
         assert_eq!(
-            lock_place(Os::Linux, Privilege::Elevated, own().dir, |_| None, ben),
+            user_place(Os::Linux, Privilege::Elevated, own().state, |_| None, ben),
             own()
         );
     }
