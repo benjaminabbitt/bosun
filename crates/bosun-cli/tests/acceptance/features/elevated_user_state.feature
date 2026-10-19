@@ -64,3 +64,25 @@ Feature: under sudo, the user state is the invoking user's
     And I run `bosun install . --yes`
     Then it succeeds
     And the system state claims jq for ann
+
+  # A user the elevating tool names but the passwd database lacks has no home
+  # bosun can find: it fails rather than use root's own state and lock.
+  Scenario: under sudo by a user the passwd database lacks, bosun fails with the remedy
+    When later runs are elevated through sudo by ghost
+    And I run `bosun --format text lock .`
+    Then it fails
+    And it reports "the user who elevated this run, ghost, is not in the passwd database"
+    And it reports "run bosun as root itself"
+    And no lock is written
+    And root's state holds no lock
+
+  # Their XDG_STATE_HOME cannot be told from root's: bosun uses the default
+  # state dir of their home and says so once.
+  Scenario: under sudo with XDG_STATE_HOME set, bosun says it uses the user's .local/state
+    Given XDG_STATE_HOME names another directory
+    When later runs are elevated
+    And I run `bosun --format text lock .`
+    Then it succeeds
+    And it warns once "XDG_STATE_HOME is not read under elevation"
+    And a lock is written
+    And root's state holds no lock

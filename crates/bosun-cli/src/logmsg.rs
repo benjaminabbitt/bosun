@@ -71,7 +71,7 @@ pub const LOCK_KEPT: &str = "--scope left the package's scope out; its lock entr
 pub const INVOKER_STATE: &str =
     "elevated: using the user state and lock of the user who elevated, under their home's .local/state, as them";
 
-/// The user an elevating tool names is not in the passwd database, so their
-/// state cannot be found; this run uses its own.
-pub const INVOKER_UNKNOWN: &str =
-    "the user who elevated is not in the passwd database; using this account's own state and lock";
+/// An elevated run found `XDG_STATE_HOME` set: it cannot be told from root's,
+/// so the invoking user's state and lock are under their home's default
+/// state dir instead.
+pub const XDG_STATE_HOME_IGNORED: &str = "XDG_STATE_HOME is not read under elevation, as it cannot be told from root's; using the invoking user's <home>/.local/state";

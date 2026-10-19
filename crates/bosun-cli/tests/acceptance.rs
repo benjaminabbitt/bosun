@@ -41,6 +41,8 @@ struct Machine {
     root_login: bool,
     /// Elevated through doas by this user (`DOAS_USER`) rather than sudo.
     doas_by: Option<String>,
+    /// The user sudo names (`SUDO_USER`), when not ben.
+    sudo_by: Option<String>,
 }
 
 /// A machine's os-release facts: `ID`, `ID_LIKE`, `VERSION_CODENAME` and `VERSION_ID`.
@@ -188,6 +190,8 @@ struct BosunWorld {
     /// it root's.
     #[cfg(unix)]
     system_state: Option<(u64, std::time::SystemTime)>,
+    /// `XDG_STATE_HOME` in bosun's environment, when a step set it.
+    xdg_state_home: Option<PathBuf>,
     code: i32,
     stdout: String,
     stderr: String,
@@ -570,6 +574,7 @@ fn a_machine(world: &mut BosunWorld, os: String, arch: String, privilege: String
         elevated: privilege == "elevated",
         root_login: false,
         doas_by: None,
+        sudo_by: None,
     });
 }
 
@@ -591,6 +596,7 @@ fn a_mint_machine(world: &mut BosunWorld, codename: String, arch: String, base: 
         elevated: false,
         root_login: false,
         doas_by: None,
+        sudo_by: None,
     });
 }
 
@@ -621,6 +627,7 @@ fn a_debian_machine_without_release(world: &mut BosunWorld, arch: String) {
         elevated: false,
         root_login: false,
         doas_by: None,
+        sudo_by: None,
     });
 }
 
@@ -1034,6 +1041,21 @@ fn later_runs_root_login(world: &mut BosunWorld) {
     m.root_login = true;
 }
 
+/// The runs that follow are elevated through sudo by `name`.
+#[when(regex = r"^later runs are elevated through sudo by (\S+)$")]
+fn later_runs_sudo_by(world: &mut BosunWorld, name: String) {
+    let m = world.machine.as_mut().expect("describe the machine first");
+    m.elevated = true;
+    m.sudo_by = Some(name);
+}
+
+/// `XDG_STATE_HOME` names a directory in the scenario's own tree.
+#[given("XDG_STATE_HOME names another directory")]
+#[when("XDG_STATE_HOME names another directory")]
+fn xdg_state_home(world: &mut BosunWorld) {
+    world.xdg_state_home = Some(world.path().join("xdg-state"));
+}
+
 /// The runs that follow are elevated through doas, which names only the
 /// user (`DOAS_USER`).
 #[when(regex = r"^later runs are elevated through doas by (\S+)$")]
@@ -1108,8 +1130,17 @@ fn bosun_command(world: &mut BosunWorld, cmdline: &str, cwd: &Path) -> Command {
         .env("APPDATA", p.join("config"))
         .current_dir(cwd)
         .args(&args);
-    for var in ["SUDO_USER", "SUDO_UID", "SUDO_GID", "DOAS_USER"] {
+    for var in [
+        "SUDO_USER",
+        "SUDO_UID",
+        "SUDO_GID",
+        "DOAS_USER",
+        "XDG_STATE_HOME",
+    ] {
         command.env_remove(var);
+    }
+    if let Some(dir) = &world.xdg_state_home {
+        command.env("XDG_STATE_HOME", dir);
     }
     // An elevated run is under sudo, which says who ran it, unless it is
     // root's own login.
@@ -1121,8 +1152,9 @@ fn bosun_command(world: &mut BosunWorld, cmdline: &str, cwd: &Path) -> Command {
             }
             None => {
                 let (uid, gid) = world.ids();
+                let name = m.sudo_by.as_deref().unwrap_or("ben");
                 command
-                    .env("SUDO_USER", "ben")
+                    .env("SUDO_USER", name)
                     .env("SUDO_UID", uid.to_string())
                     .env("SUDO_GID", gid.to_string());
             }

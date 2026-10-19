@@ -50,3 +50,14 @@ pub const RENDER_PULL_IMAGE: &str =
 
 /// `--like` was given something that isn't a distro family id.
 pub const RENDER_BAD_LIKE: &str = "--like takes distro ids, comma-separated (ubuntu,debian)";
+
+/// The user an elevating tool names (`SUDO_USER`, `DOAS_USER`) is not in the
+/// passwd database: who they are, before their name.
+pub const INVOKER_UNKNOWN: &str = "the user who elevated this run";
+
+/// ...and why that stops the run.
+pub const INVOKER_NOT_IN_PASSWD: &str =
+    "is not in the passwd database, so bosun cannot find their state and lock";
+
+/// The remedy for an elevating user the passwd database lacks.
+pub const INVOKER_UNKNOWN_REMEDY: &str = "add them to the passwd database (check with `getent passwd <name>`), or run bosun as root itself, without sudo or doas, to use root's own state and lock";

@@ -292,44 +292,52 @@ fn files_as(_user: Option<&Invoker>) -> Rc<dyn FileAccess> {
 /// Whose user state and lock a run uses: `own`, this account's user state,
 /// unless the run is elevated by a user the elevating tool names (`env`,
 /// found by `lookup`; §5.5). Then they are that user's, in the default state
-/// dir of their home, read and written as them. Elevation on Windows keeps
-/// the user's own profile, so its own state.
+/// dir of their home, read and written as them; their `XDG_STATE_HOME`, if
+/// set, is said once not to be read. A user the passwd database lacks is an
+/// error. Elevation on Windows keeps the user's own profile, so its own
+/// state.
 fn user_place(
     os: Os,
     privilege: Privilege,
     own: PathBuf,
     env: impl Fn(&str) -> Option<String>,
     lookup: impl Fn(&str) -> Option<Account>,
-) -> UserPlace {
+) -> Result<UserPlace, CliError> {
     let own = UserPlace {
         state: own,
         invoker: None,
     };
     if privilege != Privilege::Elevated || os == Os::Windows {
-        return own;
+        return Ok(own);
     }
-    match bosun_host::invoker(env, lookup) {
+    match bosun_host::invoker(&env, lookup) {
         Ok(Some(user)) => {
             let state = bosun_io::paths::state_under_home(&user.home);
+            if let Some(xdg) = env("XDG_STATE_HOME") {
+                tracing::warn!(
+                    message = crate::logmsg::XDG_STATE_HOME_IGNORED,
+                    xdg_state_home = %xdg,
+                    state = %state.display()
+                );
+            }
             tracing::debug!(
                 message = crate::logmsg::INVOKER_STATE,
                 user = %user.name,
                 state = %state.display()
             );
-            UserPlace {
+            Ok(UserPlace {
                 state,
                 invoker: Some(user),
-            }
+            })
         }
-        Ok(None) => own,
-        Err(unknown) => {
-            tracing::warn!(
-                message = crate::logmsg::INVOKER_UNKNOWN,
-                user = %unknown.name,
-                state = %own.state.display()
-            );
-            own
-        }
+        Ok(None) => Ok(own),
+        Err(unknown) => Err(CliError::Environment(format!(
+            "{}, {}, {}; {}",
+            crate::errmsg::INVOKER_UNKNOWN,
+            unknown.name,
+            crate::errmsg::INVOKER_NOT_IN_PASSWD,
+            crate::errmsg::INVOKER_UNKNOWN_REMEDY
+        ))),
     }
 }
 
@@ -753,7 +761,7 @@ fn host_machine(
     system: PathBuf,
     user: PathBuf,
     _runner: &dyn CommandRunner,
-) -> (Box<dyn Machine>, UserPlace) {
+) -> Result<(Box<dyn Machine>, UserPlace), CliError> {
     let machine = LinuxMachine::new(arch, distro, libc, system, user.clone());
     let place = user_place(
         Os::Linux,
@@ -761,12 +769,12 @@ fn host_machine(
         user,
         bosun_io::paths::env_var,
         bosun_host::passwd_account,
-    );
+    )?;
     let machine = match place.invoking_user() {
         Some(invoker) => machine.invoked_by(invoker, place.state.clone()),
         None => machine,
     };
-    (Box::new(machine), place)
+    Ok((Box::new(machine), place))
 }
 
 /// The real machine for `os`: privilege, user and distro read once here.
@@ -779,7 +787,7 @@ fn host_machine(
     system: PathBuf,
     user: PathBuf,
     runner: &dyn CommandRunner,
-) -> (Box<dyn Machine>, UserPlace) {
+) -> Result<(Box<dyn Machine>, UserPlace), CliError> {
     let invoking = User {
         name: std::env::var("USERNAME").unwrap_or_default(),
         uid: None,
@@ -795,7 +803,7 @@ fn host_machine(
         system,
         user,
     );
-    (Box::new(machine), place)
+    Ok((Box::new(machine), place))
 }
 
 fn from_host() -> Result<Env, CliError> {
@@ -860,7 +868,7 @@ fn from_host() -> Result<Env, CliError> {
         })
         .collect();
 
-    let (machine, place) = host_machine(arch, distro, libc, system.clone(), user, runner.as_ref());
+    let (machine, place) = host_machine(arch, distro, libc, system.clone(), user, runner.as_ref())?;
     let files = place.files();
     Ok(Env {
         state: FileStateStore::new(system, place.state.clone(), schemes.clone())
@@ -1034,7 +1042,7 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
                 home: a.home.clone(),
             })
         },
-    );
+    )?;
     let files = place.files();
     let store = FileStateStore::new(system.clone(), place.state.clone(), schemes.clone())
         .with_user_files(files.clone());
@@ -1256,14 +1264,16 @@ mod tests {
 
     #[test]
     fn an_elevated_run_keeps_the_state_and_lock_of_the_user_who_elevated_it_as_them() {
+        let place = user_place(
+            Os::Linux,
+            Privilege::Elevated,
+            own().state,
+            sudo_by("ben"),
+            ben,
+        )
+        .unwrap();
         assert_eq!(
-            user_place(
-                Os::Linux,
-                Privilege::Elevated,
-                own().state,
-                sudo_by("ben"),
-                ben
-            ),
+            place,
             UserPlace {
                 state: PathBuf::from("/srv/ben/.local/state/bosun/state.json"),
                 invoker: Some(Invoker {
@@ -1274,43 +1284,62 @@ mod tests {
                 }),
             }
         );
+        assert_eq!(
+            place.lock_dir(),
+            PathBuf::from("/srv/ben/.local/state/bosun/locks")
+        );
+        assert_eq!(
+            place.invoking_user(),
+            Some(User {
+                name: "ben".to_string(),
+                uid: Some(1000),
+            })
+        );
+        assert_eq!(own().invoking_user(), None);
     }
 
     #[test]
-    fn a_run_not_elevated_on_windows_or_by_an_unknown_user_keeps_its_own_state() {
+    fn a_run_not_elevated_on_windows_or_named_by_no_tool_keeps_its_own_state() {
+        let place = |os, privilege, env: &dyn Fn(&str) -> Option<String>| {
+            user_place(os, privilege, own().state, env, ben).unwrap()
+        };
         assert_eq!(
-            user_place(
-                Os::Linux,
-                Privilege::Unelevated,
-                own().state,
-                sudo_by("ben"),
-                ben
-            ),
+            place(Os::Linux, Privilege::Unelevated, &sudo_by("ben")),
             own()
         );
         assert_eq!(
-            user_place(
-                Os::Windows,
-                Privilege::Elevated,
-                own().state,
-                sudo_by("ben"),
-                ben
-            ),
+            place(Os::Windows, Privilege::Elevated, &sudo_by("ben")),
             own()
         );
         assert_eq!(
-            user_place(
-                Os::Linux,
-                Privilege::Elevated,
-                own().state,
-                sudo_by("ghost"),
-                ben
-            ),
+            place(Os::Windows, Privilege::Elevated, &sudo_by("ghost")),
             own()
         );
-        assert_eq!(
-            user_place(Os::Linux, Privilege::Elevated, own().state, |_| None, ben),
-            own()
+        assert_eq!(place(Os::Linux, Privilege::Elevated, &|_| None), own());
+    }
+
+    #[test]
+    fn an_elevating_user_the_passwd_database_lacks_is_an_error_with_the_remedy() {
+        let err = user_place(
+            Os::Linux,
+            Privilege::Elevated,
+            own().state,
+            sudo_by("ghost"),
+            ben,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.starts_with(&format!(
+                "{}, ghost, {}",
+                crate::errmsg::INVOKER_UNKNOWN,
+                crate::errmsg::INVOKER_NOT_IN_PASSWD
+            )),
+            "{err}"
+        );
+        assert!(
+            err.ends_with(crate::errmsg::INVOKER_UNKNOWN_REMEDY),
+            "{err}"
         );
     }
 
