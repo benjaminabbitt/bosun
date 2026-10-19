@@ -22,7 +22,7 @@ Feature: the lock is this machine's own
     When I run `bosun --format text lock .`
     Then it succeeds
     And a lock is written
-    And it says "state/user/locks/"
+    And it says "home/.local/state/bosun/locks/"
     And the lock pins ripgrep 14.1.1
 
   Scenario: install --frozen installs what the lock pins, not the newest
@@ -73,3 +73,31 @@ Feature: the lock is this machine's own
     Then it succeeds
     And it warns "bosun.lock beside the manifest is no longer read"
     And the lock pins ripgrep 14.1.1
+
+  # Under sudo the state dir is root's; the lock stays the invoking user's,
+  # so an elevated run reads and writes the lock the user's own runs do.
+  Scenario: under sudo, lock writes the invoking user's lock, not root's
+    When later runs are elevated
+    And I run `bosun --format text lock .`
+    Then it succeeds
+    And a lock is written
+    And it says "home/.local/state/bosun/locks/"
+    And the lock and its directory are the invoking user's
+    And root's state holds no lock
+
+  Scenario: under sudo, lock keeps the pins of the lock the user wrote
+    When I run `bosun lock .`
+    And cargo publishes ripgrep 14.1.1, 14.2.0
+    And later runs are elevated
+    And I run `bosun lock .`
+    Then it succeeds
+    And the lock pins ripgrep 14.1.1
+    And root's state holds no lock
+
+  # Root's own login names no invoking user: its lock is root's.
+  Scenario: in root's own login, lock writes root's lock
+    When later runs are root's own login
+    And I run `bosun --format text lock .`
+    Then it succeeds
+    And no lock is written
+    And root's state holds a lock

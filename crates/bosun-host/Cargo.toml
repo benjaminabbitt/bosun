@@ -22,9 +22,11 @@ bzip2.workspace = true
 tempfile.workspace = true
 ureq.workspace = true
 
-# euid/uid for the Linux privilege check; Windows asks `whoami /groups`.
+# euid/uid for the Linux privilege check; Windows asks `whoami /groups`. The passwd
+# database for the user who elevated a run.
 [target.'cfg(unix)'.dependencies]
 rustix.workspace = true
+nix.workspace = true
 
 [lints]
 workspace = true

@@ -17,7 +17,8 @@ fn xdg() -> Result<Xdg, IoError> {
     })
 }
 
-fn env_var(name: &str) -> Option<String> {
+/// An environment variable, unset when empty.
+pub fn env_var(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
 }
 
@@ -92,12 +93,22 @@ pub fn cache_dir() -> Result<PathBuf, IoError> {
 
 /// Where a user's locks live (§4.5): `locks/` in the directory holding their
 /// machine state file. A lock is the machine's own, so it is never in the
-/// project; under `sudo` the user state is root's, so an elevated
-/// `install --frozen` reads a lock written elevated.
+/// project.
 pub fn locks_beside(state_file: &Path) -> PathBuf {
     state_file
         .parent()
         .map_or_else(|| PathBuf::from("locks"), |dir| dir.join("locks"))
+}
+
+/// The locks of the user whose home is `home`, in the default state dir:
+/// `<home>/.local/state/bosun/locks`. Where an elevated run finds the lock
+/// of the user who elevated it (§4.5): their `XDG_STATE_HOME` is not in the
+/// environment sudo leaves, and one that is cannot be told from root's.
+pub fn locks_under_home(home: &Path) -> PathBuf {
+    home.join(".local")
+        .join("state")
+        .join("bosun")
+        .join("locks")
 }
 
 /// The lock for the manifest at `manifest` (its canonical path) in `dir`:
@@ -184,6 +195,14 @@ mod tests {
         assert_eq!(
             locks_beside(Path::new("/s/bosun/state.json")),
             PathBuf::from("/s/bosun/locks")
+        );
+    }
+
+    #[test]
+    fn a_users_locks_under_their_home_are_in_the_default_state_dir() {
+        assert_eq!(
+            locks_under_home(Path::new("/home/ben")),
+            PathBuf::from("/home/ben/.local/state/bosun/locks")
         );
     }
 

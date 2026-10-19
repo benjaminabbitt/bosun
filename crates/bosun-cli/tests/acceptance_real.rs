@@ -9,7 +9,7 @@
 //! temp dir); system-scope apt/dnf/apk state lives at its real
 //! `/var/lib/bosun` path, cleaned at the start of each system scenario. Each
 //! tag names a program the scenario needs on `PATH` (`@apt-get`, `@dnf`,
-//! `@dnf-3` for dnf4, `@apk`, `@npm`, `@uv`, `@useradd @runuser`); it runs
+//! `@dnf-3` for dnf4, `@apk`, `@npm`, `@uv`, `@useradd @runuser`, `@sudo`); it runs
 //! only where all are.
 
 use std::cmp::Ordering;
@@ -35,6 +35,8 @@ struct RealWorld {
     /// Whether this scenario changed dnf's repositories, which are put back
     /// once it ends.
     dnf_repos: bool,
+    /// Whether this scenario let the non-root user use sudo, which ends with it.
+    sudoers: bool,
     /// The system state file's size and modification time when a step made
     /// it root's alone.
     system_state: Option<(u64, std::time::SystemTime)>,
@@ -417,10 +419,101 @@ fn make_user(w: &mut RealWorld) {
     assert_eq!(code, 0, "chown: {out}");
 }
 
+/// A non-root user whose passwd home is the project, who may run anything
+/// through sudo without a password.
+#[cfg(unix)]
+#[given("a non-root user whose home is the project, and who may use sudo")]
+fn make_sudo_user(w: &mut RealWorld) {
+    let home = w.home().display().to_string();
+    let _ = run("useradd", &["bosuntest"]); // ignore "already exists"
+    let (code, out) = run("usermod", &["-d", &home, "bosuntest"]);
+    assert_eq!(code, 0, "usermod: {out}");
+    let (code, out) = run("chown", &["-R", "bosuntest:bosuntest", &home]);
+    assert_eq!(code, 0, "chown: {out}");
+    fs::write(SUDOERS, "bosuntest ALL=(ALL) NOPASSWD: ALL\n").unwrap();
+    fs::set_permissions(SUDOERS, fs::Permissions::from_mode(0o440)).unwrap();
+    w.sudoers = true;
+}
+
+/// The rule letting the non-root user use sudo, gone once the scenario ends.
+const SUDOERS: &str = "/etc/sudoers.d/bosuntest";
+
+/// Root's own locks: where sudo's `HOME` puts them.
+const ROOT_LOCKS: &str = "/root/.local/state/bosun/locks";
+
+#[given("root has no lock")]
+fn root_no_lock(_w: &mut RealWorld) {
+    let _ = fs::remove_dir_all(ROOT_LOCKS);
+}
+
+#[then("root has no lock")]
+fn root_has_no_lock(_w: &mut RealWorld) {
+    let locks: Vec<_> = fs::read_dir(ROOT_LOCKS).into_iter().flatten().collect();
+    assert!(locks.is_empty(), "root's locks: {locks:?}");
+}
+
+#[given(expr = "apt-get installs {word} outside bosun")]
+fn apt_get_installs(_w: &mut RealWorld, pkg: String) {
+    let (code, out) = run("apt-get", &["install", "-y", &pkg]);
+    assert_eq!(code, 0, "apt-get install {pkg}: {out}");
+}
+
+/// The non-root user's state, in the default state dir of their home.
+fn user_state(w: &mut RealWorld) -> PathBuf {
+    w.home().join(".local").join("state")
+}
+
+#[when("the non-root user's state is deleted")]
+fn delete_user_state(w: &mut RealWorld) {
+    fs::remove_dir_all(user_state(w)).unwrap();
+}
+
+#[then("the non-root user has a lock")]
+fn user_has_lock(w: &mut RealWorld) {
+    let dir = user_state(w).join("bosun").join("locks");
+    let locks: Vec<_> = fs::read_dir(&dir).unwrap().flatten().collect();
+    assert_eq!(locks.len(), 1, "locks in {dir:?}: {locks:?}");
+}
+
+/// Every directory and file bosun left in the non-root user's state is
+/// theirs, by user and group, none root's.
+#[cfg(unix)]
+#[then("everything in the non-root user's state is theirs")]
+fn user_state_theirs(w: &mut RealWorld) {
+    use std::os::unix::fs::MetadataExt;
+    let ids = |flag: &str| -> u32 {
+        let (code, out) = run("id", &[flag, "bosuntest"]);
+        assert_eq!(code, 0, "id: {out}");
+        out.trim().parse().unwrap()
+    };
+    let want = (ids("-u"), ids("-g"));
+    let mut stack = vec![user_state(w)];
+    while let Some(p) = stack.pop() {
+        let meta = fs::symlink_metadata(&p).unwrap();
+        assert_eq!((meta.uid(), meta.gid()), want, "{p:?} is not the user's");
+        if meta.is_dir() {
+            stack.extend(fs::read_dir(&p).unwrap().map(|e| e.unwrap().path()));
+        }
+    }
+}
+
+/// Run bosun as a non-root user through sudo, which leaves root's `HOME`
+/// and names the user in `SUDO_USER`, `SUDO_UID` and `SUDO_GID`.
+#[when(regex = r"^the non-root user runs `sudo bosun (.+)`$")]
+fn i_run_as_user_with_sudo(w: &mut RealWorld, cmdline: String) {
+    run_as_user(w, &["sudo", "-n"], &cmdline);
+}
+
 /// Run bosun as a non-root user (user-scope backends refuse to run elevated,
 /// §5.5), with `HOME` pointed at the chowned temp dir.
 #[when(regex = r"^the non-root user runs `bosun (.+)`$")]
 fn i_run_as_user(w: &mut RealWorld, cmdline: String) {
+    run_as_user(w, &[], &cmdline);
+}
+
+/// Run `bosun <cmdline>` as the non-root user, through `through` (a
+/// program and its arguments) when it is not empty.
+fn run_as_user(w: &mut RealWorld, through: &[&str], cmdline: &str) {
     let home = w.home();
     let bosun = std::path::PathBuf::from(env!("CARGO_BIN_EXE_bosun"));
     let mut args: Vec<String> = [
@@ -441,6 +534,7 @@ fn i_run_as_user(w: &mut RealWorld, cmdline: String) {
     .map(|s| s.to_string())
     .collect();
     args.push(format!("HOME={}", home.display()));
+    args.extend(through.iter().map(|s| s.to_string()));
     args.push(bosun.display().to_string());
     for a in cmdline.split_whitespace() {
         args.push(if a == "." {
@@ -1169,6 +1263,9 @@ fn main() {
                     }
                     if w.dnf_repos {
                         restore_dnf_repos();
+                    }
+                    if w.sudoers {
+                        let _ = fs::remove_file(SUDOERS);
                     }
                 }
                 Box::pin(async {})

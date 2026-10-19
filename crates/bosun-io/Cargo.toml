@@ -17,9 +17,11 @@ serde_json.workspace = true
 thiserror.workspace = true
 sha2.workspace = true
 etcetera.workspace = true
-
-[dev-dependencies]
 tempfile.workspace = true
+
+# Giving a file written elevated to the user who elevated (chown).
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["fs"] }
 
 [lints]
 workspace = true

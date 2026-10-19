@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use bosun_core::platform::Selector;
 use bosun_core::record::{LockDocument, LockLeaf, LockPackage, Package, StateDocument, StateLeaf};
 use bosun_core::{BackendId, Distro, Libc, Manifest, Os, Scope, Spec, Target, Version};
-use bosun_io::{check_options, load_manifest, lock, manifest_hash};
+use bosun_io::{check_options, load_manifest, lock, manifest_hash, write_owned, Owner};
 use bosun_ports::Installer;
 use bosun_resolve::{applicable, resolve, resolve_with_lock, NotApplicable, Outcome, Resolution};
 use serde::Serialize;
@@ -730,6 +730,8 @@ pub(crate) struct PendingLock {
     previous: Option<LockDocument>,
     /// The install scope of each package `install` resolved.
     scopes: BTreeMap<String, Scope>,
+    /// Who the lock is given to: the user who elevated the run (§4.5).
+    owner: Option<Owner>,
 }
 
 impl PendingLock {
@@ -782,10 +784,7 @@ impl PendingLock {
             path: self.path.clone(),
             detail: e.to_string(),
         };
-        if let Some(dir) = self.path.parent() {
-            fs::create_dir_all(dir).map_err(io_err)?;
-        }
-        fs::write(&self.path, lock::to_json(&self.doc)).map_err(io_err)?;
+        write_owned(&self.path, lock::to_json(&self.doc).as_bytes(), self.owner).map_err(io_err)?;
         Ok(self.path.clone())
     }
 }
@@ -858,6 +857,7 @@ pub(crate) fn relock(
             doc,
             previous: previous.clone(),
             scopes: BTreeMap::new(),
+            owner: env.lock_owner(),
         }
     });
     Ok(Relocked {
@@ -2012,6 +2012,7 @@ mod tests {
                 ("jq".to_string(), Scope::System),
                 ("rg".to_string(), Scope::User),
             ]),
+            owner: None,
         }
     }
 

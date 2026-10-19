@@ -596,6 +596,46 @@ Feature: real backends against a disposable container
     Then it succeeds
     And dpkg reports hello not installed
 
+  # Under sudo the state dir is root's; the lock stays the invoking user's
+  # (§4.5): an elevated run reads the one the user wrote, and what it writes
+  # in the user's home stays theirs.
+  @apt-get @useradd @runuser @sudo
+  Scenario: sudo bosun install --frozen reads the user's lock and leaves it theirs
+    Given the apt index is refreshed
+    And the system state is clean
+    And root has no lock
+    And apt-get installs hello outside bosun
+    And the manifest:
+      """
+      version: 2
+      packages:
+        - name: hello
+          spec: "*"
+          install:
+            linux:debian: {backend: apt}
+      """
+    And a non-root user whose home is the project, and who may use sudo
+    When the non-root user runs `bosun --format text install . --yes`
+    Then it succeeds
+    And it says "recorded on the next elevated run"
+    And the non-root user has a lock
+    When the non-root user runs `sudo bosun --format text install . --frozen --yes`
+    Then it succeeds
+    And it says "accept"
+    And it says "applied"
+    And root has no lock
+    And the non-root user has a lock
+    And everything in the non-root user's state is theirs
+    When the non-root user's state is deleted
+    And the non-root user runs `sudo bosun lock .`
+    Then it succeeds
+    And root has no lock
+    And the non-root user has a lock
+    And everything in the non-root user's state is theirs
+    When the manifest is deleted
+    And I run `bosun prune --yes --scope system`
+    Then it succeeds
+
   # github-release is user scope, so it runs as a non-root user (§5.5).
   @useradd @runuser
   Scenario: github-release verifies the checksum and installs an executable

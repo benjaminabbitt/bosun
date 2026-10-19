@@ -184,9 +184,27 @@ the same fields.
 `%LOCALAPPDATA%\bosun\locks\<id>.json` on Windows. `<id>` is the first 16 hex digits of the
 sha256 of the manifest's canonical path, so every project gets its own lock without needing a
 filesystem-safe name; the lock records the path too, and a lock whose `manifest` isn't this
-one is treated as absent. Under `sudo` the user state directory is root's, so an elevated
-`install --frozen` needs a lock written elevated (`sudo bosun lock`). Moving a project leaves
-its old lock behind (harmless; a future `prune` can drop locks whose manifest is gone).
+one is treated as absent. Moving a project leaves its old lock behind (harmless; a future
+`prune` can drop locks whose manifest is gone).
+
+**Under elevation — DECIDED: the lock is the invoking user's.** Under `sudo` the user state
+directory is root's, but the lock an elevated run reads and writes is the one the user's own
+runs do, so `bosun install` then `sudo bosun install --frozen` installs what the user locked.
+On Linux and macOS, when the effective UID is 0 and the elevating tool names a user other than
+root (`SUDO_USER`, with `SUDO_UID` / `SUDO_GID` for the ids; doas's `DOAS_USER`, ids from the
+account), the lock is `<home>/.local/state/bosun/locks/<id>.json`, with `<home>` from the
+passwd database (`getpwnam_r`), never guessed from the name. Their `XDG_STATE_HOME` is not
+read: sudo's default `env_reset` drops it, and one that survives (`sudo -E`, `env_keep`)
+cannot be told from root's, so a user who moves their state dir with it has an elevated run
+miss their lock (`--frozen` then fails asking for `bosun lock`). A name the passwd database
+lacks is warned of, and the run uses its own lock. What an elevated run writes there stays
+the user's: each directory it makes and the lock (written to a temp file beside it, given to
+the user, then renamed over it) are chowned to those ids, the directories with
+`AT_SYMLINK_NOFOLLOW`. `pkexec` (`PKEXEC_UID` only) is not read: a run under it uses root's
+own lock. Windows needs nothing: an elevated terminal runs as the same user with the same
+`%LOCALAPPDATA%` (over-the-shoulder elevation with another account's credentials runs as that
+account, whose lock it then is). Only the lock moves: machine state (§4.6), user config and the
+cache keep their rules, so under `sudo` user-scope state and the cache are root's.
 
 Each package is locked under this machine's platform, or under `any` for platform-independent
 backends (cargo, go, npm, …). Because the backend and package ID can differ per platform
@@ -964,7 +982,7 @@ trait Machine {
 | | Linux | macOS | Windows |
 |---|---|---|---|
 | elevated when | effective UID is 0 | effective UID is 0 | process token is elevated |
-| invoking user under elevation | `SUDO_USER` / `SUDO_UID` | `SUDO_USER` / `SUDO_UID` | the token's user |
+| invoking user under elevation | `SUDO_USER` / `SUDO_UID` (the lock also reads doas's `DOAS_USER`, §4.5) | `SUDO_USER` / `SUDO_UID` | the token's user |
 | how to elevate (error text) | re-run with `sudo` | re-run with `sudo` | open a terminal with "Run as administrator" and re-run (Windows 11's opt-in `sudo` may work, but is not relied on) |
 
 **Architecture is the machine's, not bosun's build (DECIDED).** An x86_64 bosun can run
@@ -1748,6 +1766,7 @@ under a pty on Unix only.
 | TV-19 | `install --scope` writes only its scope to the lock (`PendingLock::only_requested_scope`): a package in a scope it left out keeps its previous entry or stays absent | landed; scenario: a mixed apt/cargo manifest, `install --scope user` moves ripgrep's pin to 14.2.0 and leaves jq's at 1.7.1-6+deb13u1 though its spec moved past it; red before: it took the resolution's jq |
 | TV-20 | the lock covers every entry that applies here: a deferred record and a package whose state was left out are locked as resolved, an accept at the version on the machine (`accepted_version`); `install --frozen` refuses a lock without an entry the manifest applies here (`bosun_resolve::applicable`, `FROZEN_LOCK_INCOMPLETE`), remedy `bosun lock` | landed; scenarios: an unelevated install deferring accept jq locks jq 1.7.1-6+deb13u1 (on the machine; 13u2 published), then an elevated `install --frozen` records the accept; unreadable system state still locks jq; a first lock from `install --scope user` makes `install --frozen` fail naming jq; red before: jq left out of the lock, and `--frozen` planned nothing |
 | TV-21 | `remove --scope` is refused before anything runs (`refuse_remove_scope`, `REMOVE_NO_SCOPE`): removing an entry cleans up every scope it touches; the flag is hidden from `remove --help`, which says why, and stays on `install`, `uninstall` and `prune` | landed; scenarios: `remove ripgrep --scope user` fails with the reason, manifest, state and lock untouched; `remove --help` says it takes no `--scope` and shows no flag, `uninstall --help` still offers it; red before: the remove applied |
+| TV-22 | an elevated run reads and writes the invoking user's lock (§4.5): `bosun_host::invoker` (`SUDO_USER`/`SUDO_UID`/`SUDO_GID`, `DOAS_USER`; home by `passwd_account`, nix `getpwnam_r`), `lock_place` → `paths::locks_under_home`, `INVOKER_LOCK` / `INVOKER_UNKNOWN`; the lock is written by `bosun_io::write_owned` (temp file, `fchown`, rename; made dirs `chownat` no-follow). The seam models it: its user's lock is under their home, an elevated run's own under root's (`state/root`), and an elevated scenario runs with `SUDO_USER` and a fixture `passwd` unless it is root's own login | landed; scenarios: under sudo `lock` writes the user's lock and keeps its pins, root's own login writes root's; real tier (debian 13, sudo): the non-root user's `bosun install` defers accept hello, `sudo bosun install --frozen` applies it from their lock, root has none, everything under their `.local/state` is theirs, and `sudo bosun lock` after deleting it remakes it theirs; red before: `--frozen needs this machine's lock` (seam, both elevated `--frozen` scenarios; real tier) |
 
 **First real-host smoke run (2026-10-14, release build, Debian 13, read-only `--plan` and
 `lock` in a scratch dir).** `backends` found apt 3.0.3, cargo 1.96.1 and github-release; jq

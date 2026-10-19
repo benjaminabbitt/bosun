@@ -36,6 +36,9 @@ struct Machine {
     /// The C library family (`gnu`, `musl`) and version, when known.
     libc: Option<(String, String)>,
     elevated: bool,
+    /// Elevated in root's own login rather than through `sudo`, so no
+    /// invoking user is in the environment.
+    root_login: bool,
 }
 
 /// A machine's os-release facts: `ID`, `ID_LIKE`, `VERSION_CODENAME` and `VERSION_ID`.
@@ -247,6 +250,7 @@ impl BosunWorld {
             "absent": self.absent,
             "http": self.http(),
             "home": self.home(),
+            "passwd": {"ben": {"uid": self.ids().0, "gid": self.ids().1, "home": self.home()}},
         });
         if let Some(d) = &m.distro {
             fx["distro"] = json!({
@@ -264,6 +268,28 @@ impl BosunWorld {
             fx["fail_step"] = json!(f);
         }
         fx
+    }
+
+    /// The ids sudo names for the user: the uid owning the scenario's files
+    /// and, where the user has one, a group of theirs other than the one
+    /// their files get, which they may give a file to without being root, so
+    /// a lock given to the invoking user shows it.
+    fn ids(&self) -> (u32, u32) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let meta = fs::metadata(self.dir.as_ref().expect("a temp dir").path()).unwrap();
+            let out = Command::new("id").arg("-G").output().expect("run id");
+            let other = String::from_utf8_lossy(&out.stdout)
+                .split_whitespace()
+                .filter_map(|g| g.parse::<u32>().ok())
+                .find(|g| *g != meta.gid());
+            (meta.uid(), other.unwrap_or(meta.gid()))
+        }
+        #[cfg(not(unix))]
+        {
+            (1000, 1000)
+        }
     }
 
     /// The scratch home directory of the user bosun runs as.
@@ -450,9 +476,19 @@ fn apt_mirror_url(distro: &str, suffix: &str, arch: &str) -> &'static str {
     }
 }
 
-/// The locks this machine holds: in the user state dir, never the project.
+/// The locks this machine holds for the user: in their state dir under
+/// their home, never the project.
 fn lock_files(project: &Path) -> Vec<PathBuf> {
-    let dir = project.join("state").join("user").join("locks");
+    locks_in(&project.join("home"))
+}
+
+/// The locks in the state dir under `home`.
+fn locks_in(home: &Path) -> Vec<PathBuf> {
+    let dir = home
+        .join(".local")
+        .join("state")
+        .join("bosun")
+        .join("locks");
     match fs::read_dir(&dir) {
         Ok(entries) => entries.map(|e| e.unwrap().path()).collect(),
         Err(_) => Vec::new(),
@@ -523,6 +559,7 @@ fn a_machine(world: &mut BosunWorld, os: String, arch: String, privilege: String
         distro,
         libc: None,
         elevated: privilege == "elevated",
+        root_login: false,
     });
 }
 
@@ -542,6 +579,7 @@ fn a_mint_machine(world: &mut BosunWorld, codename: String, arch: String, base: 
         }),
         libc: None,
         elevated: false,
+        root_login: false,
     });
 }
 
@@ -570,6 +608,7 @@ fn a_debian_machine_without_release(world: &mut BosunWorld, arch: String) {
         }),
         libc: None,
         elevated: false,
+        root_login: false,
     });
 }
 
@@ -974,6 +1013,15 @@ fn later_runs_elevated(world: &mut BosunWorld) {
         .elevated = true;
 }
 
+/// The runs that follow are elevated in root's own login: no `sudo`, so no
+/// invoking user in the environment.
+#[when("later runs are root's own login")]
+fn later_runs_root_login(world: &mut BosunWorld) {
+    let m = world.machine.as_mut().expect("describe the machine first");
+    m.elevated = true;
+    m.root_login = true;
+}
+
 #[when("the manifest is deleted")]
 fn delete_manifest(world: &mut BosunWorld) {
     let p = world.path();
@@ -1039,6 +1087,19 @@ fn bosun_command(world: &mut BosunWorld, cmdline: &str, cwd: &Path) -> Command {
         .env("APPDATA", p.join("config"))
         .current_dir(cwd)
         .args(&args);
+    for var in ["SUDO_USER", "SUDO_UID", "SUDO_GID", "DOAS_USER"] {
+        command.env_remove(var);
+    }
+    // An elevated run is under sudo, which says who ran it, unless it is
+    // root's own login.
+    let m = world.machine();
+    if m.elevated && !m.root_login {
+        let (uid, gid) = world.ids();
+        command
+            .env("SUDO_USER", "ben")
+            .env("SUDO_UID", uid.to_string())
+            .env("SUDO_GID", gid.to_string());
+    }
     command
 }
 
@@ -1520,6 +1581,33 @@ fn lock_written(world: &mut BosunWorld) {
 fn lock_absent(world: &mut BosunWorld) {
     let p = world.path();
     assert!(lock_files(&p).is_empty(), "a lock was written");
+}
+
+/// The lock, and the directory holding it, carry the ids sudo named.
+/// Windows has no owners to give; only the lock's place is checked there.
+#[then("the lock and its directory are the invoking user's")]
+fn lock_invokers(world: &mut BosunWorld) {
+    let files = lock_files(&world.path());
+    let [file] = files.as_slice() else {
+        panic!("want one lock, found {files:?}");
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let want = world.ids();
+        for p in [file.as_path(), file.parent().unwrap()] {
+            let meta = fs::metadata(p).unwrap();
+            assert_eq!((meta.uid(), meta.gid()), want, "{p:?}");
+        }
+    }
+}
+
+/// Root's home inside the seam, apart from the user's.
+#[then(regex = r"^root's state holds (a|no) lock$")]
+fn root_lock(world: &mut BosunWorld, count: String) {
+    let locks = locks_in(&world.path().join("state").join("root"));
+    let want = usize::from(count == "a");
+    assert_eq!(locks.len(), want, "root's locks: {locks:?}");
 }
 
 fn lock_leaves(doc: &Value) -> impl Iterator<Item = (&Value, &Value)> {

@@ -8,6 +8,7 @@ pub mod errmsg;
 pub mod error;
 pub mod executor;
 pub mod http;
+pub mod invoker;
 pub mod libc;
 pub mod logmsg;
 pub mod machine;
@@ -18,6 +19,9 @@ pub mod registry;
 pub use error::HostError;
 pub use executor::StepExecutor;
 pub use http::UreqHttpFetcher;
+#[cfg(unix)]
+pub use invoker::passwd_account;
+pub use invoker::{invoker, Account, Invoker, UnknownUser};
 #[cfg(unix)]
 pub use machine::LinuxMachine;
 pub use machine::{

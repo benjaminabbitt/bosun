@@ -53,9 +53,11 @@ fn bosun(dir: &Path) -> Command {
     cmd
 }
 
-/// The machine's locks, in the user state dir (never the project).
+/// The machine's locks, in the state dir under the user's home (never the
+/// project).
 fn lock_files(dir: &Path) -> Vec<PathBuf> {
-    match fs::read_dir(dir.join("state").join("user").join("locks")) {
+    let home = dir.join("state").join("home");
+    match fs::read_dir(bosun_io::paths::locks_under_home(&home)) {
         Ok(entries) => entries.map(|e| e.unwrap().path()).collect(),
         Err(_) => Vec::new(),
     }

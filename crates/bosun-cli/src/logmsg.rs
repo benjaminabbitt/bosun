@@ -62,3 +62,16 @@ pub const OWN_CODENAME_SELECTOR: &str =
 /// `install --scope` left a package's scope out of its apply, so its lock
 /// entry stays as it was.
 pub const LOCK_KEPT: &str = "--scope left the package's scope out; its lock entry is kept";
+
+/// An elevated run reads and writes the lock of the user who elevated it
+/// (sudo's `SUDO_USER`, doas's `DOAS_USER`), in the default state dir of
+/// their passwd home, keeping what it writes theirs. Their `XDG_STATE_HOME`
+/// is not consulted: sudo does not pass it, and one it passes cannot be told
+/// from root's.
+pub const INVOKER_LOCK: &str =
+    "elevated: using the lock of the user who elevated, under their home's .local/state";
+
+/// The user an elevating tool names is not in the passwd database, so their
+/// lock cannot be found; this run uses its own.
+pub const INVOKER_UNKNOWN: &str =
+    "the user who elevated is not in the passwd database; using this account's own lock";

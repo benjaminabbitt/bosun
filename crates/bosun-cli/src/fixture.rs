@@ -69,6 +69,10 @@ pub struct Fixture {
     /// into its `.local/bin`, as they do on a real host.
     #[serde(default)]
     pub home: Option<PathBuf>,
+    /// The passwd database by user name, for finding the user who elevated
+    /// a run (`SUDO_USER`).
+    #[serde(default)]
+    pub passwd: BTreeMap<String, FixtureAccount>,
     /// Compiled-in backends this machine lacks the program for.
     #[serde(default)]
     pub absent: Vec<String>,
@@ -91,6 +95,17 @@ pub struct FixtureDistro {
     /// The `VERSION_ID`.
     #[serde(default)]
     pub version_id: Option<String>,
+}
+
+/// A fixture passwd entry.
+#[derive(Deserialize)]
+pub struct FixtureAccount {
+    /// The user id.
+    pub uid: u32,
+    /// The primary group id.
+    pub gid: u32,
+    /// The home directory.
+    pub home: PathBuf,
 }
 
 /// Fixture C library facts (§5.4).
