@@ -14,6 +14,10 @@ pub const BACKEND_PROBE_PANIC: &str = "backend probe panicked; skipped";
 /// that code says beyond it (msiexec 3010: reboot to finish).
 pub const OK_EXIT: &str = "command succeeded with a nonzero exit";
 
+/// A file operation runs as another user (the one who elevated this run),
+/// in a child that has dropped to their ids.
+pub const AS_USER: &str = "file operation as the invoking user";
+
 /// The machine's C library was read from the loader `/bin/sh` asks for.
 pub const LIBC_DETECTED: &str = "libc detected";
 /// No libc could be read: no `/bin/sh`, a static one, or an unfamiliar loader.

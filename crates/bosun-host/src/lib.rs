@@ -4,6 +4,8 @@
 //! real; `FakeMachine` drives tests. macOS/Windows are out of M1 but the
 //! `Machine` trait keeps room for them.
 
+#[cfg(unix)]
+pub mod as_user;
 pub mod errmsg;
 pub mod error;
 pub mod executor;
@@ -16,6 +18,8 @@ pub mod os_release;
 pub mod process;
 pub mod registry;
 
+#[cfg(unix)]
+pub use as_user::AsUser;
 pub use error::HostError;
 pub use executor::StepExecutor;
 pub use http::UreqHttpFetcher;

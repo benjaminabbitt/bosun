@@ -236,7 +236,6 @@ dependencies = [
  "bosun-core",
  "bosun-ports",
  "etcetera",
- "rustix",
  "serde",
  "serde_json",
  "sha2",

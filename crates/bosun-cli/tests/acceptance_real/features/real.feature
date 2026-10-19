@@ -636,6 +636,47 @@ Feature: real backends against a disposable container
     And I run `bosun prune --yes --scope system`
     Then it succeeds
 
+  # bosun reads and writes the user's lock as the user (§4.5), so a symlink
+  # the user planted cannot steer a write as root: the kernel refuses what the
+  # user could not do themselves.
+  @apt-get @useradd @runuser @sudo
+  Scenario: sudo bosun lock writes nothing through a locks symlink to /etc
+    Given the apt index is refreshed
+    And the manifest:
+      """
+      version: 2
+      packages:
+        - name: hello
+          spec: "*"
+          install:
+            linux:debian: {backend: apt}
+      """
+    And a non-root user whose home is the project, and who may use sudo
+    And the non-root user's locks directory is a symlink to /etc
+    When the non-root user runs `sudo bosun lock .`
+    Then it fails
+    And it reports "Permission denied"
+    And /etc is as it was
+
+  @apt-get @useradd @runuser @sudo
+  Scenario: sudo bosun lock follows the user's own symlinked ~/.local
+    Given the apt index is refreshed
+    And the manifest:
+      """
+      version: 2
+      packages:
+        - name: hello
+          spec: "*"
+          install:
+            linux:debian: {backend: apt}
+      """
+    And a non-root user whose home is the project, and who may use sudo
+    And the non-root user's ~/.local is a symlink to a directory of theirs
+    When the non-root user runs `sudo bosun lock .`
+    Then it succeeds
+    And the non-root user has a lock
+    And everything in the non-root user's state is theirs
+
   # github-release is user scope, so it runs as a non-root user (§5.5).
   @useradd @runuser
   Scenario: github-release verifies the checksum and installs an executable

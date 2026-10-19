@@ -24,15 +24,15 @@ use bosun_core::{Arch, BackendId, Distro, Libc, LibcFamily, Os, Scope, Target, V
 #[cfg(unix)]
 use bosun_host::LinuxMachine;
 use bosun_host::{
-    build_registry, detect_arch, Account, FakeMachine, ProcessCommandRunner, SkipReason,
+    build_registry, detect_arch, Account, FakeMachine, Invoker, ProcessCommandRunner, SkipReason,
     StepExecutor, UreqHttpFetcher,
 };
-use bosun_io::{FileStateStore, Owner};
+use bosun_io::{DirectFiles, FileStateStore};
 use bosun_ports::backend::{Index, Installer};
 use bosun_ports::StateStore;
 use bosun_ports::{
-    Backend, BackendFactory, CommandRunner, Elevation, HostInfo, HttpFetcher, Machine, PortError,
-    Privilege, StepRunner, User,
+    Backend, BackendFactory, CommandRunner, Elevation, FileAccess, HostInfo, HttpFetcher, Machine,
+    PortError, Privilege, StepRunner, User,
 };
 use bosun_resolve::{Host, ResolvableBackend};
 
@@ -92,8 +92,11 @@ pub struct Env {
     /// The options (§5.4) every compiled-in backend declares, present or
     /// not, so a manifest checks the same on every machine.
     option_keys: bosun_io::BackendOptionKeys,
-    /// Where this run's locks live (§4.5), and who owns what it writes there.
-    lock: LockPlace,
+    /// Where this run's locks live (§4.5).
+    lock_dir: PathBuf,
+    /// How the lock is read and written: as this account, or as the user
+    /// who elevated the run (§4.5).
+    lock_files: Rc<dyn FileAccess>,
     machine: Box<dyn Machine>,
     exec: Exec,
     /// Whether this run found the system state unreadable and left it out.
@@ -195,13 +198,13 @@ impl Env {
 
     /// This machine's lock for the manifest at `manifest` (its canonical path).
     pub fn lock_path(&self, manifest: &Path) -> PathBuf {
-        bosun_io::paths::lock_file(&self.lock.dir, manifest)
+        bosun_io::paths::lock_file(&self.lock_dir, manifest)
     }
 
-    /// Who a lock this run writes is given to: the user who elevated it,
-    /// whose lock it is (§4.5), else no one (it stays this account's).
-    pub fn lock_owner(&self) -> Option<Owner> {
-        self.lock.owner
+    /// How this run reads and writes its lock: as the user who elevated it,
+    /// whose lock it is (§4.5), else as this account.
+    pub fn lock_files(&self) -> Rc<dyn FileAccess> {
+        self.lock_files.clone()
     }
 
     /// The options each known backend declares, for checking a manifest.
@@ -241,18 +244,42 @@ impl Env {
     }
 }
 
-/// Where a run keeps its locks (§4.5), and who owns what it writes there.
+/// Where a run keeps its locks (§4.5), and whose they are: the user who
+/// elevated it, as whom they are read and written, or this account.
 #[derive(Debug, PartialEq, Eq)]
 struct LockPlace {
     dir: PathBuf,
-    owner: Option<Owner>,
+    invoker: Option<Invoker>,
+}
+
+impl LockPlace {
+    /// How the lock is read and written: as its user when the run was
+    /// elevated by one, else as this account.
+    fn files(&self) -> Rc<dyn FileAccess> {
+        files_as(self.invoker.as_ref())
+    }
+}
+
+/// File access as `user`, or as this account when there is none (§4.5).
+#[cfg(unix)]
+fn files_as(user: Option<&Invoker>) -> Rc<dyn FileAccess> {
+    match user {
+        Some(user) => Rc::new(bosun_host::AsUser::invoker(user)),
+        None => Rc::new(DirectFiles),
+    }
+}
+
+/// Windows elevation keeps the user's own account, so its own files.
+#[cfg(not(unix))]
+fn files_as(_user: Option<&Invoker>) -> Rc<dyn FileAccess> {
+    Rc::new(DirectFiles)
 }
 
 /// Where a run keeps its locks: `own`, the locks beside this account's
 /// state, unless the run is elevated by a user the elevating tool names
 /// (`env`, found by `lookup`; §5.5). Then it is that user's, in the default
-/// state dir of their home, and what it writes there is given to them.
-/// Elevation on Windows keeps the user's own profile, so its own lock.
+/// state dir of their home, read and written as them. Elevation on Windows
+/// keeps the user's own profile, so its own lock.
 fn lock_place(
     os: Os,
     privilege: Privilege,
@@ -262,7 +289,7 @@ fn lock_place(
 ) -> LockPlace {
     let own = LockPlace {
         dir: own,
-        owner: None,
+        invoker: None,
     };
     if privilege != Privilege::Elevated || os == Os::Windows {
         return own;
@@ -277,10 +304,7 @@ fn lock_place(
             );
             LockPlace {
                 dir,
-                owner: Some(Owner {
-                    uid: user.uid,
-                    gid: user.gid,
-                }),
+                invoker: Some(user),
             }
         }
         Ok(None) => own,
@@ -838,7 +862,8 @@ fn from_host() -> Result<Env, CliError> {
         skipped,
         schemes,
         option_keys,
-        lock,
+        lock_files: lock.files(),
+        lock_dir: lock.dir,
         machine,
         exec: Exec::Host { runner, fetcher },
         system_hidden: Cell::new(false),
@@ -1026,7 +1051,8 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
         skipped,
         schemes,
         option_keys,
-        lock,
+        lock_files: lock.files(),
+        lock_dir: lock.dir,
         machine: Box::new(machine),
         exec: Exec::Fixture(Box::new(FixtureStepRunner::new(
             fx.fail_step,
@@ -1189,7 +1215,7 @@ mod tests {
     fn own() -> LockPlace {
         LockPlace {
             dir: PathBuf::from("/root/.local/state/bosun/locks"),
-            owner: None,
+            invoker: None,
         }
     }
 
@@ -1205,9 +1231,11 @@ mod tests {
             ),
             LockPlace {
                 dir: PathBuf::from("/srv/ben/.local/state/bosun/locks"),
-                owner: Some(Owner {
+                invoker: Some(Invoker {
+                    name: "ben".to_string(),
                     uid: 1000,
-                    gid: 1001
+                    gid: 1001,
+                    home: PathBuf::from("/srv/ben"),
                 }),
             }
         );

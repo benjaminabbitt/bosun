@@ -19,9 +19,5 @@ sha2.workspace = true
 etcetera.workspace = true
 tempfile.workspace = true
 
-# Giving a file written elevated to the user who elevated (chown).
-[target.'cfg(unix)'.dependencies]
-rustix = { workspace = true, features = ["fs"] }
-
 [lints]
 workspace = true

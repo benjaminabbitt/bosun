@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 use bosun_core::platform::Selector;
 use bosun_core::record::{LockDocument, LockLeaf, LockPackage, Package, StateDocument, StateLeaf};
 use bosun_core::{BackendId, Distro, Libc, Manifest, Os, Scope, Spec, Target, Version};
-use bosun_io::{check_options, load_manifest, lock, manifest_hash, write_owned, Owner};
+use bosun_io::{check_options, load_manifest, lock, manifest_hash};
+use bosun_ports::FileAccess;
 use bosun_ports::Installer;
 use bosun_resolve::{applicable, resolve, resolve_with_lock, NotApplicable, Outcome, Resolution};
 use serde::Serialize;
@@ -730,8 +731,8 @@ pub(crate) struct PendingLock {
     previous: Option<LockDocument>,
     /// The install scope of each package `install` resolved.
     scopes: BTreeMap<String, Scope>,
-    /// Who the lock is given to: the user who elevated the run (§4.5).
-    owner: Option<Owner>,
+    /// How the lock is written: as the user who elevated the run (§4.5).
+    files: std::rc::Rc<dyn FileAccess>,
 }
 
 impl PendingLock {
@@ -784,7 +785,9 @@ impl PendingLock {
             path: self.path.clone(),
             detail: e.to_string(),
         };
-        write_owned(&self.path, lock::to_json(&self.doc).as_bytes(), self.owner).map_err(io_err)?;
+        self.files
+            .write(&self.path, lock::to_json(&self.doc).as_bytes())
+            .map_err(io_err)?;
         Ok(self.path.clone())
     }
 }
@@ -857,7 +860,7 @@ pub(crate) fn relock(
             doc,
             previous: previous.clone(),
             scopes: BTreeMap::new(),
-            owner: env.lock_owner(),
+            files: env.lock_files(),
         }
     });
     Ok(Relocked {
@@ -920,8 +923,11 @@ fn installed_pin(state: &StateDocument, name: &str) -> Option<LockPackage> {
 /// This machine's lock for the manifest at `claim_path`, if it has one: a lock
 /// file recording another manifest (a path-hash clash) is not this one's.
 pub(crate) fn this_lock(env: &Env, claim_path: &Path) -> Result<Option<LockDocument>, CliError> {
-    Ok(read_lock(&env.lock_path(claim_path), &env.schemes())?
-        .filter(|l| Path::new(&l.manifest) == claim_path))
+    let files = env.lock_files();
+    Ok(
+        read_lock(files.as_ref(), &env.lock_path(claim_path), &env.schemes())?
+            .filter(|l| Path::new(&l.manifest) == claim_path),
+    )
 }
 
 /// A `bosun.lock` beside the manifest is the shared lock of older bosun
@@ -1032,21 +1038,29 @@ fn na_text(na: &NotApplicable) -> String {
     }
 }
 
+/// The lock at `path`, read through `files` (as its user, §4.5); `None` when
+/// there is none.
 fn read_lock(
+    files: &dyn FileAccess,
     path: &Path,
     schemes: &bosun_io::BackendSchemes,
 ) -> Result<Option<LockDocument>, CliError> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    let text = fs::read_to_string(path).map_err(|e| CliError::Io {
-        path: path.to_path_buf(),
-        detail: e.to_string(),
-    })?;
-    let doc = lock::from_json(&text, path, schemes).map_err(|e| CliError::Parse {
+    let bytes = match files.read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(CliError::Io {
+                path: path.to_path_buf(),
+                detail: e.to_string(),
+            })
+        }
+    };
+    let parse_err = |detail: String| CliError::Parse {
         what: "lockfile".to_string(),
-        detail: e.to_string(),
-    })?;
+        detail,
+    };
+    let text = String::from_utf8(bytes).map_err(|e| parse_err(e.to_string()))?;
+    let doc = lock::from_json(&text, path, schemes).map_err(|e| parse_err(e.to_string()))?;
     Ok(Some(doc))
 }
 
@@ -2001,6 +2015,21 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn a_missing_lock_is_none_and_one_that_cannot_be_read_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let schemes = bosun_io::BackendSchemes::new();
+        let files = bosun_io::DirectFiles;
+        let missing = tmp.path().join("none.json");
+        assert!(read_lock(&files, &missing, &schemes).unwrap().is_none());
+        let err = read_lock(&files, tmp.path(), &schemes).unwrap_err();
+        assert!(matches!(err, CliError::Io { .. }), "{err}");
+        let not_text = tmp.path().join("bad.json");
+        fs::write(&not_text, [0xff, 0xfe]).unwrap();
+        let err = read_lock(&files, &not_text, &schemes).unwrap_err();
+        assert!(matches!(err, CliError::Parse { .. }), "{err}");
+    }
+
     /// A pending lock moving jq (system), rg (user) and fd (no scope
     /// recorded) to 2.0-1, from a previous lock pinning jq and rg at 1.0-1.
     fn pending() -> PendingLock {
@@ -2012,7 +2041,7 @@ mod tests {
                 ("jq".to_string(), Scope::System),
                 ("rg".to_string(), Scope::User),
             ]),
-            owner: None,
+            files: std::rc::Rc::new(bosun_io::DirectFiles),
         }
     }
 

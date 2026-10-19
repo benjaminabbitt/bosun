@@ -197,10 +197,25 @@ passwd database (`getpwnam_r`), never guessed from the name. Their `XDG_STATE_HO
 read: sudo's default `env_reset` drops it, and one that survives (`sudo -E`, `env_keep`)
 cannot be told from root's, so a user who moves their state dir with it has an elevated run
 miss their lock (`--frozen` then fails asking for `bosun lock`). A name the passwd database
-lacks is warned of, and the run uses its own lock. What an elevated run writes there stays
-the user's: each directory it makes and the lock (written to a temp file beside it, given to
-the user, then renamed over it) are chowned to those ids, the directories with
-`AT_SYMLINK_NOFOLLOW`. `pkexec` (`PKEXEC_UID` only) is not read: a run under it uses root's
+lacks is warned of, and the run uses its own lock.
+
+**The user's files are read and written as the user — DECIDED, built.** Root never does I/O
+in the user's tree: a symlink the user planted (`locks` → `/etc`) would have root write, and
+then hand them, a file in a root directory. Every read and write of the lock, and the
+directories it needs, goes through the `FileAccess` port; an elevated run's adapter
+(`bosun_host::AsUser`) runs each operation in a short-lived forked child that drops for good
+to the user's groups (`getgrouplist`; on macOS their primary group alone), group id and user
+id (`setgroups`, `setgid`, `setuid`, checked after), then makes the missing directories, writes
+a temp file beside the lock (`O_EXCL|O_NOFOLLOW`, mode 0644, synced) and renames it over the
+lock, or reads it, answering over a socket pair (a status and errno, then the bytes, or an
+opened lock file's descriptor by `SCM_RIGHTS` for an advisory lock the parent holds). The
+kernel then allows exactly what the user could do, and what is written is theirs because they
+wrote it. A fork rather than a re-exec of bosun, so the binary need not be one the user may
+run (a root-only `/root/.cargo/bin`) and no environment or arguments reach the child; rather
+than per-thread credentials (`setfsuid`), which are Linux-only and keep root's supplementary
+groups. The child may share the process with other threads, so it only makes system calls
+(rustix, nix) on buffers made before the fork, allocates nothing, and leaves by `_exit`. A run
+not elevated, and Windows, do their own files (`bosun_io::DirectFiles`). `pkexec` (`PKEXEC_UID` only) is not read: a run under it uses root's
 own lock. Windows needs nothing: an elevated terminal runs as the same user with the same
 `%LOCALAPPDATA%` (over-the-shoulder elevation with another account's credentials runs as that
 account, whose lock it then is). Only the lock moves: machine state (§4.6), user config and the
@@ -1767,6 +1782,7 @@ under a pty on Unix only.
 | TV-20 | the lock covers every entry that applies here: a deferred record and a package whose state was left out are locked as resolved, an accept at the version on the machine (`accepted_version`); `install --frozen` refuses a lock without an entry the manifest applies here (`bosun_resolve::applicable`, `FROZEN_LOCK_INCOMPLETE`), remedy `bosun lock` | landed; scenarios: an unelevated install deferring accept jq locks jq 1.7.1-6+deb13u1 (on the machine; 13u2 published), then an elevated `install --frozen` records the accept; unreadable system state still locks jq; a first lock from `install --scope user` makes `install --frozen` fail naming jq; red before: jq left out of the lock, and `--frozen` planned nothing |
 | TV-21 | `remove --scope` is refused before anything runs (`refuse_remove_scope`, `REMOVE_NO_SCOPE`): removing an entry cleans up every scope it touches; the flag is hidden from `remove --help`, which says why, and stays on `install`, `uninstall` and `prune` | landed; scenarios: `remove ripgrep --scope user` fails with the reason, manifest, state and lock untouched; `remove --help` says it takes no `--scope` and shows no flag, `uninstall --help` still offers it; red before: the remove applied |
 | TV-22 | an elevated run reads and writes the invoking user's lock (§4.5): `bosun_host::invoker` (`SUDO_USER`/`SUDO_UID`/`SUDO_GID`, `DOAS_USER`; home by `passwd_account`, nix `getpwnam_r`), `lock_place` → `paths::locks_under_home`, `INVOKER_LOCK` / `INVOKER_UNKNOWN`; the lock is written by `bosun_io::write_owned` (temp file, `fchown`, rename; made dirs `chownat` no-follow). The seam models it: its user's lock is under their home, an elevated run's own under root's (`state/root`), and an elevated scenario runs with `SUDO_USER` and a fixture `passwd` unless it is root's own login | landed; scenarios: under sudo `lock` writes the user's lock and keeps its pins, root's own login writes root's; real tier (debian 13, sudo): the non-root user's `bosun install` defers accept hello, `sudo bosun install --frozen` applies it from their lock, root has none, everything under their `.local/state` is theirs, and `sudo bosun lock` after deleting it remakes it theirs; red before: `--frozen needs this machine's lock` (seam, both elevated `--frozen` scenarios; real tier) |
+| TV-23 | an elevated run reads and writes the invoking user's lock as that user, never as root (§4.5): the `FileAccess` port (`bosun_ports`), `bosun_io::DirectFiles` for a run's own files, `bosun_host::AsUser` for the user's (a forked child: `setgroups`/`setgid`/`setuid` to the user, then the I/O with rustix on buffers made before the fork; answers by socket pair, a lock file's descriptor by `SCM_RIGHTS`); `write_owned`'s chown is gone. The seam's elevated runs name this test's own ids, so their lock I/O runs through the real child | landed; unit tests as this user (write, replace, a 1 MB read, exists, both lock opens, a write into a 0555 directory through a symlink refused and nothing left, another uid or gid refused without root) and as root (nobody: a root-owned 0775 directory refused, a directory of theirs takes files theirs, a 0640 root file unreadable); real tier (debian 13, sudo): a `locks` symlink to `/etc` makes `sudo bosun lock` fail with "Permission denied" and leaves `/etc` as it was, a `~/.local` symlinked to a directory of the user's takes their lock; red before: the lock was written into `/etc` |
 
 **First real-host smoke run (2026-10-14, release build, Debian 13, read-only `--plan` and
 `lock` in a scratch dir).** `backends` found apt 3.0.3, cargo 1.96.1 and github-release; jq

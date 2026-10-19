@@ -37,6 +37,11 @@ struct RealWorld {
     dnf_repos: bool,
     /// Whether this scenario let the non-root user use sudo, which ends with it.
     sudoers: bool,
+    /// The names in `/etc` when a step pointed the user's locks there.
+    etc: Option<BTreeSet<std::ffi::OsString>>,
+    /// A directory of the non-root user's outside their home.
+    #[cfg(unix)]
+    elsewhere: Option<TempDir>,
     /// The system state file's size and modification time when a step made
     /// it root's alone.
     system_state: Option<(u64, std::time::SystemTime)>,
@@ -495,6 +500,55 @@ fn user_state_theirs(w: &mut RealWorld) {
             stack.extend(fs::read_dir(&p).unwrap().map(|e| e.unwrap().path()));
         }
     }
+}
+
+/// Give `path` itself, not what it links to, and everything under it, to the
+/// non-root user.
+#[cfg(unix)]
+fn give_to_user(path: &Path) {
+    let p = path.display().to_string();
+    let (code, out) = run("chown", &["-hR", "bosuntest:bosuntest", &p]);
+    assert_eq!(code, 0, "chown {p}: {out}");
+}
+
+fn etc_names() -> BTreeSet<std::ffi::OsString> {
+    fs::read_dir("/etc")
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect()
+}
+
+/// The user's locks directory, theirs, is a symlink to `/etc`, whose names
+/// are noted.
+#[cfg(unix)]
+#[given("the non-root user's locks directory is a symlink to /etc")]
+fn locks_to_etc(w: &mut RealWorld) {
+    let dir = user_state(w).join("bosun");
+    fs::create_dir_all(&dir).unwrap();
+    std::os::unix::fs::symlink("/etc", dir.join("locks")).unwrap();
+    give_to_user(&w.home().join(".local"));
+    w.etc = Some(etc_names());
+}
+
+#[then("/etc is as it was")]
+fn etc_unchanged(w: &mut RealWorld) {
+    let before = w.etc.as_ref().expect("note /etc first");
+    let after = etc_names();
+    let added: Vec<_> = after.difference(before).collect();
+    assert!(added.is_empty(), "bosun left these in /etc: {added:?}");
+}
+
+/// The user's `~/.local` is a symlink to a directory of theirs elsewhere.
+#[cfg(unix)]
+#[given("the non-root user's ~/.local is a symlink to a directory of theirs")]
+fn local_elsewhere(w: &mut RealWorld) {
+    let elsewhere = tempfile::tempdir().unwrap();
+    give_to_user(elsewhere.path());
+    let local = w.home().join(".local");
+    let _ = fs::remove_dir_all(&local);
+    std::os::unix::fs::symlink(elsewhere.path(), &local).unwrap();
+    give_to_user(&local);
+    w.elsewhere = Some(elsewhere);
 }
 
 /// Run bosun as a non-root user through sudo, which leaves root's `HOME`

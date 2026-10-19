@@ -270,21 +270,17 @@ impl BosunWorld {
         fx
     }
 
-    /// The ids sudo names for the user: the uid owning the scenario's files
-    /// and, where the user has one, a group of theirs other than the one
-    /// their files get, which they may give a file to without being root, so
-    /// a lock given to the invoking user shows it.
+    /// The ids sudo names for the user: this test's own, the one user an
+    /// elevated run in the seam can become without root, so its file I/O as
+    /// the invoking user runs for real (§4.5).
     fn ids(&self) -> (u32, u32) {
         #[cfg(unix)]
         {
-            use std::os::unix::fs::MetadataExt;
-            let meta = fs::metadata(self.dir.as_ref().expect("a temp dir").path()).unwrap();
-            let out = Command::new("id").arg("-G").output().expect("run id");
-            let other = String::from_utf8_lossy(&out.stdout)
-                .split_whitespace()
-                .filter_map(|g| g.parse::<u32>().ok())
-                .find(|g| *g != meta.gid());
-            (meta.uid(), other.unwrap_or(meta.gid()))
+            let id = |flag: &str| -> u32 {
+                let out = Command::new("id").arg(flag).output().expect("run id");
+                String::from_utf8_lossy(&out.stdout).trim().parse().unwrap()
+            };
+            (id("-u"), id("-g"))
         }
         #[cfg(not(unix))]
         {
@@ -1591,6 +1587,7 @@ fn lock_invokers(world: &mut BosunWorld) {
     let [file] = files.as_slice() else {
         panic!("want one lock, found {files:?}");
     };
+    assert!(file.is_file(), "{file:?}");
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;

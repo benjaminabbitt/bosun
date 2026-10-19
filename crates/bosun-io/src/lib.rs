@@ -9,10 +9,10 @@
 pub mod config;
 pub mod errmsg;
 pub mod error;
+pub mod files;
 pub mod lock;
 pub mod manifest;
 pub mod manifest_edit;
-pub mod owned;
 pub mod paths;
 pub mod state;
 
@@ -20,11 +20,11 @@ pub mod state;
 pub use annals_yaml::versioned::Upgraded;
 pub use config::UserConfig;
 pub use error::IoError;
+pub use files::DirectFiles;
 pub use manifest::{
     check_options, load_manifest, manifest_hash, manifest_version, upgrade_manifest,
     BackendOptionKeys, ManifestError, MANIFEST_VERSION,
 };
-pub use owned::{write_owned, Owner};
 pub use state::FileStateStore;
 
 use bosun_core::vers::scheme_for_type;

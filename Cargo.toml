@@ -68,8 +68,9 @@ etcetera = "0.11.0"
 
 # euid for the privilege check (no unsafe; process feature only).
 rustix = { version = "1.1.5", features = ["process"] }
-# The passwd database (getpwnam_r) for the user who elevated a run.
-nix = { version = "0.31.3", default-features = false, features = ["user"] }
+# The passwd database (getpwnam_r) for the user who elevated a run, and the
+# forked child that does that user's file I/O as them (fork, setuid, waitpid).
+nix = { version = "0.31.3", default-features = false, features = ["user", "process"] }
 
 # Test support.
 tempfile = "3"

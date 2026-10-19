@@ -6,6 +6,8 @@
 //!   (§5.1); [`BackendFactory`] registers a present backend (§5.3).
 //! - [`Machine`] — the OS interface (§5.5).
 //! - [`StateStore`] — machine-state persistence (§4.6).
+//! - [`FileAccess`] — one owner's files, read and written as that owner
+//!   (§4.5).
 //! - [`CommandRunner`] / [`HttpFetcher`] — the side-effect ports a backend
 //!   runs through, with fakes in [`testing`].
 //!
@@ -18,6 +20,7 @@ pub mod backend;
 pub mod errmsg;
 pub mod error;
 pub mod exec;
+pub mod files;
 pub mod machine;
 pub mod state;
 pub mod step;
@@ -29,6 +32,7 @@ pub use backend::{
 };
 pub use error::PortError;
 pub use exec::{Command, CommandRunner, HttpFetcher, HttpRequest, HttpResponse, Output};
+pub use files::{FileAccess, LockOpen};
 pub use machine::{Elevation, Machine, Privilege, User};
 pub use state::{StateStore, StateTransaction};
 pub use step::{ArchiveFormat, OkExit, Step, StepRunner, Steps};
