@@ -3,3 +3,4 @@ parents:
   - ctxloom+git://github.com/ctxloom/ctxloom-default//bundles/ai-developer#profiles/developer
 bundles:
   - ctxloom+git://github.com/ctxloom/ctxloom-default//bundles/rust-development
+  - ctxloom+git://github.com/benjaminabbitt/ctxloom-personal//bundles/unattended

@@ -1,5 +1,9 @@
 schema_version: 3
 bundles:
+  ctxloom+git://github.com/benjaminabbitt/ctxloom-personal//bundles/unattended:
+    sha: 3a243f6804aa073b9c7e6ed29e21aae5966d1ac5
+    url: https://github.com/benjaminabbitt/ctxloom-personal
+    kind: branch
   ctxloom+git://github.com/ctxloom/ctxloom-default//bundles/agent-roles:
     sha: 187d98e380313c9ffc24ce5a4ff512ccae03a832
     url: https://github.com/ctxloom/ctxloom-default
