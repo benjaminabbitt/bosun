@@ -37,6 +37,36 @@ Feature: this machine's preference picks among the backends a manifest accepts
     Then it succeeds
     And the lock pins ripgrep 14.1.0-1
 
+  # Under sudo the config is the invoking user's (§5.3), at their home's
+  # .config, read as them: sudo leaves root's HOME and drops their
+  # XDG_CONFIG_HOME, as it does XDG_STATE_HOME.
+  Scenario: under sudo, the invoking user's config gives the order, read as them
+    Given the config:
+      """
+      version: 1
+      installer: [apt]
+      """
+    When later runs are elevated
+    And I run `bosun -vv --format text lock .`
+    Then it succeeds
+    And the lock pins ripgrep 14.1.0-1
+    And it does "read" on config.yaml as the invoking user
+
+  # One that is set cannot be told from root's: bosun says so once and reads
+  # the config under the user's home.
+  Scenario: under sudo with XDG_CONFIG_HOME set, bosun says it uses the user's .config
+    Given the config:
+      """
+      version: 1
+      installer: [apt]
+      """
+    And XDG_CONFIG_HOME names another directory
+    When later runs are elevated
+    And I run `bosun --format text lock .`
+    Then it succeeds
+    And it warns once "XDG_CONFIG_HOME is not read under elevation"
+    And the lock pins ripgrep 14.1.0-1
+
   Scenario: the --installer flag wins over the user config
     Given the config:
       """

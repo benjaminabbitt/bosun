@@ -2,7 +2,6 @@
 //! Each returns one typed value; the mutating commands are slice 10-2.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use bosun_core::platform::Selector;
@@ -15,7 +14,7 @@ use bosun_resolve::{applicable, resolve, resolve_with_lock, NotApplicable, Outco
 use serde::Serialize;
 use tracing::{debug, info, warn};
 
-use crate::env::Env;
+use crate::env::{Env, UserSide};
 use crate::error::CliError;
 use crate::output::Render;
 
@@ -28,28 +27,34 @@ pub fn preference(env: &Env, flag: &[String]) -> Result<Vec<BackendId>, CliError
         .iter()
         .filter_map(|b| env.installer_for(&b.id).map(|i| (b.id.clone(), i.scope())))
         .collect();
-    configured_order(flag, &registered)
+    configured_order(&env.user_side(), flag, &registered)
 }
 
 /// The installer preference order (§5.3) for a machine bosun isn't running on:
 /// the flag, `BOSUN_INSTALLER` and the user config as here, then `ids` (the
 /// backends with a remote index) in registration order, since a backend's
 /// install scope is known only from a probe.
-pub fn remote_preference(flag: &[String], ids: &[BackendId]) -> Result<Vec<BackendId>, CliError> {
+pub fn remote_preference(
+    user: &UserSide,
+    flag: &[String],
+    ids: &[BackendId],
+) -> Result<Vec<BackendId>, CliError> {
     let registered: Vec<(BackendId, Scope)> =
         ids.iter().map(|id| (id.clone(), Scope::User)).collect();
-    configured_order(flag, &registered)
+    configured_order(user, flag, &registered)
 }
 
-/// [`preference_order`] over the flag, `BOSUN_INSTALLER` and the user config.
+/// [`preference_order`] over the flag, `BOSUN_INSTALLER` and the user config,
+/// read as its user (§4.5).
 fn configured_order(
+    user: &UserSide,
     flag: &[String],
     registered: &[(BackendId, Scope)],
 ) -> Result<Vec<BackendId>, CliError> {
-    let config = match bosun_io::paths::config_path() {
-        Ok(path) => config_installer(&path)?,
+    let config = match &user.config {
+        Some(path) => config_installer(user.files.as_ref(), path)?,
         // No home directory: no user config to read.
-        Err(_) => Vec::new(),
+        None => Vec::new(),
     };
     let from_env = std::env::var("BOSUN_INSTALLER").ok();
     Ok(preference_order(
@@ -95,19 +100,21 @@ pub(crate) fn preference_order(
     order.into_iter().map(BackendId::new).collect()
 }
 
-/// The `installer` order from the user config at `path`; none when there is
-/// no config file. A config that doesn't load is an error, never a silently
-/// dropped preference.
-pub(crate) fn config_installer(path: &Path) -> Result<Vec<String>, CliError> {
-    let text = match fs::read_to_string(path) {
-        Ok(text) => text,
+/// The `installer` order from the user config at `path`, read through
+/// `files`; none when there is no config file. A config that doesn't load is
+/// an error, never a silently dropped preference.
+pub(crate) fn config_installer(
+    files: &dyn FileAccess,
+    path: &Path,
+) -> Result<Vec<String>, CliError> {
+    let io_err = |detail: String| CliError::Io {
+        path: path.to_path_buf(),
+        detail,
+    };
+    let text = match files.read(path) {
+        Ok(bytes) => String::from_utf8(bytes).map_err(|e| io_err(e.to_string()))?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => {
-            return Err(CliError::Io {
-                path: path.to_path_buf(),
-                detail: e.to_string(),
-            })
-        }
+        Err(e) => return Err(io_err(e.to_string())),
     };
     bosun_io::config::from_yaml(&text, path)
         .map(|cfg| cfg.installer)
@@ -1663,6 +1670,7 @@ impl Render for ApplyReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     fn ids(order: &[BackendId]) -> Vec<&str> {
         order.iter().map(BackendId::as_str).collect()
@@ -1854,7 +1862,7 @@ mod tests {
     fn a_missing_config_file_states_no_preference() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(
-            config_installer(&dir.path().join("config.yaml")).unwrap(),
+            config_installer(&bosun_io::DirectFiles, &dir.path().join("config.yaml")).unwrap(),
             Vec::<String>::new()
         );
     }
@@ -1863,7 +1871,7 @@ mod tests {
     fn a_config_that_exists_but_cannot_be_read_is_an_error() {
         // A directory where the file should be: present, but unreadable.
         let dir = tempfile::tempdir().unwrap();
-        let err = config_installer(dir.path()).unwrap_err();
+        let err = config_installer(&bosun_io::DirectFiles, dir.path()).unwrap_err();
         assert!(matches!(err, CliError::Io { .. }), "{err:?}");
     }
 
@@ -1872,7 +1880,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yaml");
         fs::write(&path, "version: 1\ninstallers: [cargo]\n").unwrap();
-        let err = config_installer(&path).unwrap_err();
+        let err = config_installer(&bosun_io::DirectFiles, &path).unwrap_err();
         assert!(matches!(err, CliError::Parse { .. }), "{err:?}");
         assert!(err.to_string().contains("installers"), "{err}");
     }
@@ -1882,7 +1890,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yaml");
         fs::write(&path, "installer: [scoop, winget]\n").unwrap();
-        assert_eq!(config_installer(&path).unwrap(), vec!["scoop", "winget"]);
+        assert_eq!(
+            config_installer(&bosun_io::DirectFiles, &path).unwrap(),
+            vec!["scoop", "winget"]
+        );
     }
 
     fn deb(raw: &str) -> Version {

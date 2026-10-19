@@ -192,6 +192,8 @@ struct BosunWorld {
     system_state: Option<(u64, std::time::SystemTime)>,
     /// `XDG_STATE_HOME` in bosun's environment, when a step set it.
     xdg_state_home: Option<PathBuf>,
+    /// `XDG_CONFIG_HOME` in bosun's environment, when a step set it.
+    xdg_config_home: Option<PathBuf>,
     code: i32,
     stdout: String,
     stderr: String,
@@ -1007,11 +1009,18 @@ fn the_manifest(world: &mut BosunWorld, step: &Step) {
     world.manifest = Some(body);
 }
 
+/// The user's config, at `~/.config/bosun/config.yaml` (§4.4).
 #[given("the config:")]
 fn the_config(world: &mut BosunWorld, step: &Step) {
-    let dir = world.path().join("config").join("bosun");
+    world.path();
+    write_config(&world.home().join(".config"), &docstring(step));
+}
+
+/// A config of `text` in the config dir `dir`.
+fn write_config(dir: &Path, text: &str) {
+    let dir = dir.join("bosun");
     fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("config.yaml"), docstring(step)).unwrap();
+    fs::write(dir.join("config.yaml"), text).unwrap();
 }
 
 /// A step's docstring, with cucumber's leading newline taken off.
@@ -1047,6 +1056,15 @@ fn later_runs_sudo_by(world: &mut BosunWorld, name: String) {
     let m = world.machine.as_mut().expect("describe the machine first");
     m.elevated = true;
     m.sudo_by = Some(name);
+}
+
+/// `XDG_CONFIG_HOME` names a directory in the scenario's own tree, whose
+/// config prefers cargo.
+#[given("XDG_CONFIG_HOME names another directory")]
+fn xdg_config_home(world: &mut BosunWorld) {
+    let dir = world.path().join("xdg-config");
+    write_config(&dir, "version: 1\ninstaller: [cargo]\n");
+    world.xdg_config_home = Some(dir);
 }
 
 /// `XDG_STATE_HOME` names a directory in the scenario's own tree.
@@ -1126,8 +1144,8 @@ fn bosun_command(world: &mut BosunWorld, cmdline: &str, cwd: &Path) -> Command {
         .env("BOSUN_FIXTURE", p.join("fixture.json"))
         .env("BOSUN_STATE_DIR", p.join("state"))
         // the user config is this scenario's own, never the developer's.
-        .env("XDG_CONFIG_HOME", p.join("config"))
-        .env("APPDATA", p.join("config"))
+        .env("XDG_CONFIG_HOME", world.home().join(".config"))
+        .env("APPDATA", world.home().join(".config"))
         // plain logs, which some steps read.
         .env("NO_COLOR", "1")
         .env_remove("RUST_LOG")
@@ -1145,9 +1163,19 @@ fn bosun_command(world: &mut BosunWorld, cmdline: &str, cwd: &Path) -> Command {
     if let Some(dir) = &world.xdg_state_home {
         command.env("XDG_STATE_HOME", dir);
     }
+    // An elevated run is root's, with root's own home (sudo's default
+    // `HOME`), which keeps no `XDG_CONFIG_HOME` of the user's.
+    let m = world.machine();
+    if m.elevated {
+        command
+            .env("HOME", p.join("state").join("root"))
+            .env_remove("XDG_CONFIG_HOME");
+    }
+    if let Some(dir) = &world.xdg_config_home {
+        command.env("XDG_CONFIG_HOME", dir);
+    }
     // An elevated run is under sudo, which says who ran it, unless it is
     // root's own login.
-    let m = world.machine();
     if m.elevated && !m.root_login {
         match &m.doas_by {
             Some(name) => {

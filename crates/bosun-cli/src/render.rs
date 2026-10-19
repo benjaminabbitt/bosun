@@ -21,7 +21,7 @@ use bosun_resolve::{resolve, Host, NotApplicable, Outcome, ResolveError};
 use crate::commands::{
     canonical_manifest, load, load_checked, manifest_file, remote_preference, this_lock,
 };
-use crate::env::{self, Env, RemoteEnv};
+use crate::env::{self, Env, RemoteEnv, UserSide};
 use crate::error::CliError;
 use crate::target_root::{From, Root};
 use crate::{errmsg, logmsg};
@@ -71,11 +71,11 @@ pub fn rendered(req: Request) -> Result<(Vec<Target>, Rendered), CliError> {
         true => None,
         false => Some(env::assemble()?),
     };
-    let files = match &local {
-        Some(env) => env.user_files(),
-        None => env::user_files()?,
+    let user = match &local {
+        Some(env) => env.user_side(),
+        None => env::user_side()?,
     };
-    let file = manifest_file(files.as_ref(), req.path)?;
+    let file = manifest_file(user.files.as_ref(), req.path)?;
 
     let mut manifest: Option<Manifest> = None;
     let mut locks: Vec<(Target, LockDocument)> = Vec::new();
@@ -93,7 +93,7 @@ pub fn rendered(req: Request) -> Result<(Vec<Target>, Rendered), CliError> {
             let apt_root = root.as_ref().and_then(|r| r.apt(distro.as_ref()));
             let remote = remote_env(target, libc.as_ref(), apt_root)?;
             let m = loaded(&mut manifest, || {
-                load_checked(remote.option_keys(), files.as_ref(), &file)
+                load_checked(remote.option_keys(), user.files.as_ref(), &file)
             })?;
             if libc.is_none() && has_selector(m, |s| s.libc().is_some()) {
                 tracing::warn!(message = logmsg::RENDER_NO_LIBC, target = %target);
@@ -107,7 +107,7 @@ pub fn rendered(req: Request) -> Result<(Vec<Target>, Rendered), CliError> {
                 distro: distro.as_ref(),
                 libc: libc.as_ref(),
             };
-            foreign_lock(&remote, m, &machine, &req.installer)?
+            foreign_lock(&remote, m, &machine, &user, &req.installer)?
         } else {
             let env = match &mut local {
                 Some(env) => env,
@@ -189,6 +189,7 @@ fn foreign_lock(
     remote: &RemoteEnv,
     manifest: &Manifest,
     machine: &Machine,
+    user: &UserSide,
     installer: &[String],
 ) -> Result<LockDocument, CliError> {
     let Target::Platform { os, arch } = machine.target else {
@@ -201,7 +202,7 @@ fn foreign_lock(
         libc: machine.libc,
     };
     let ids: Vec<_> = remote.backends.iter().map(|b| b.id.clone()).collect();
-    let pref = remote_preference(installer, &ids)?;
+    let pref = remote_preference(user, installer, &ids)?;
     let resolution = resolve(
         manifest,
         &manifest_hash(manifest),

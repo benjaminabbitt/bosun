@@ -94,9 +94,11 @@ pub struct Env {
     option_keys: bosun_io::BackendOptionKeys,
     /// Where this run's locks live (§4.5).
     lock_dir: PathBuf,
-    /// How the user's files (manifest, lock) are read and written: as this
-    /// account, or as the user who elevated the run (§4.5).
+    /// How the user's files (manifest, config, lock) are read and written:
+    /// as this account, or as the user who elevated the run (§4.5).
     user_files: Rc<dyn FileAccess>,
+    /// The user config (§5.3), when there is a home to find it in.
+    config: Option<PathBuf>,
     machine: Box<dyn Machine>,
     exec: Exec,
     /// Whether this run found the system state unreadable and left it out.
@@ -208,6 +210,15 @@ impl Env {
         self.user_files.clone()
     }
 
+    /// The user's own files this run reads: through whom, and where the user
+    /// config is (§5.3).
+    pub fn user_side(&self) -> UserSide {
+        UserSide {
+            files: self.user_files.clone(),
+            config: self.config.clone(),
+        }
+    }
+
     /// The options each known backend declares, for checking a manifest.
     pub fn option_keys(&self) -> &bosun_io::BackendOptionKeys {
         &self.option_keys
@@ -245,13 +256,30 @@ impl Env {
     }
 }
 
+/// The user's own files a run reads, without the rest of the environment:
+/// through whom (§4.5), and where the user config is (§5.3).
+#[derive(Clone)]
+pub struct UserSide {
+    /// As the user who elevated the run, else as this account.
+    pub files: Rc<dyn FileAccess>,
+    /// The user config, when there is a home to find it in.
+    pub config: Option<PathBuf>,
+}
+
 /// The user-scope state file (§4.6) a run reads and writes, its locks beside
-/// it (§4.5), and whose they are: the user who elevated the run, as whom
-/// they are read and written, or this account.
+/// it (§4.5), the user config (§5.3), and whose they are: the user who
+/// elevated the run, as whom they are read and written, or this account.
 #[derive(Debug, PartialEq, Eq)]
 struct UserPlace {
     state: PathBuf,
+    config: Option<PathBuf>,
     invoker: Option<Invoker>,
+}
+
+/// This account's own user state and config, where it has them.
+struct Own {
+    state: PathBuf,
+    config: Option<PathBuf>,
 }
 
 impl UserPlace {
@@ -264,6 +292,14 @@ impl UserPlace {
     /// when the run was elevated by one, else as this account.
     fn files(&self) -> Rc<dyn FileAccess> {
         files_as(self.invoker.as_ref())
+    }
+
+    /// The user's files: through whom, and the config.
+    fn side(&self) -> UserSide {
+        UserSide {
+            files: self.files(),
+            config: self.config.clone(),
+        }
     }
 
     /// The human the run is for (§5.5): the user who elevated it, if any.
@@ -290,22 +326,23 @@ fn files_as(_user: Option<&Invoker>) -> Rc<dyn FileAccess> {
     Rc::new(DirectFiles)
 }
 
-/// Whose user state and lock a run uses: `own`, this account's user state,
+/// Whose user state, lock and config a run uses: `own`, this account's,
 /// unless the run is elevated by a user the elevating tool names (`env`,
 /// found by `lookup`; §5.5). Then they are that user's, in the default state
-/// dir of their home, read and written as them; their `XDG_STATE_HOME`, if
-/// set, is said once not to be read. A user the passwd database lacks is an
-/// error. Elevation on Windows keeps the user's own profile, so its own
-/// state.
+/// and config dirs of their home, read and written as them; their
+/// `XDG_STATE_HOME` and `XDG_CONFIG_HOME`, if set, are each said once not to
+/// be read. A user the passwd database lacks is an error. Elevation on
+/// Windows keeps the user's own profile, so its own state and config.
 fn user_place(
     os: Os,
     privilege: Privilege,
-    own: PathBuf,
+    own: Own,
     env: impl Fn(&str) -> Option<String>,
     lookup: impl Fn(&str) -> Option<Account>,
 ) -> Result<UserPlace, CliError> {
     let own = UserPlace {
-        state: own,
+        state: own.state,
+        config: own.config,
         invoker: None,
     };
     if privilege != Privilege::Elevated || os == Os::Windows {
@@ -314,6 +351,7 @@ fn user_place(
     match bosun_host::invoker(&env, lookup) {
         Ok(Some(user)) => {
             let state = bosun_io::paths::state_under_home(&user.home);
+            let config = bosun_io::paths::config_under_home(&user.home);
             if let Some(xdg) = env("XDG_STATE_HOME") {
                 tracing::warn!(
                     message = crate::logmsg::XDG_STATE_HOME_IGNORED,
@@ -321,13 +359,26 @@ fn user_place(
                     state = %state.display()
                 );
             }
+            if let Some(xdg) = env("XDG_CONFIG_HOME") {
+                tracing::warn!(
+                    message = crate::logmsg::XDG_CONFIG_HOME_IGNORED,
+                    xdg_config_home = %xdg,
+                    config = %config.display()
+                );
+            }
             tracing::debug!(
                 message = crate::logmsg::INVOKER_STATE,
                 user = %user.name,
                 state = %state.display()
             );
+            tracing::debug!(
+                message = crate::logmsg::INVOKER_CONFIG,
+                user = %user.name,
+                config = %config.display()
+            );
             Ok(UserPlace {
                 state,
+                config: Some(config),
                 invoker: Some(user),
             })
         }
@@ -353,15 +404,21 @@ pub fn assemble() -> Result<Env, CliError> {
     }
 }
 
-/// How this run reads and writes the user's files (§4.5), without probing
-/// the rest of the host, for `render` of another machine: as the user who
-/// elevated the run, else as this account.
-pub fn user_files() -> Result<Rc<dyn FileAccess>, CliError> {
+/// The user's own files this run reads (§4.5, §5.3), without probing the
+/// rest of the host, for `render` of another machine: through the user who
+/// elevated the run, else as this account, and where the user config is.
+pub fn user_side() -> Result<UserSide, CliError> {
     let place = match seam()? {
         Some((fixture, state_dir)) => fixture_place(&read_fixture(&fixture)?, &state_dir)?,
         None => host_place()?,
     };
-    Ok(place.files())
+    Ok(place.side())
+}
+
+/// This account's user config, where it has a home to find it in: none is
+/// no config to read.
+fn own_config() -> Option<PathBuf> {
+    bosun_io::paths::config_path().ok()
 }
 
 /// The test seam's fixture and state dir when it is active, said on stderr;
@@ -778,7 +835,10 @@ fn host_machine(
     let place = user_place(
         Os::Linux,
         machine.privilege(),
-        user,
+        Own {
+            state: user,
+            config: own_config(),
+        },
         bosun_io::paths::env_var,
         bosun_host::passwd_account,
     )?;
@@ -806,6 +866,7 @@ fn host_machine(
     };
     let place = UserPlace {
         state: user.clone(),
+        config: own_config(),
         invoker: None,
     };
     let machine = bosun_host::WindowsMachine::new(
@@ -825,7 +886,10 @@ fn host_place() -> Result<UserPlace, CliError> {
     user_place(
         Os::Linux,
         bosun_host::unix_privilege(),
-        bosun_io::paths::state_path(Scope::User).map_err(env_err)?,
+        Own {
+            state: bosun_io::paths::state_path(Scope::User).map_err(env_err)?,
+            config: own_config(),
+        },
         bosun_io::paths::env_var,
         bosun_host::passwd_account,
     )
@@ -836,6 +900,7 @@ fn host_place() -> Result<UserPlace, CliError> {
 fn host_place() -> Result<UserPlace, CliError> {
     Ok(UserPlace {
         state: bosun_io::paths::state_path(Scope::User).map_err(env_err)?,
+        config: own_config(),
         invoker: None,
     })
 }
@@ -913,6 +978,7 @@ fn from_host() -> Result<Env, CliError> {
         option_keys,
         lock_dir: place.lock_dir(),
         user_files: files,
+        config: place.config.clone(),
         machine,
         exec: Exec::Host { runner, fetcher },
         system_hidden: Cell::new(false),
@@ -960,10 +1026,11 @@ fn fixture_home(fx: &Fixture, state_dir: &str) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(state_dir).join("home"))
 }
 
-/// Whose user state, lock and files the seam's run uses ([`user_place`]).
-/// The seam's user keeps state under the default state dir of their home;
-/// an elevated run's own is root's, a home of its own in the seam. Under
-/// sudo it is the invoking user's, by the fixture's passwd, read and
+/// Whose user state, lock, config and files the seam's run uses
+/// ([`user_place`]). The seam's user keeps state under the default state dir
+/// of their home; an elevated run's own is root's, a home of its own in the
+/// seam. The config is where the environment says, as on a real host. Under
+/// sudo they are the invoking user's, by the fixture's passwd, read and
 /// written as them.
 fn fixture_place(fx: &Fixture, state_dir: &str) -> Result<UserPlace, CliError> {
     let (os, _) = fixture_platform(fx)?;
@@ -975,7 +1042,10 @@ fn fixture_place(fx: &Fixture, state_dir: &str) -> Result<UserPlace, CliError> {
     user_place(
         os,
         privilege,
-        bosun_io::paths::state_under_home(&own_home),
+        Own {
+            state: bosun_io::paths::state_under_home(&own_home),
+            config: own_config(),
+        },
         bosun_io::paths::env_var,
         |name| {
             fx.passwd.get(name).map(|a| Account {
@@ -1123,6 +1193,7 @@ fn from_fixture(path: &str, state_dir: &str) -> Result<Env, CliError> {
         option_keys,
         lock_dir: place.lock_dir(),
         user_files: files,
+        config: place.config.clone(),
         machine: Box::new(machine),
         exec: Exec::Fixture(Box::new(FixtureStepRunner::new(
             fx.fail_step,
@@ -1310,7 +1381,16 @@ mod tests {
     fn own() -> UserPlace {
         UserPlace {
             state: PathBuf::from("/root/.local/state/bosun/state.json"),
+            config: Some(PathBuf::from("/root/.config/bosun/config.yaml")),
             invoker: None,
+        }
+    }
+
+    fn own_files() -> Own {
+        let place = own();
+        Own {
+            state: place.state,
+            config: place.config,
         }
     }
 
@@ -1319,7 +1399,7 @@ mod tests {
         let place = user_place(
             Os::Linux,
             Privilege::Elevated,
-            own().state,
+            own_files(),
             sudo_by("ben"),
             ben,
         )
@@ -1328,6 +1408,7 @@ mod tests {
             place,
             UserPlace {
                 state: PathBuf::from("/srv/ben/.local/state/bosun/state.json"),
+                config: Some(PathBuf::from("/srv/ben/.config/bosun/config.yaml")),
                 invoker: Some(Invoker {
                     name: "ben".to_string(),
                     uid: 1000,
@@ -1353,7 +1434,7 @@ mod tests {
     #[test]
     fn a_run_not_elevated_on_windows_or_named_by_no_tool_keeps_its_own_state() {
         let place = |os, privilege, env: &dyn Fn(&str) -> Option<String>| {
-            user_place(os, privilege, own().state, env, ben).unwrap()
+            user_place(os, privilege, own_files(), env, ben).unwrap()
         };
         assert_eq!(
             place(Os::Linux, Privilege::Unelevated, &sudo_by("ben")),
@@ -1375,7 +1456,7 @@ mod tests {
         let err = user_place(
             Os::Linux,
             Privilege::Elevated,
-            own().state,
+            own_files(),
             sudo_by("ghost"),
             ben,
         )

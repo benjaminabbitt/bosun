@@ -206,8 +206,10 @@ root's own state and lock, which the user's runs would never see; the remedy is 
 the passwd database, or to run bosun as root itself, without sudo or doas. `pkexec` (`PKEXEC_UID` only) is not read: a run under it
 uses root's own. Windows needs nothing: an elevated terminal runs as the same user with the
 same `%LOCALAPPDATA%` (over-the-shoulder elevation with another account's credentials runs as
-that account, whose state and lock they then are). The user config and the cache keep their
-rules, so under `sudo` they are root's.
+that account, whose state and lock they then are). The user config is the invoking user's too
+(§5.3): `<home>/.config/bosun/config.yaml`, read as them, their `XDG_CONFIG_HOME` not read and,
+when set, said once (`XDG_CONFIG_HOME_IGNORED`), for the reasons `XDG_STATE_HOME` is not. The
+cache keeps its rule, so under `sudo` it is root's.
 
 **The user's files are read and written as the user — DECIDED, built.** Root never does I/O
 in the user's tree: a symlink the user planted (`locks` → `/etc`) would have root write, and
@@ -772,12 +774,19 @@ trait BackendFactory {
 |---|---|
 | command-line flag | `--installer brew,cargo` |
 | environment | `BOSUN_INSTALLER=brew,cargo` |
-| user config | `<config dir>/bosun/config.yaml`: `installer: [brew, cargo]` |
+| user config | `<config dir>/bosun/config.yaml`: `installer: [brew, cargo]`; under `sudo` or `doas`, the invoking user's `<home>/.config/bosun/config.yaml`, read as them (§4.5) |
 | built in | every registered backend, user-scope ones before system-scope ones (so nothing needs root or Administrator when a user-scope backend can do it), each group in the order `bosun backends` lists them |
 
   Each level is an ordered list; backends it doesn't mention fall back to the next level. A user
   config that doesn't load (unknown key, a newer `version`) is an error, never a silently
   dropped preference.
+- **Under elevation the preference is the invoking user's (DECIDED, built).** `sudo bosun
+  install` picks backends in the order the user's own runs do: the user config is theirs, at
+  `<home>/.config/bosun/config.yaml` from the passwd database (`paths::config_under_home`), read
+  through `FileAccess` as them (§4.5). sudo's `env_reset` drops their `XDG_CONFIG_HOME`, and one
+  that survives cannot be told from root's, so it is not read; an elevated run that finds it set
+  says so once (`XDG_CONFIG_HOME_IGNORED`, naming the config it reads). `render` for another
+  machine reads the same config (`env::user_side`).
 
 ### 5.4 Package identity and name mapping
 
@@ -1809,6 +1818,7 @@ under a pty on Unix only.
 | TV-24 | under elevation the user-scope state is the invoking user's too (§4.5, §4.6): `user_place` gives `<home>/.local/state/bosun/state.json` (`paths::state_under_home`) and its locks beside it, `FileStateStore::with_user_files` reads, locks and writes it through `AsUser` (the system state stays `DirectFiles`), and `LinuxMachine::invoked_by` makes `Machine::invoking_user` the same invoker (`DOAS_USER` too) with that user state; `INVOKER_STATE`. The seam keeps every user's state under their home, root's own under `state/root` | landed; scenarios: under sudo `status` reports the ripgrep the user's run installed, `prune` drops a gone manifest's claim in the user's state, `lock` keeps the version the user's state records, root holds no user state; under doas an elevated install's system claim names ann; unit tests: the user state goes through its files and the system state does not, `invoked_by`; real tier (debian 13): a user `state.json` symlinked to `/etc/shadow` makes `sudo bosun status` fail as not readable by this user; red before: root's own (empty) user state (seam: not installed, nothing to apply, lock pins 14.1.1; real tier: status succeeded), and the doas claim named the fixture's own user |
 | TV-25 | an elevating user the passwd database lacks (`SUDO_USER`, `DOAS_USER`) is an error before anything runs (`user_place` → `CliError::Environment`, `errmsg::INVOKER_UNKNOWN`, `INVOKER_NOT_IN_PASSWD`, `INVOKER_UNKNOWN_REMEDY`: add them to passwd, or run as root itself), not a warning and root's own state and lock; `XDG_STATE_HOME` set under elevation is warned of once (`logmsg::XDG_STATE_HOME_IGNORED`) | landed; scenarios: sudo by ghost makes `lock` fail naming ghost and the remedy, no lock anywhere; sudo with `XDG_STATE_HOME` set warns once and writes the user's lock under their home; unit test of the error text; red before: the lock went to root's state, and no warning |
 | TV-26 | under elevation the manifest is the invoking user's file too (§4.5): `FileAccess` gains `is_dir`, `canonicalize` and `write_in_place`; `manifest_file`, `load_checked`, `canonical_manifest`, `claim_manifest_path`, the `bosun.lock` warning, `add` / `remove` / `export` / `migrate` (and its `.v<N>` original) and `render` (`env::user_files`) go through `Env::user_files`; `AsUser` resolves by an `O_PATH` descriptor passed back by `SCM_RIGHTS` (`/proc/self/fd`, `F_GETPATH` on macOS) and writes in place, so a symlinked manifest stays one | landed; scenarios (seam, `-vv` logs the child's `exists` / `is directory` / `read` / `resolve` / `write in place` on the manifest; add through a symlinked manifest keeps the link and keys the lock by its target); real tier in `debian:13`: `sudo bosun install` of a manifest linked to a root-only `/etc` file fails `Permission denied`, `sudo bosun add` through a link to a root file in `/etc` fails and leaves it as it was; red before: the install read it and the add rewrote the `/etc` file |
+| TV-27 | under elevation the user config is the invoking user's (§5.3): `user_place` gives `<home>/.config/bosun/config.yaml` (`paths::config_under_home`), `XDG_CONFIG_HOME` set is warned of once (`logmsg::XDG_CONFIG_HOME_IGNORED`); `config_installer` reads it through `FileAccess` (`Env::user_side`, `env::user_side` for `render`). The seam gives elevated runs root's own `HOME` and drops `XDG_CONFIG_HOME`, as sudo does; the user's config is under their home | landed; scenarios: under sudo the user's `installer: [apt]` locks apt's ripgrep (read as them, logged), and with `XDG_CONFIG_HOME` naming a config preferring cargo, it is warned of once and not read; red before: the elevated run read root's own (none) and locked cargo's |
 
 **First real-host smoke run (2026-10-14, release build, Debian 13, read-only `--plan` and
 `lock` in a scratch dir).** `backends` found apt 3.0.3, cargo 1.96.1 and github-release; jq

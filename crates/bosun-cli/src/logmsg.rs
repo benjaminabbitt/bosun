@@ -71,6 +71,16 @@ pub const LOCK_KEPT: &str = "--scope left the package's scope out; its lock entr
 pub const INVOKER_STATE: &str =
     "elevated: using the user state and lock of the user who elevated, under their home's .local/state, as them";
 
+/// An elevated run reads the user config of the user who elevated it, in
+/// the default config dir of their passwd home, as that user (§5.3).
+pub const INVOKER_CONFIG: &str =
+    "elevated: using the user config of the user who elevated, under their home's .config, as them";
+
+/// An elevated run found `XDG_CONFIG_HOME` set: it cannot be told from
+/// root's, so the invoking user's config is read under their home's default
+/// config dir instead.
+pub const XDG_CONFIG_HOME_IGNORED: &str = "XDG_CONFIG_HOME is not read under elevation, as it cannot be told from root's; using the invoking user's <home>/.config";
+
 /// An elevated run found `XDG_STATE_HOME` set: it cannot be told from root's,
 /// so the invoking user's state and lock are under their home's default
 /// state dir instead.

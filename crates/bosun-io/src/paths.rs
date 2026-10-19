@@ -112,6 +112,15 @@ pub fn state_under_home(home: &Path) -> PathBuf {
         .join("state.json")
 }
 
+/// The user config of the user whose home is `home`, in the default config
+/// dir: `<home>/.config/bosun/config.yaml`. Where an elevated run finds the
+/// config of the user who elevated it (§5.3): their `XDG_CONFIG_HOME` is not
+/// in the environment sudo leaves, and one that is cannot be told from
+/// root's.
+pub fn config_under_home(home: &Path) -> PathBuf {
+    home.join(".config").join("bosun").join("config.yaml")
+}
+
 /// The lock for the manifest at `manifest` (its canonical path) in `dir`:
 /// named by a hash of the path, so every project gets its own and none needs
 /// a name that is safe on every filesystem. The lock records the path too,
@@ -209,6 +218,14 @@ mod tests {
         assert_eq!(
             locks_beside(&state),
             PathBuf::from("/home/ben/.local/state/bosun/locks")
+        );
+    }
+
+    #[test]
+    fn a_users_config_under_their_home_is_in_the_default_config_dir() {
+        assert_eq!(
+            config_under_home(Path::new("/home/ben")),
+            PathBuf::from("/home/ben/.config/bosun/config.yaml")
         );
     }
 
